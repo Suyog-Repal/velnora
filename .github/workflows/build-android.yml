@@ -13,50 +13,105 @@ permissions:
 jobs:
   build-android:
     name: Build Velnora Debug APK
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       CI: true
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
-          node-version: 22
+          node-version: 22.13.0
           cache: npm
 
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Verify TypeScript
-        run: npm run build
-
       - name: Setup Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: 17
 
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
+        with:
+          packages: |
+            platform-tools
+            platforms;android-37
+            build-tools;37.0.0
+      - name: Accept Android SDK licenses
+        shell: bash
+        run: |
+          test -n "$ANDROID_HOME"
+          test -d "$ANDROID_HOME"
+          yes | sdkmanager --licenses >/dev/null
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v6
+        uses: gradle/actions/setup-gradle@v6.4.1
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check dependency compatibility
+        run: npm ls expo react react-native lucide-react-native
+
+      - name: Verify TypeScript
+        run: npm run typecheck
+
+      - name: Run tests
+        run: npm test
 
       - name: Generate Android project
-        run: npx expo prebuild --platform android --clean --no-install
+        run: npx expo prebuild --platform android --clean --non-interactive
+
+      - name: Verify Expo SMS autolinking
+        shell: bash
+        run: |
+          autolinking_output="$(npx expo-modules-autolinking resolve --platform android)"
+          printf '%s\n' "$autolinking_output"
+          if ! grep -Fq '@velnora/sms' <<<"$autolinking_output"; then
+            echo "::error::@velnora/sms was not discovered by Expo Android autolinking"
+            exit 1
+          fi
+
+      - name: Verify generated Android project
+        working-directory: android
+        shell: bash
+        run: |
+          test -s settings.gradle
+          test -s app/build.gradle
+          test -s app/src/main/AndroidManifest.xml
+          manifest="app/src/main/AndroidManifest.xml"
+          grep -Fq 'com.velnora.sms.VelnoraSmsReceiver' "$manifest"
+          grep -Fq 'android.permission.RECEIVE_SMS' "$manifest"
+          chmod +x gradlew
+          projects="$(./gradlew --no-daemon projects --console plain)"
+          printf '%s\n' "$projects"
+          if ! grep -Eiq 'velnora.sms|velnora-sms' <<<"$projects"; then
+            echo "::error::The Velnora SMS Android Gradle project is missing from autolinking"
+            exit 1
+          fi
 
       - name: Build APK
         working-directory: android
         run: |
           chmod +x gradlew
-          ./gradlew assembleDebug
+          ./gradlew --no-daemon assembleDebug --stacktrace
+
+      - name: Verify APK
+        shell: bash
+        run: |
+          apk_path="android/app/build/outputs/apk/debug/app-debug.apk"
+          if [[ ! -s "$apk_path" ]]; then
+            echo "::error::Expected APK is missing or empty: $apk_path"
+            exit 1
+          fi
+          stat --printf='APK: %n (%s bytes)\n' "$apk_path"
 
       - name: Upload APK
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: Velnora-Debug-APK
-          path: android/app/build/outputs/apk/debug/*.apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
           retention-days: 14
