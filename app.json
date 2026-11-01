@@ -1,0 +1,36 @@
+{
+  "expo": {
+    "name": "velnora",
+    "slug": "velnora",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#E6F4FE",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false,
+      "package": "com.anonymous.velnora"
+    },
+    "plugins": [
+      [
+        "./plugins/withVelnoraSms",
+        {
+          "supportedSenderPatterns": [
+            "^[A-Z0-9 -]{4,30}$"
+          ]
+        }
+      ]
+    ],
+    "web": {
+      "favicon": "./assets/favicon.png"
+    }
+  }
+}
