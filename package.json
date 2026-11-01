@@ -27,5 +27,10 @@
     "test": "node --experimental-strip-types transactionParser.test.js",
     "api:test": "python -m pytest backend/app"
   },
+  "expo": {
+    "autolinking": {
+      "nativeModulesDir": "./modules"
+    }
+  },
   "private": true
 }

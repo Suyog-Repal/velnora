@@ -13,7 +13,7 @@ permissions:
 jobs:
   build-android:
     name: Build Velnora Debug APK
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       CI: true
 
@@ -24,14 +24,8 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 22.13.0
           cache: npm
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Verify TypeScript
-        run: npm run build
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -40,23 +34,87 @@ jobs:
           java-version: 17
 
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
+        with:
+          accept-android-sdk-licenses: true
+          packages: |
+            platform-tools
+            platforms;android-37
+            build-tools;37.0.0
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v6
 
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify dependency compatibility
+        run: |
+          npm ls expo react react-native lucide-react-native
+          npx expo-doctor
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test transaction parser
+        run: npm test
+
+      - name: Inspect Expo prebuild configuration
+        run: npx expo config --type prebuild
+
       - name: Generate Android project
-        run: npx expo prebuild --platform android --clean --no-install
+        run: npx expo prebuild --platform android --clean --non-interactive
+
+      - name: Verify SMS module autolinking
+        shell: bash
+        run: |
+          npx expo-modules-autolinking resolve --platform android > /tmp/velnora-autolinking.json
+          node <<'NODE'
+          const fs = require('fs');
+          const path = require('path');
+
+          const result = JSON.parse(fs.readFileSync('/tmp/velnora-autolinking.json', 'utf8'));
+          const module = (result.modules || []).find((entry) =>
+            entry.packageName === '@velnora/sms' || entry.modules?.includes('VelnoraSmsModule'),
+          );
+          if (!module) {
+            throw new Error('Velnora SMS module is missing from Expo Android autolinking');
+          }
+          const source = path.join(module.path, 'android', 'src', 'main', 'java', 'com', 'velnora', 'sms', 'VelnoraSmsModule.kt');
+          if (!fs.existsSync(source)) {
+            throw new Error(`Autolinking resolved an unexpected SMS module path: ${source}`);
+          }
+          console.log(`Autolinked ${module.packageName} from ${module.path}`);
+          console.log(`Kotlin source present: ${source}`);
+          NODE
+          grep -q 'expoAutolinking.useExpoModules' android/settings.gradle
+          grep -q 'autolinkLibrariesWithApp' android/app/build.gradle
+
+      - name: Verify generated SMS manifest
+        shell: bash
+        run: |
+          manifest=android/app/src/main/AndroidManifest.xml
+          test -f "$manifest"
+          grep -q 'android.permission.RECEIVE_SMS' "$manifest"
+          grep -q 'com.velnora.sms.VelnoraSmsReceiver' "$manifest"
+          grep -q 'android.permission.BROADCAST_SMS' "$manifest"
 
       - name: Build APK
         working-directory: android
         run: |
           chmod +x gradlew
-          ./gradlew assembleDebug
+          ./gradlew assembleDebug --stacktrace
+
+      - name: Verify APK
+        shell: bash
+        run: |
+          apk=android/app/build/outputs/apk/debug/app-debug.apk
+          test -s "$apk" || { echo "APK missing or empty: $apk"; exit 1; }
+          stat -c '%n %s bytes' "$apk"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: Velnora-Debug-APK
-          path: android/app/build/outputs/apk/debug/*.apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
           retention-days: 14
