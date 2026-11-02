@@ -4,8 +4,10 @@
   "main": "index.ts",
   "dependencies": {
     "@react-native-async-storage/async-storage": "^2.2.0",
+    "@react-native-community/netinfo": "^12.0.1",
     "expo": "~58.0.21",
     "expo-secure-store": "~58.0.2",
+    "expo-sqlite": "~58.0.15",
     "expo-status-bar": "~58.0.4",
     "lucide-react-native": "^1.66.0",
     "react": "19.3.0",
@@ -24,8 +26,8 @@
     "web": "expo start --web",
     "typecheck": "tsc --noEmit",
     "build": "tsc --noEmit",
-    "test": "node --experimental-strip-types transactionParser.test.js",
-    "api:test": "python -m pytest backend/app"
+    "test": "node --experimental-strip-types transactionParser.test.js && node --experimental-strip-types --experimental-sqlite src/db/__tests__/database.test.ts && node --experimental-strip-types --experimental-sqlite src/services/__tests__/syncEngine.test.ts && node --experimental-strip-types --experimental-sqlite src/services/__tests__/smsIntegration.test.ts",
+    "api:test": "PYTHONPATH=. backend/.venv/bin/pytest backend/app"
   },
   "expo": {
     "autolinking": {

@@ -27,7 +27,8 @@
             "^[A-Z0-9 -]{4,30}$"
           ]
         }
-      ]
+      ],
+      "expo-sqlite"
     ],
     "web": {
       "favicon": "./assets/favicon.png"

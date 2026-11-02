@@ -1,0 +1,199 @@
+"""
+SQLAlchemy ORM Models for Velnora PostgreSQL Cloud Database.
+Represents users, profiles, categories, transactions, devices, and refresh tokens.
+Implements exact integer monetary precision (amount_paise), multi-device tracking,
+and soft-deletion tombstones for reliable two-way sync.
+"""
+
+from datetime import datetime, timezone
+from decimal import Decimal
+from uuid import uuid4
+
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    Column,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    Numeric,
+    Sequence,
+    String,
+    Text,
+    UniqueConstraint,
+    text,
+)
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import relationship
+
+from .session import Base
+
+
+def utcnow() -> datetime:
+    """Return timezone-aware current UTC datetime."""
+    return datetime.now(timezone.utc)
+
+
+class User(Base):
+    """Core user account entity."""
+    __tablename__ = "users"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    email = Column(String(255), unique=True, nullable=False, index=True)
+    password_hash = Column(String(255), nullable=False)
+    account_status = Column(String(32), default="active", nullable=False)
+    created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+    # Relationships
+    profile = relationship("UserProfile", back_populates="user", uselist=False, cascade="all, delete-orphan")
+    transactions = relationship("Transaction", back_populates="user", cascade="all, delete-orphan")
+    categories = relationship("Category", back_populates="user", cascade="all, delete-orphan")
+    devices = relationship("Device", back_populates="user", cascade="all, delete-orphan")
+    refresh_tokens = relationship("RefreshToken", back_populates="user", cascade="all, delete-orphan")
+
+    @property
+    def full_name(self) -> str:
+        return self.profile.full_name if self.profile else ""
+
+    def __repr__(self) -> str:
+        return f"<User id={self.id} email={self.email}>"
+
+
+class UserProfile(Base):
+    """User profile and financial preferences."""
+    __tablename__ = "user_profiles"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=False, index=True)
+    full_name = Column(String(120), nullable=False)
+    currency = Column(String(10), default="INR", nullable=False)
+    theme = Column(String(20), default="system", nullable=False)
+    created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+    user = relationship("User", back_populates="profile")
+
+    def __repr__(self) -> str:
+        return f"<UserProfile user_id={self.user_id} name={self.full_name}>"
+
+
+class Category(Base):
+    """Transaction categories (both system defaults and custom user categories)."""
+    __tablename__ = "categories"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True)
+    name = Column(String(80), nullable=False)
+    icon = Column(String(50), default="tag", nullable=False)
+    color = Column(String(20), default="#6366f1", nullable=False)
+    direction = Column(String(20), nullable=False)  # income or expense
+    is_system = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+    # Relationships
+    user = relationship("User", back_populates="categories")
+    transactions = relationship("Transaction", back_populates="category_rel")
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "name", name="uq_categories_user_name"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<Category id={self.id} name={self.name} system={self.is_system}>"
+
+
+class Transaction(Base):
+    """
+    Financial transactions with integer paise precision and sync metadata.
+    amount_paise stores exact monetary value (1 INR = 100 paise) avoiding float errors.
+    """
+    __tablename__ = "transactions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    category_id = Column(UUID(as_uuid=True), ForeignKey("categories.id", ondelete="SET NULL"), nullable=True, index=True)
+    
+    # Monetary amounts: amount_paise is authoritative; amount is for decimal reporting
+    amount = Column(Numeric(12, 2), nullable=False)
+    amount_paise = Column(BigInteger, nullable=False)
+    
+    direction = Column(String(20), nullable=False)  # income or expense
+    counterparty = Column(String(160), nullable=False)
+    category = Column(String(80), nullable=False)
+    description = Column(Text, default="", nullable=False)
+    transaction_date = Column(DateTime(timezone=True), nullable=False, index=True)
+    source = Column(String(32), default="manual", nullable=False)  # manual, sms, sync
+    reference_id = Column(String(160), nullable=True, index=True)
+    fingerprint = Column(String(64), nullable=True, index=True)
+    sync_status = Column(String(32), default="synced", nullable=False)
+    server_version = Column(Integer, default=1, nullable=False)
+    sync_revision = Column(
+        BigInteger,
+        Sequence("sync_revision_seq"),
+        nullable=False,
+        server_default=text("nextval('sync_revision_seq')"),
+        index=True,
+    )
+    deleted_at = Column(DateTime(timezone=True), nullable=True, index=True)
+    created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False, index=True)
+
+    # Relationships
+    user = relationship("User", back_populates="transactions")
+    category_rel = relationship("Category", back_populates="transactions")
+
+    __table_args__ = (
+        Index("ix_transactions_user_date", "user_id", "transaction_date"),
+        Index("ix_transactions_user_ref", "user_id", "reference_id"),
+        Index("ix_transactions_user_fingerprint", "user_id", "fingerprint"),
+        Index("ix_transactions_user_updated", "user_id", "updated_at"),
+        Index("ix_transactions_user_revision", "user_id", "sync_revision"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<Transaction id={self.id} amount_paise={self.amount_paise} counterparty={self.counterparty}>"
+
+
+class Device(Base):
+    """User devices registered for multi-device sync and auditing."""
+    __tablename__ = "devices"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    device_name = Column(String(120), nullable=False)
+    platform = Column(String(32), default="android", nullable=False)
+    device_id = Column(String(120), nullable=False)
+    app_version = Column(String(32), nullable=False)
+    last_active_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+    user = relationship("User", back_populates="devices")
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "device_id", name="uq_devices_user_device"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<Device id={self.id} device_id={self.device_id} user_id={self.user_id}>"
+
+
+class RefreshToken(Base):
+    """Hashed refresh tokens for JWT session rotation and revocation."""
+    __tablename__ = "refresh_tokens"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    token_hash = Column(String(255), unique=True, nullable=False, index=True)
+    device_id = Column(String(120), nullable=True)
+    expires_at = Column(DateTime(timezone=True), nullable=False, index=True)
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+    user = relationship("User", back_populates="refresh_tokens")
+
+    def __repr__(self) -> str:
+        return f"<RefreshToken id={self.id} user_id={self.user_id} revoked={bool(self.revoked_at)}>"

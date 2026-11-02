@@ -1,48 +1,38 @@
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { StatusBar } from 'expo-status-bar';
 import { AppState, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useEffect, useMemo, useState } from 'react';
-import { AuthRequestError, clearSession, createTransaction, loadSession, login, logout, refreshSession, register, requestPasswordReset, saveSession, type Session } from './auth';
+import { clearSession, loadSession, login, logout, refreshSession, register, requestPasswordReset, saveSession, type Session } from './auth';
 import { addSmsReceivedListener, configureSupportedSenderPatterns } from './sms';
-import { DEFAULT_SMS_RULE, parseSmsTransaction, type ParsedSmsTransaction } from './transactionParser';
+import { DEFAULT_SMS_RULE, parseSmsTransaction } from './transactionParser';
 import { palette, useThemeMode, type ThemeMode } from './theme';
 import { ArrowDownLeft, ArrowUpRight, Bell, Chart, ChevronRight, CirclePlus, Eye, EyeOff, Home, KeyRound, LayoutGrid, LockKeyhole, LogOut, PiggyBank, Plus, Search, Settings, Sliders, Target, UserRound, Users, WalletCards, X } from './icons';
+import {
+  initTransactionService,
+  getTransactions,
+  getCategories,
+  addTransaction as recordAddTransaction,
+  addSmsTransaction as recordAddSmsTransaction,
+  syncPendingTransactions,
+} from './src/services/transactionService';
+import { processIncomingSms } from './src/services/smsIntegrationService';
+import type { Direction, TransactionEntity } from './src/db/types';
 
-type Direction = 'income' | 'expense';
 type Tab = 'home' | 'transactions' | 'analytics' | 'budgets' | 'people' | 'profile';
-type Transaction = { id: string; amount: number; direction: Direction; counterparty: string; category: string; description: string; date: string; source?: 'manual' | 'sms'; referenceId?: string; fingerprint?: string };
+type Transaction = TransactionEntity & { date: string; referenceId?: string };
 type Contact = { name: string; received: number; paid: number; count: number };
 
-const STORAGE_KEY = 'velnora.transactions.v1';
-const SYNC_QUEUE_KEY = 'velnora.transaction-sync.v1';
-const categories = ['Food & Dining', 'Groceries', 'Transportation', 'Bills & Utilities', 'Other Expenses'];
+const DEFAULT_CATEGORIES = ['Food & Dining', 'Groceries', 'Transportation', 'Bills & Utilities', 'Other Expenses'];
 const smsRules = [DEFAULT_SMS_RULE];
 
-function persistTransactions(next: Transaction[]) { void AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(next)); }
-async function flushSyncQueue(session: Session) {
-  const raw = await AsyncStorage.getItem(SYNC_QUEUE_KEY);
-  const queued = raw ? JSON.parse(raw) as Transaction[] : [];
-  const remaining: Transaction[] = [];
-  for (const item of queued) {
-    try {
-      await createTransaction(session, { amount: item.amount, direction: item.direction, counterparty: item.counterparty, category: item.category, description: item.description, reference_id: item.referenceId ?? item.id });
-    } catch (error) {
-      if (error instanceof AuthRequestError && (error.kind === 'connection' || error.kind === 'server')) remaining.push(item);
-    }
-  }
-  await AsyncStorage.setItem(SYNC_QUEUE_KEY, JSON.stringify(remaining));
+function toUiTransaction(entity: TransactionEntity): Transaction {
+  return {
+    ...entity,
+    date: entity.transaction_date,
+    referenceId: entity.reference_id ?? undefined,
+  };
 }
-async function queueForSync(item: Transaction, session: Session | null) {
-  const raw = await AsyncStorage.getItem(SYNC_QUEUE_KEY);
-  const queued = raw ? JSON.parse(raw) as Transaction[] : [];
-  if (!queued.some((entry) => entry.id === item.id)) queued.push(item);
-  await AsyncStorage.setItem(SYNC_QUEUE_KEY, JSON.stringify(queued));
-  if (session) await flushSyncQueue(session);
-}
-function parsedToTransaction(parsed: ParsedSmsTransaction): Transaction {
-  return { id: parsed.referenceId, amount: parsed.amount, direction: parsed.direction, counterparty: parsed.merchant, category: parsed.direction === 'income' ? 'Other Income' : 'Other Expenses', description: `Detected from ${parsed.bankSender}`, date: parsed.transactionDate, source: 'sms', referenceId: parsed.referenceId, fingerprint: parsed.fingerprint };
-}
+
 function money(value: number) { return `₹${value.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`; }
 
 export default function App() {
@@ -59,12 +49,13 @@ export default function App() {
   const [showPassword, setShowPassword] = useState(false);
   const [termsAccepted, setTermsAccepted] = useState(false);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [categoriesList, setCategoriesList] = useState<string[]>(DEFAULT_CATEGORIES);
   const [tab, setTab] = useState<Tab>('home');
   const [showForm, setShowForm] = useState(false);
   const [direction, setDirection] = useState<Direction>('expense');
   const [amount, setAmount] = useState('');
   const [counterparty, setCounterparty] = useState('');
-  const [category, setCategory] = useState(categories[0]);
+  const [category, setCategory] = useState(DEFAULT_CATEGORIES[0]);
   const [mode, setMode] = useThemeMode();
 
   const dark = mode === 'dark';
@@ -77,11 +68,63 @@ export default function App() {
   }, [transactions]);
 
   useEffect(() => { loadSession().then(async (stored) => { if (!stored) { setAuthReady(true); return; } try { setSession(await refreshSession(stored)); } catch { await clearSession(); } finally { setAuthReady(true); } }); }, []);
-  useEffect(() => { void AsyncStorage.getItem(STORAGE_KEY).then((value) => { if (value) setTransactions(JSON.parse(value) as Transaction[]); }); }, []);
-  useEffect(() => { if (!session) return; void flushSyncQueue(session); const subscription = AppState.addEventListener('change', (state) => { if (state === 'active') void flushSyncQueue(session); }); return () => subscription.remove(); }, [session]);
+
+  // Initialize SQLite storage and load local categories
+  useEffect(() => {
+    let isMounted = true;
+    initTransactionService().then(async () => {
+      const storedCats = await getCategories();
+      if (isMounted && storedCats.length > 0) {
+        setCategoriesList(storedCats.map((c) => c.name));
+      }
+    }).catch((err) => {
+      console.error('Failed to initialize local SQLite storage:', err);
+    });
+    return () => { isMounted = false; };
+  }, []);
+
+  // Reactive transaction loading scoped to active authenticated user session
+  useEffect(() => {
+    let isMounted = true;
+    if (session?.user?.id) {
+      void getTransactions(session.user.id).then((storedTx) => {
+        if (isMounted) {
+          setTransactions(storedTx.map(toUiTransaction));
+        }
+      });
+    } else {
+      setTransactions([]);
+    }
+    return () => { isMounted = false; };
+  }, [session?.user?.id]);
+
+  useEffect(() => {
+    if (!session) return;
+    void syncPendingTransactions(session);
+    const subscription = AppState.addEventListener('change', (state) => {
+      if (state === 'active') void syncPendingTransactions(session);
+    });
+    return () => subscription.remove();
+  }, [session]);
+
   useEffect(() => {
     configureSupportedSenderPatterns(smsRules.map((rule) => rule.senderPattern));
-    const subscription = addSmsReceivedListener((event) => { const parsed = parseSmsTransaction(event, smsRules); if (!parsed) return; const next = parsedToTransaction(parsed); setTransactions((current) => { if (current.some((item) => item.referenceId === next.referenceId || item.fingerprint === next.fingerprint)) return current; const updated = [next, ...current]; persistTransactions(updated); void queueForSync(next, session); return updated; }); });
+    const subscription = addSmsReceivedListener(async (event) => {
+      try {
+        const result = await processIncomingSms(event, session, smsRules);
+        if (result.success && result.transaction) {
+          const uiTx = toUiTransaction(result.transaction);
+          setTransactions((current) => {
+            if (current.some((item) => item.id === uiTx.id || (uiTx.reference_id && item.reference_id === uiTx.reference_id))) {
+              return current;
+            }
+            return [uiTx, ...current];
+          });
+        }
+      } catch (err) {
+        console.error('Failed to process incoming SMS alert:', err);
+      }
+    });
     return () => subscription?.remove();
   }, [session]);
 
@@ -93,7 +136,29 @@ export default function App() {
     try { const next = screen === 'signup' ? await register(fullName.trim(), normalizedEmail, password) : await login(normalizedEmail, password); await saveSession(next); setSession(next); setPassword(''); setConfirmPassword(''); } catch (caught) { setAuthError(caught instanceof Error ? caught.message : 'Authentication failed. Try again.'); } finally { setAuthBusy(false); }
   };
   const submitForgot = async () => { setAuthBusy(true); setAuthError(''); try { await requestPasswordReset(email.trim().toLowerCase()); setAuthNotice('Password reset delivery is not configured in this environment.'); } catch (caught) { setAuthError(caught instanceof Error ? caught.message : 'Password reset is unavailable.'); } finally { setAuthBusy(false); } };
-  const addTransaction = () => { const value = Number(amount); if (!value || value <= 0 || !counterparty.trim()) return; const next: Transaction = { id: `${Date.now()}-${Math.random().toString(36).slice(2)}`, amount: value, direction, counterparty: counterparty.trim(), category, description: direction === 'income' ? `Received from ${counterparty.trim()}` : `Paid to ${counterparty.trim()}`, date: new Date().toISOString(), source: 'manual' }; const updated = [next, ...transactions]; setTransactions(updated); persistTransactions(updated); void queueForSync(next, session); setAmount(''); setCounterparty(''); setShowForm(false); };
+
+  const addTransaction = async () => {
+    const value = Number(amount);
+    if (!value || value <= 0 || !counterparty.trim()) return;
+    try {
+      const created = await recordAddTransaction({
+        amount: value,
+        direction,
+        counterparty: counterparty.trim(),
+        category,
+        description: direction === 'income' ? `Received from ${counterparty.trim()}` : `Paid to ${counterparty.trim()}`,
+        source: 'manual',
+      }, session);
+      const uiRecord = toUiTransaction(created);
+      setTransactions((current) => [uiRecord, ...current.filter((item) => item.id !== uiRecord.id)]);
+      setAmount('');
+      setCounterparty('');
+      setShowForm(false);
+    } catch (err) {
+      console.error('Failed to record transaction in local SQLite database:', err);
+    }
+  };
+
   if (!authReady) return <AuthLoading colors={colors} />;
   if (!session) return <AuthScreens screen={authScreen} setScreen={setAuthScreen} fullName={fullName} setFullName={setFullName} email={email} setEmail={setEmail} password={password} setPassword={setPassword} confirmPassword={confirmPassword} setConfirmPassword={setConfirmPassword} showPassword={showPassword} setShowPassword={setShowPassword} termsAccepted={termsAccepted} setTermsAccepted={setTermsAccepted} busy={authBusy} error={authError} notice={authNotice} onSubmit={submitAuth} onForgot={submitForgot} colors={colors} />;
 
@@ -101,16 +166,16 @@ export default function App() {
     <ScrollView contentContainerStyle={styles.content}>
       <View style={styles.header}><View><Text style={[styles.overline, { color: palette.emerald }]}>VELNORA</Text><Text style={[styles.title, { color: colors.text }]}>{tab === 'home' ? `Good evening, ${session.user.full_name.split(' ')[0]}` : tab.charAt(0).toUpperCase() + tab.slice(1)}</Text></View><Pressable style={[styles.iconButton, { backgroundColor: colors.card, borderColor: colors.border }]} onPress={() => setTab('profile')}><Text style={[styles.avatarText, { color: palette.navy }]}>{session.user.full_name.charAt(0).toUpperCase()}</Text></Pressable></View>
       {tab === 'home' && <HomeScreen transactions={transactions} totals={totals} colors={colors} onAddIncome={() => { setDirection('income'); setShowForm(true); }} onAddExpense={() => { setDirection('expense'); setShowForm(true); }} onViewAll={() => setTab('transactions')} />}
-      {tab === 'transactions' && <TransactionsScreen transactions={transactions} colors={colors} onAdd={() => setShowForm(true)} />}
-      {tab === 'analytics' && <AnalyticsScreen transactions={transactions} totals={totals} colors={colors} />}
+      {tab === 'transactions' && <TransactionsScreen transactions={transactions} categories={categoriesList} colors={colors} onAdd={() => setShowForm(true)} />}
+      {tab === 'analytics' && <AnalyticsScreen transactions={transactions} categories={categoriesList} totals={totals} colors={colors} />}
       {tab === 'budgets' && <BudgetsScreen colors={colors} onAdd={() => {}} />}
       {tab === 'people' && <PeopleScreen contacts={contacts} colors={colors} onAdd={() => setShowForm(true)} />}
-      {tab === 'profile' && <ProfileScreen session={session} colors={colors} mode={mode} setMode={setMode} onLogout={async () => { await logout(session); setSession(null); setAuthScreen('welcome'); }} />}
+      {tab === 'profile' && <ProfileScreen session={session} colors={colors} mode={mode} setMode={setMode} onLogout={async () => { await logout(session); setSession(null); setTransactions([]); setAuthScreen('welcome'); }} />}
     </ScrollView>
     <Pressable style={styles.fab} onPress={() => setShowForm(true)}><Plus color="#FFFFFF" size={20} /><Text style={styles.fabText}>Add transaction</Text></Pressable>
     <BottomNav tab={tab} setTab={setTab} colors={colors} />
   </View>
-  <Modal visible={showForm} transparent animationType="slide" onRequestClose={() => setShowForm(false)}><View style={styles.modalBackdrop}><View style={[styles.modal, { backgroundColor: colors.card }]}><View style={styles.modalHeader}><Text style={[styles.modalTitle, { color: colors.text }]}>Record transaction</Text><Pressable onPress={() => setShowForm(false)}><X color={colors.muted} /></Pressable></View><Text style={[styles.label, { color: colors.muted }]}>TYPE</Text><View style={styles.segment}><Pressable onPress={() => setDirection('expense')} style={[styles.segmentItem, direction === 'expense' && styles.segmentActive]}><ArrowUpRight color={direction === 'expense' ? palette.danger : colors.muted} size={17} /><Text style={[styles.segmentText, { color: colors.text }]}>Expense</Text></Pressable><Pressable onPress={() => setDirection('income')} style={[styles.segmentItem, direction === 'income' && styles.segmentActive]}><ArrowDownLeft color={direction === 'income' ? palette.emerald : colors.muted} size={17} /><Text style={[styles.segmentText, { color: colors.text }]}>Income</Text></Pressable></View><Text style={[styles.label, { color: colors.muted }]}>AMOUNT</Text><TextInput value={amount} onChangeText={setAmount} keyboardType="decimal-pad" placeholder="0.00" placeholderTextColor={colors.muted} style={[styles.input, { color: colors.text, borderColor: colors.border }]} /><Text style={[styles.label, { color: colors.muted }]}>MERCHANT OR COUNTERPARTY</Text><TextInput value={counterparty} onChangeText={setCounterparty} placeholder="e.g. Grocery store" placeholderTextColor={colors.muted} style={[styles.input, { color: colors.text, borderColor: colors.border }]} /><Text style={[styles.label, { color: colors.muted }]}>CATEGORY</Text><ScrollView horizontal showsHorizontalScrollIndicator={false}>{categories.map((item) => <Pressable key={item} onPress={() => setCategory(item)} style={[styles.chip, category === item && styles.chipActive]}><Text style={[styles.chipText, { color: category === item ? palette.navy : colors.muted }]}>{item}</Text></Pressable>)}</ScrollView><Pressable style={styles.primaryButton} onPress={addTransaction}><Text style={styles.primaryButtonText}>Save transaction</Text></Pressable></View></View></Modal>
+  <Modal visible={showForm} transparent animationType="slide" onRequestClose={() => setShowForm(false)}><View style={styles.modalBackdrop}><View style={[styles.modal, { backgroundColor: colors.card }]}><View style={styles.modalHeader}><Text style={[styles.modalTitle, { color: colors.text }]}>Record transaction</Text><Pressable onPress={() => setShowForm(false)}><X color={colors.muted} /></Pressable></View><Text style={[styles.label, { color: colors.muted }]}>TYPE</Text><View style={styles.segment}><Pressable onPress={() => setDirection('expense')} style={[styles.segmentItem, direction === 'expense' && styles.segmentActive]}><ArrowUpRight color={direction === 'expense' ? palette.danger : colors.muted} size={17} /><Text style={[styles.segmentText, { color: colors.text }]}>Expense</Text></Pressable><Pressable onPress={() => setDirection('income')} style={[styles.segmentItem, direction === 'income' && styles.segmentActive]}><ArrowDownLeft color={direction === 'income' ? palette.emerald : colors.muted} size={17} /><Text style={[styles.segmentText, { color: colors.text }]}>Income</Text></Pressable></View><Text style={[styles.label, { color: colors.muted }]}>AMOUNT</Text><TextInput value={amount} onChangeText={setAmount} keyboardType="decimal-pad" placeholder="0.00" placeholderTextColor={colors.muted} style={[styles.input, { color: colors.text, borderColor: colors.border }]} /><Text style={[styles.label, { color: colors.muted }]}>MERCHANT OR COUNTERPARTY</Text><TextInput value={counterparty} onChangeText={setCounterparty} placeholder="e.g. Grocery store" placeholderTextColor={colors.muted} style={[styles.input, { color: colors.text, borderColor: colors.border }]} /><Text style={[styles.label, { color: colors.muted }]}>CATEGORY</Text><ScrollView horizontal showsHorizontalScrollIndicator={false}>{categoriesList.map((item) => <Pressable key={item} onPress={() => setCategory(item)} style={[styles.chip, category === item && styles.chipActive]}><Text style={[styles.chipText, { color: category === item ? palette.navy : colors.muted }]}>{item}</Text></Pressable>)}</ScrollView><Pressable style={styles.primaryButton} onPress={addTransaction}><Text style={styles.primaryButtonText}>Save transaction</Text></Pressable></View></View></Modal>
   </SafeAreaView>;
 }
 
@@ -118,13 +183,13 @@ function HomeScreen({ transactions, totals, colors, onAddIncome, onAddExpense, o
   return <><View style={[styles.heroCard, { backgroundColor: palette.navy }]}><Text style={styles.heroLabel}>RECORDED BALANCE</Text><Text style={styles.heroValue}>{money(totals.income - totals.expense)}</Text><Text style={styles.heroHint}>Based on transactions recorded in Velnora. Not a verified bank balance.</Text><View style={styles.metricRow}><Metric label="Income this month" value={money(totals.income)} positive /><Metric label="Expenses this month" value={money(totals.expense)} /></View></View><SectionHeader title="Quick actions" colors={colors} /><View style={styles.actionRow}><ActionButton icon={<ArrowDownLeft color={palette.emerald} />} label="Add income" onPress={onAddIncome} colors={colors} /><ActionButton icon={<ArrowUpRight color={palette.danger} />} label="Add expense" onPress={onAddExpense} colors={colors} /></View><SectionHeader title="Spending overview" action="Analytics" onPress={onViewAll} colors={colors} /><View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}><Text style={[styles.cardTitle, { color: colors.text }]}>Net monthly cash flow</Text><Text style={[styles.flowValue, { color: (totals.income - totals.expense >= 0) ? palette.emerald : palette.danger }]}>{money(totals.income - totals.expense)}</Text><View style={styles.progressTrack}><View style={[styles.progressFill, { width: `${Math.min(100, totals.income ? totals.expense / totals.income * 100 : 0)}%`, backgroundColor: palette.emerald }]} /></View><Text style={[styles.caption, { color: colors.muted }]}>Expenses represent {totals.income ? Math.round(totals.expense / totals.income * 100) : 0}% of recorded income</Text></View><SectionHeader title="Recent transactions" action="See all" onPress={onViewAll} colors={colors} />{transactions.length ? transactions.slice(0, 5).map((item) => <TransactionRow key={item.id} item={item} colors={colors} />) : <EmptyState colors={colors} onAdd={onAddExpense} />}</>;
 }
 
-function TransactionsScreen({ transactions, colors, onAdd }: { transactions: Transaction[]; colors: Colors; onAdd: () => void }) {
+function TransactionsScreen({ transactions, categories = DEFAULT_CATEGORIES, colors, onAdd }: { transactions: Transaction[]; categories?: string[]; colors: Colors; onAdd: () => void }) {
   const [query, setQuery] = useState(''); const [filter, setFilter] = useState<'all' | Direction>('all'); const [categoryFilter, setCategoryFilter] = useState('All categories');
   const filtered = transactions.filter((item) => (filter === 'all' || item.direction === filter) && (categoryFilter === 'All categories' || item.category === categoryFilter) && `${item.counterparty} ${item.category}`.toLowerCase().includes(query.toLowerCase()));
   return <><View style={[styles.searchBox, { backgroundColor: colors.card, borderColor: colors.border }]}><Search color={colors.muted} size={18} /><TextInput value={query} onChangeText={setQuery} placeholder="Search transactions" placeholderTextColor={colors.muted} style={[styles.searchInput, { color: colors.text }]} /></View><View style={styles.filterRow}>{(['all', 'income', 'expense'] as const).map((item) => <Pressable key={item} onPress={() => setFilter(item)} style={[styles.filterChip, filter === item && styles.filterChipActive]}><Text style={[styles.filterChipText, { color: filter === item ? palette.navy : colors.muted }]}>{item === 'all' ? 'All' : item === 'income' ? 'Income' : 'Expenses'}</Text></Pressable>)}</View><ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.categoryScroll}>{['All categories', ...categories].map((item) => <Pressable key={item} onPress={() => setCategoryFilter(item)} style={[styles.chip, categoryFilter === item && styles.chipActive]}><Text style={[styles.chipText, { color: categoryFilter === item ? palette.navy : colors.muted }]}>{item}</Text></Pressable>)}</ScrollView><SectionHeader title={`${filtered.length} transactions`} action="Add" onPress={onAdd} colors={colors} />{filtered.length ? filtered.map((item) => <TransactionRow key={item.id} item={item} colors={colors} />) : <EmptyState colors={colors} onAdd={onAdd} />}</>;
 }
 
-function AnalyticsScreen({ transactions, totals, colors }: { transactions: Transaction[]; totals: { income: number; expense: number }; colors: Colors }) {
+function AnalyticsScreen({ transactions, categories = DEFAULT_CATEGORIES, totals, colors }: { transactions: Transaction[]; categories?: string[]; totals: { income: number; expense: number }; colors: Colors }) {
   const categoryTotals = categories.map((name) => ({ name, value: transactions.filter((item) => item.category === name && item.direction === 'expense').reduce((sum, item) => sum + item.amount, 0) })).filter((item) => item.value > 0);
   const max = Math.max(1, ...categoryTotals.map((item) => item.value));
   return <><View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}><Text style={[styles.cardTitle, { color: colors.text }]}>Income vs expenses</Text><View style={styles.chart}><View style={[styles.chartBar, { height: Math.max(12, Math.min(140, totals.income / 10)), backgroundColor: palette.emerald }]} /><View style={[styles.chartBar, { height: Math.max(12, Math.min(140, totals.expense / 10)), backgroundColor: palette.danger }]} /></View><View style={styles.legend}><Text style={[styles.caption, { color: colors.muted }]}>Income {money(totals.income)}</Text><Text style={[styles.caption, { color: colors.muted }]}>Expenses {money(totals.expense)}</Text></View></View><SectionHeader title="Category spending" colors={colors} />{categoryTotals.length ? categoryTotals.map((item) => <View key={item.name} style={styles.budgetRow}><View style={styles.rowBody}><Text style={[styles.rowTitle, { color: colors.text }]}>{item.name}</Text><View style={styles.progressTrack}><View style={[styles.progressFill, { width: `${item.value / max * 100}%`, backgroundColor: palette.emerald }]} /></View></View><Text style={[styles.rowAmount, { color: colors.text }]}>{money(item.value)}</Text></View>) : <EmptyState colors={colors} onAdd={() => {}} />}</>;

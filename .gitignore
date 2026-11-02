@@ -27,11 +27,22 @@ local.properties
 *.key
 *.mobileprovision
 
+# Local databases
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
 # Environment variables and secrets
 .env
 .env.*
 !.env.example
 !.env.sample
+backend/.env
+backend/.env.*
+!backend/.env.example
 
 # Metro
 .metro-health-check*
