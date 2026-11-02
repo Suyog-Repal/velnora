@@ -50,7 +50,8 @@ object VelnoraSmsReceiverState {
       if (deliveredKeys.containsKey(key)) return
       deliveredKeys[key] = timestamp
       while (deliveredKeys.size > 256) {
-        deliveredKeys.entries.iterator().next().remove()
+        val oldestKey = deliveredKeys.keys.firstOrNull() ?: break
+        deliveredKeys.remove(oldestKey)
       }
     }
 
