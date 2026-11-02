@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   build-android:
-    name: Build Velnora Debug APK
+    name: Build Velnora Release APK
     runs-on: ubuntu-24.04
     env:
       CI: true
@@ -148,12 +148,12 @@ jobs:
         working-directory: android
         run: |
           chmod +x gradlew
-          ./gradlew --no-daemon assembleDebug --stacktrace
+          ./gradlew --no-daemon assembleRelease -Pandroid.enableMinifyInReleaseBuilds=false --stacktrace
 
       - name: Verify APK
         shell: bash
         run: |
-          apk_path="android/app/build/outputs/apk/debug/app-debug.apk"
+          apk_path="android/app/build/outputs/apk/release/app-release.apk"
           if [[ ! -s "$apk_path" ]]; then
             echo "::error::Expected APK is missing or empty: $apk_path"
             exit 1
@@ -163,8 +163,8 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v7
         with:
-          name: Velnora-Debug-APK
-          path: android/app/build/outputs/apk/debug/app-debug.apk
+          name: Velnora-Release-APK
+          path: android/app/build/outputs/apk/release/app-release.apk
           retention-days: 14
 
       - name: Create GitHub Release
@@ -174,13 +174,13 @@ jobs:
         shell: bash
         run: |
           tag="${GITHUB_REF_NAME}"
-          apk_source="android/app/build/outputs/apk/debug/app-debug.apk"
-          if [[ -f "android/app/build/outputs/apk/release/app-release.apk" ]]; then
-            apk_source="android/app/build/outputs/apk/release/app-release.apk"
+          apk_source="android/app/build/outputs/apk/release/app-release.apk"
+          if [[ ! -f "$apk_source" ]]; then
+            apk_source="$(find android/app/build/outputs/apk -name "*.apk" | head -n 1)"
           fi
 
           if [[ ! -f "$apk_source" ]]; then
-            echo "::error::Source APK not found at $apk_source"
+            echo "::error::Source APK not found"
             exit 1
           fi
 
