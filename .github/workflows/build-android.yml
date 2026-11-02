@@ -38,7 +38,9 @@ jobs:
           accept-android-sdk-licenses: true
 
       - name: Install Android SDK packages
-        run: sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+        run: |
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0" \
+            "ndk;27.1.12297006"
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v6.4.1
@@ -61,30 +63,61 @@ jobs:
         run: npx expo config --type prebuild
 
       - name: Generate Android project
-        run: npx expo prebuild --platform android --clean --non-interactive
+        run: npx expo prebuild --platform android --clean
 
       - name: Verify SMS module autolinking
         shell: bash
         run: |
-          npx expo-modules-autolinking resolve --platform android > /tmp/velnora-autolinking.json
-          node <<'NODE'
+          autolinking_json="$(mktemp)"
+          autolinking_stderr="$(mktemp)"
+          trap 'rm -f "$autolinking_json" "$autolinking_stderr"' EXIT
+          if ! npx expo-modules-autolinking resolve --platform android --json \
+            >"$autolinking_json" 2>"$autolinking_stderr"; then
+            cat "$autolinking_stderr" >&2
+            echo "::error::Expo Android autolinking failed"
+            exit 1
+          fi
+          AUTOLINKING_JSON="$autolinking_json" node <<'NODE'
           const fs = require('fs');
           const path = require('path');
 
-          const result = JSON.parse(fs.readFileSync('/tmp/velnora-autolinking.json', 'utf8'));
-          const module = (result.modules || []).find((entry) =>
-            entry.packageName === '@velnora/sms' || entry.modules?.includes('VelnoraSmsModule'),
+          const result = JSON.parse(fs.readFileSync(process.env.AUTOLINKING_JSON, 'utf8'));
+          const smsModule = (result.modules || []).find(
+            (entry) => entry.packageName === '@velnora/sms',
           );
-          if (!module) {
+          if (!smsModule) {
             throw new Error('Velnora SMS module is missing from Expo Android autolinking');
           }
-          const source = path.join(module.path, 'android', 'src', 'main', 'java', 'com', 'velnora', 'sms', 'VelnoraSmsModule.kt');
-          if (!fs.existsSync(source)) {
-            throw new Error(`Autolinking resolved an unexpected SMS module path: ${source}`);
+
+          const project = (smsModule.projects || []).find((entry) =>
+            (entry.modules || []).some(
+              (module) => module.classifier === 'com.velnora.sms.VelnoraSmsModule',
+            ),
+          );
+          if (!project) {
+            throw new Error(
+              'Velnora SMS Android project or module classifier is missing from Expo autolinking',
+            );
           }
-          console.log(`Autolinked ${module.packageName} from ${module.path}`);
+
+          const source = path.join(
+            project.sourceDir,
+            'src',
+            'main',
+            'java',
+            'com',
+            'velnora',
+            'sms',
+            'VelnoraSmsModule.kt',
+          );
+          if (!fs.existsSync(source)) {
+            throw new Error(`Velnora SMS Kotlin source is missing: ${source}`);
+          }
+          console.log(`Autolinked ${smsModule.packageName} from ${project.sourceDir}`);
+          console.log('Android classifier: com.velnora.sms.VelnoraSmsModule');
           console.log(`Kotlin source present: ${source}`);
           NODE
+          echo "Expo Android autolinking validation passed"
           grep -q 'expoAutolinking.useExpoModules' android/settings.gradle
           grep -q 'autolinkLibrariesWithApp' android/app/build.gradle
 
