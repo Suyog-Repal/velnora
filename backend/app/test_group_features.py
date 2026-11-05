@@ -140,3 +140,34 @@ def test_receipt_upload_download_isolation_and_validation():
     assert client.get(f"/api/v1/receipts/{rid}", headers=a).status_code == 200  # B could not delete A's receipt
     assert client.delete(f"/api/v1/receipts/{rid}", headers=a).status_code == 204
     assert client.get(f"/api/v1/receipts/{rid}", headers=a).status_code == 404
+
+
+def test_expected_payment_sync_partial_settle_delete_isolation():
+    a, b = user(), user()
+    eid = str(uuid4())
+    p = {"person": "Ravi Kumar", "direction": "receive", "amount_paise": 50000, "paid_paise": 0, "note": "Dinner split",
+         "due_date": "2026-12-01", "status": "pending", "payments": []}
+    assert push(a, "expected_payment", eid, "create", p).json()["results"][0]["status"] == "synced"
+    row = pull(a)["expected_payments"][0]
+    assert (row["person"], row["amount_paise"], row["note"], row["due_date"], row["status"]) == ("Ravi Kumar", 50000, "Dinner split", "2026-12-01", "pending")
+    # partial payment, then settled, history preserved
+    p2 = {**p, "paid_paise": 20000, "payments": [{"transaction_id": None, "amount_paise": 20000, "at": "2026-11-06T00:00:00Z"}]}
+    assert push(a, "expected_payment", eid, "update", p2).json()["results"][0]["status"] == "synced"
+    p3 = {**p, "paid_paise": 50000, "status": "settled", "settled_at": "2026-11-07T10:00:00Z", "payments": p2["payments"] + [{"transaction_id": "t1", "amount_paise": 30000, "at": "x"}]}
+    assert push(a, "expected_payment", eid, "update", p3).json()["results"][0]["status"] == "synced"
+    row = pull(a)["expected_payments"][0]
+    assert (row["paid_paise"], row["status"], len(row["payments"])) == (50000, "settled", 2) and row["settled_at"] is not None
+    # validation
+    assert push(a, "expected_payment", str(uuid4()), "create", {**p, "direction": "gift"}).json()["results"][0]["status"] == "error"
+    assert push(a, "expected_payment", str(uuid4()), "create", {**p, "status": "weird"}).json()["results"][0]["status"] == "error"
+    assert push(a, "expected_payment", str(uuid4()), "create", {"person": " ", "amount_paise": 5}).json()["results"][0]["status"] == "error"
+    assert push(a, "expected_payment", str(uuid4()), "create", {**p, "due_date": "01/12/2026"}).status_code == 422
+    # isolation
+    assert pull(b)["expected_payments"] == []
+    assert push(b, "expected_payment", eid, "update", p).json()["results"][0]["status"] == "error"
+    assert push(b, "expected_payment", eid, "delete", {}).json()["results"][0]["status"] == "error"
+    # soft delete + no resurrection
+    assert push(a, "expected_payment", eid, "delete", {}).json()["results"][0]["status"] == "synced"
+    assert pull(a)["expected_payments"][0]["deleted_at"] is not None
+    push(a, "expected_payment", eid, "update", p)
+    assert pull(a)["expected_payments"][0]["deleted_at"] is not None

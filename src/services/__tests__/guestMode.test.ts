@@ -49,7 +49,7 @@ async function importRequiresCallAndWorks() {
   const g1 = await repo.create(tx({ reference_id: 'REF0001' }));
   const g2 = await repo.create(tx({ amount: 20 }));
   const deleted = await repo.create(tx({ amount: 30 })); await repo.delete(deleted.id);
-  assert.deepEqual(await getGuestDataSummary(db), { transactionCount: 2, budgetCount: 0, categoryCount: 0 }, 'summary only counts live guest rows');
+  assert.deepEqual(await getGuestDataSummary(db), { transactionCount: 2, budgetCount: 0, categoryCount: 0, expectedCount: 0 }, 'summary only counts live guest rows');
   // Without an explicit import call, signing in leaves guest rows untouched (consent gate lives in the caller).
   assert.equal((await repo.getAll({ userId: 'user-A' })).length, 0);
   const res = await importGuestData('user-A', db);

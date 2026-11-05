@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Alert, Pressable, ScrollView, Text, View } from 'react-native';
 import { palette } from '../../theme';
-import { Button, Chip, EmptyBlock, Input, Labeled, Sheet, formatPaise, type Colors } from '../ui/common';
+import { Button, Chip, EmptyBlock, Input, Labeled, Sheet, currencySymbol, formatPaise, type Colors } from '../ui/common';
 import { currentMonth, deleteBudget, getBudgetProgress, saveBudget, type BudgetProgress, type BudgetState } from '../services/budgetService';
 import { previousMonth } from '../services/analyticsService';
 import { getServiceDb } from '../services/transactionService';
@@ -56,7 +56,7 @@ export function BudgetsView({ scope, categories, colors, refreshKey }: { scope: 
           {categories.filter((c) => c.type === 'expense').map((c) => <Chip key={c.id} label={c.name} color={c.color} active={editing?.category?.toLowerCase() === c.name.toLowerCase()} onPress={() => editing && setEditing({ ...editing, category: c.name })} colors={colors} />)}
         </ScrollView>
       </Labeled>
-      <Labeled label="MONTHLY LIMIT (₹)" colors={colors}><Input colors={colors} value={editing?.amount ?? ''} onChangeText={(t) => editing && setEditing({ ...editing, amount: t })} keyboardType="decimal-pad" placeholder="e.g. 5000" /></Labeled>
+      <Labeled label={`MONTHLY LIMIT (${currencySymbol()})`} colors={colors}><Input colors={colors} value={editing?.amount ?? ''} onChangeText={(t) => editing && setEditing({ ...editing, amount: t })} keyboardType="decimal-pad" placeholder="e.g. 5000" /></Labeled>
       {error ? <Text style={{ color: palette.danger, marginBottom: 8 }}>{error}</Text> : null}
       <Button title="Save budget" onPress={() => void save()} />
       {editing?.id ? <Button title="Delete budget" kind="danger" onPress={() => Alert.alert('Delete budget?', 'Your transactions are not affected.', [{ text: 'Cancel', style: 'cancel' }, { text: 'Delete', style: 'destructive', onPress: () => { void deleteBudget(getServiceDb(), scope, editing.id!).then(() => { setEditing(null); return load(); }); } }])} /> : null}

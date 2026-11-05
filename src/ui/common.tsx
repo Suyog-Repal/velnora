@@ -3,16 +3,12 @@ import { KeyboardAvoidingView, Modal, Pressable, ScrollView, StyleSheet, Text, T
 import NetInfo from '@react-native-community/netinfo';
 import { palette } from '../../theme';
 import { CATEGORY_ICON_MAP, X } from '../../icons';
+import { formatMinor } from './currency';
 
 export type Colors = { canvas: string; card: string; border: string; text: string; muted: string };
 
-export const formatPaise = (paise: number): string => {
-  const sign = paise < 0 ? '-' : '';
-  const abs = Math.abs(paise);
-  const rupees = Math.floor(abs / 100);
-  const frac = abs % 100;
-  return `${sign}₹${rupees.toLocaleString('en-IN')}${frac ? `.${String(frac).padStart(2, '0')}` : ''}`;
-};
+export { currencySymbol } from './currency';
+export const formatPaise = (paise: number): string => formatMinor(paise);
 
 export function useOnline(): boolean {
   const [online, setOnline] = useState(true);

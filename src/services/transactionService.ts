@@ -7,6 +7,7 @@ import type { CategoryEntity, CreateTransactionInput, Direction, IDatabase, Sess
 import type { ParsedSmsTransaction } from '../../transactionParser.ts';
 import { canEditTransaction, toUpdateInput, type DetailsPatch } from './transactionDetails.ts';
 import { applyAlias } from './merchantAliasService.ts';
+import { autoSettleFromTransaction } from './expectedPaymentService.ts';
 import { triggerSync, type SyncSummary } from './syncEngine.ts';
 
 let repositoriesInitialized = false;
@@ -97,6 +98,9 @@ export async function addTransaction(
     user_id: session?.user.id ?? null,
   });
 
+  // If this payment matches something the person was expected to pay/receive (exact name + exact outstanding amount), settle it.
+  try { await autoSettleFromTransaction(getServiceDb(), session?.user.id ?? null, created); } catch { /* never block recording a transaction */ }
+
   if (session) {
     void syncPendingTransactions(session);
   }
@@ -125,6 +129,9 @@ export async function addSmsTransaction(
     user_id: session?.user.id ?? null,
     sync_status: 'pending_create',
   });
+
+  // If this payment matches something the person was expected to pay/receive (exact name + exact outstanding amount), settle it.
+  try { await autoSettleFromTransaction(getServiceDb(), session?.user.id ?? null, created); } catch { /* never block recording a transaction */ }
 
   if (session) {
     void syncPendingTransactions(session);

@@ -58,7 +58,10 @@ export interface RemoteCategory {
 export interface RemoteBudget { id: string; category: string | null; amount_paise: number; deleted_at?: string | null; created_at: string; updated_at: string }
 export interface RemoteAlias { id: string; match_key: string; original_text: string; display_name: string; category: string | null; deleted_at?: string | null; created_at: string; updated_at: string }
 
+export interface RemoteExpected { id: string; person: string; direction: 'receive' | 'pay'; amount_paise: number; paid_paise: number; note: string | null; due_date: string | null; status: 'pending' | 'settled'; settled_at: string | null; payments: unknown; deleted_at?: string | null; created_at: string; updated_at: string }
+
 export interface SyncPullServerResponse {
+  expected_payments?: RemoteExpected[];
   budgets?: RemoteBudget[];
   merchant_aliases?: RemoteAlias[];
   transactions: RemoteTransaction[];
@@ -92,6 +95,7 @@ function buildSimplePayload(entityType: string, p: Record<string, unknown>, isDe
   if (isDelete) return {};
   if (entityType === 'category') return { category: p.category, direction: p.direction, icon: p.icon, color: p.color };
   if (entityType === 'budget') return { category: p.category ?? null, amount_paise: p.amount_paise };
+  if (entityType === 'expected_payment') return { person: p.person, direction: p.direction, amount_paise: p.amount_paise, paid_paise: p.paid_paise, note: p.note ?? null, due_date: p.due_date ?? null, status: p.status, settled_at: p.settled_at ?? null, payments: p.payments ?? [] };
   return { match_key: p.match_key, original_text: p.original_text, display_name: p.display_name, category: p.category ?? null };
 }
 
@@ -458,6 +462,8 @@ export class SyncEngine {
           await db.runAsync("UPDATE budgets SET sync_status = 'synced' WHERE id = ?", ack.entity_id);
         } else if (ackedItem?.entity_type === 'merchant_alias') {
           await db.runAsync("UPDATE merchant_aliases SET sync_status = 'synced' WHERE id = ?", ack.entity_id);
+        } else if (ackedItem?.entity_type === 'expected_payment') {
+          await db.runAsync("UPDATE expected_payments SET sync_status = 'synced' WHERE id = ?", ack.entity_id);
         }
         await syncQueueRepo.dequeue(ack.operation_id);
       } else {
@@ -591,6 +597,23 @@ export class SyncEngine {
               await db.runAsync(
                 `UPDATE budgets SET category = ?, amount_paise = ?, deleted_at = ?, updated_at = ? WHERE id = ? AND user_id = ?`,
                 rb.category, rb.amount_paise, rb.deleted_at ?? null, rb.updated_at, rb.id, ownerId);
+            }
+          }
+          for (const re of pullResp.expected_payments ?? []) {
+            const local = await db.getFirstAsync<{ sync_status: string }>('SELECT sync_status FROM expected_payments WHERE id = ? AND user_id = ?', re.id, ownerId);
+            const payments = JSON.stringify(Array.isArray(re.payments) ? re.payments : []);
+            const key = re.person.normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}\s&'./-]+/gu, ' ').replace(/\s+/g, ' ').replace(/^[\s.\-/']+|[\s.\-/']+$/g, '').trim();
+            if (!local) {
+              if (!re.deleted_at) {
+                await db.runAsync(
+                  `INSERT INTO expected_payments (id, user_id, person, person_key, direction, amount_paise, paid_paise, note, due_date, status, settled_at, payments_json, sync_status, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'synced', ?, ?)`,
+                  re.id, ownerId, re.person, key, re.direction, re.amount_paise, re.paid_paise, re.note, re.due_date, re.status, re.settled_at, payments, re.created_at, re.updated_at);
+              }
+            } else if (local.sync_status === 'synced') {
+              await db.runAsync(
+                `UPDATE expected_payments SET person = ?, person_key = ?, direction = ?, amount_paise = ?, paid_paise = ?, note = ?, due_date = ?, status = ?, settled_at = ?, payments_json = ?, deleted_at = ?, updated_at = ? WHERE id = ? AND user_id = ?`,
+                re.person, key, re.direction, re.amount_paise, re.paid_paise, re.note, re.due_date, re.status, re.settled_at, payments, re.deleted_at ?? null, re.updated_at, re.id, ownerId);
             }
           }
           for (const ra of pullResp.merchant_aliases ?? []) {

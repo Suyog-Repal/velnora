@@ -186,6 +186,50 @@ export const MIGRATIONS = [
       UPDATE categories SET color = '#22C55E' WHERE id = 'cat-other-inc' AND color IS NULL;
     `,
   },
+  {
+    version: 5,
+    description: 'Expected payments (money owed to / by the user), sync queue accepts expected_payment',
+    up: `
+      CREATE TABLE IF NOT EXISTS expected_payments (
+        id TEXT PRIMARY KEY,
+        user_id TEXT,
+        person TEXT NOT NULL,
+        person_key TEXT NOT NULL,
+        direction TEXT NOT NULL DEFAULT 'receive' CHECK(direction IN ('receive', 'pay')),
+        amount_paise INTEGER NOT NULL CHECK(amount_paise > 0),
+        paid_paise INTEGER NOT NULL DEFAULT 0,
+        note TEXT,
+        due_date TEXT,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'settled')),
+        settled_at TEXT,
+        payments_json TEXT NOT NULL DEFAULT '[]',
+        sync_status TEXT NOT NULL DEFAULT 'pending_create',
+        deleted_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_expected_user ON expected_payments(user_id, status);
+
+      CREATE TABLE sync_queue_v5 (
+        id TEXT PRIMARY KEY,
+        entity_type TEXT NOT NULL CHECK(entity_type IN ('transaction', 'category', 'device', 'budget', 'merchant_alias', 'expected_payment')),
+        entity_id TEXT NOT NULL,
+        operation TEXT NOT NULL CHECK(operation IN ('create', 'update', 'delete')),
+        payload TEXT NOT NULL,
+        retry_count INTEGER NOT NULL DEFAULT 0,
+        last_attempt_at TEXT,
+        next_retry_at TEXT,
+        error_code TEXT,
+        created_at TEXT NOT NULL
+      );
+      INSERT INTO sync_queue_v5 (id, entity_type, entity_id, operation, payload, retry_count, last_attempt_at, next_retry_at, error_code, created_at)
+        SELECT id, entity_type, entity_id, operation, payload, retry_count, last_attempt_at, next_retry_at, error_code, created_at FROM sync_queue;
+      DROP TABLE sync_queue;
+      ALTER TABLE sync_queue_v5 RENAME TO sync_queue;
+      CREATE INDEX IF NOT EXISTS idx_sync_queue_retry ON sync_queue(next_retry_at, retry_count);
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_sync_queue_entity ON sync_queue(entity_type, entity_id);
+    `,
+  },
 ];
 
 export const DEFAULT_CATEGORIES = [

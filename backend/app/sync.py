@@ -25,6 +25,7 @@ from backend.app.db.models import Category as CategoryModel
 from backend.app.db.models import User as UserModel
 from backend.app.db.models import Budget as BudgetModel
 from backend.app.db.models import MerchantAlias as MerchantAliasModel
+from backend.app.db.models import ExpectedPayment as ExpectedPaymentModel
 from backend.app.db.session import get_db
 
 router = APIRouter(prefix="/api/v1/sync", tags=["sync"])
@@ -79,6 +80,14 @@ class SyncItemPayload(BaseModel):
     match_key: Optional[str] = Field(default=None, max_length=200)
     original_text: Optional[str] = Field(default=None, max_length=200)
     display_name: Optional[str] = Field(default=None, max_length=160)
+    # Expected payment payload fields (direction/status are validated in the handler)
+    person: Optional[str] = Field(default=None, max_length=80)
+    paid_paise: Optional[int] = Field(default=None, ge=0)
+    note: Optional[str] = Field(default=None, max_length=200)
+    due_date: Optional[str] = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    status: Optional[str] = Field(default=None, max_length=12)
+    settled_at: Optional[datetime] = None
+    payments: Optional[list] = None
 
     @field_validator("merchant_phone")
     @classmethod
@@ -189,7 +198,26 @@ class SyncAliasItem(BaseModel):
     updated_at: datetime
 
 
+class SyncExpectedItem(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    person: str
+    direction: str
+    amount_paise: int
+    paid_paise: int
+    note: Optional[str] = None
+    due_date: Optional[str] = None
+    status: str
+    settled_at: Optional[datetime] = None
+    payments: list = Field(default_factory=list)
+    deleted_at: Optional[datetime] = None
+    created_at: datetime
+    updated_at: datetime
+
+
 class SyncPullResponse(BaseModel):
+    expected_payments: List[SyncExpectedItem] = Field(default_factory=list)
     budgets: List[SyncBudgetItem] = Field(default_factory=list)
     merchant_aliases: List[SyncAliasItem] = Field(default_factory=list)
     transactions: List[SyncPullTransaction]
@@ -213,9 +241,8 @@ class SyncStatusResponse(BaseModel):
 # Sync Endpoints Implementation
 # ==============================================================================
 def _apply_simple_entity(db: Session, user: UserModel, item: SyncPushItem, now: datetime) -> SyncPushItemResult:
-    """Idempotent upsert / soft-delete for budgets and merchant aliases. Another user's id is always refused."""
-    is_budget = item.entity_type == "budget"
-    model = BudgetModel if is_budget else MerchantAliasModel
+    """Idempotent upsert / soft-delete for budgets, merchant aliases and expected payments. Another user's id is always refused."""
+    model = {"budget": BudgetModel, "merchant_alias": MerchantAliasModel, "expected_payment": ExpectedPaymentModel}[item.entity_type]
     row = db.scalar(select(model).where(model.id == item.entity_id).with_for_update())
 
     def result(status_: str, error: Optional[str] = None) -> SyncPushItemResult:
@@ -235,11 +262,11 @@ def _apply_simple_entity(db: Session, user: UserModel, item: SyncPushItem, now: 
         return result("synced")
 
     p = item.payload
-    if is_budget:
+    if item.entity_type == "budget":
         if p.amount_paise is None:
             return result("error", "Missing amount_paise for budget")
         values = {"category": (p.category or None), "amount_paise": p.amount_paise}
-    else:
+    elif item.entity_type == "merchant_alias":
         if not p.match_key or not p.display_name:
             return result("error", "Missing match_key/display_name for merchant alias")
         values = {
@@ -247,6 +274,24 @@ def _apply_simple_entity(db: Session, user: UserModel, item: SyncPushItem, now: 
             "original_text": (p.original_text or p.match_key).strip(),
             "display_name": p.display_name.strip(),
             "category": (p.category or None),
+        }
+    else:
+        if not p.person or not p.person.strip() or p.amount_paise is None:
+            return result("error", "Missing person/amount_paise for expected payment")
+        if (p.direction or "receive") not in ("receive", "pay"):
+            return result("error", "Invalid direction for expected payment")
+        if (p.status or "pending") not in ("pending", "settled"):
+            return result("error", "Invalid status for expected payment")
+        values = {
+            "person": p.person.strip(),
+            "direction": p.direction or "receive",
+            "amount_paise": p.amount_paise,
+            "paid_paise": p.paid_paise or 0,
+            "note": (p.note.strip() if p.note else None),
+            "due_date": p.due_date,
+            "status": p.status or "pending",
+            "settled_at": p.settled_at,
+            "payments": p.payments or [],
         }
     if row is None:
         db.add(model(id=item.entity_id, user_id=user.id, created_at=now, updated_at=now, **values))
@@ -433,7 +478,7 @@ def sync_push(
                 # ==============================================================
                 # 1b. BUDGET / MERCHANT ALIAS SYNC (last-write-wins, soft delete, strictly user-scoped)
                 # ==============================================================
-                if item.entity_type in ("budget", "merchant_alias"):
+                if item.entity_type in ("budget", "merchant_alias", "expected_payment"):
                     results.append(_apply_simple_entity(db, user, item, now))
                     continue
 
@@ -846,10 +891,12 @@ def sync_pull(
 
     budgets_rows = db.scalars(select(BudgetModel).where(BudgetModel.user_id == user.id)).all()
     alias_rows = db.scalars(select(MerchantAliasModel).where(MerchantAliasModel.user_id == user.id)).all()
+    expected_rows = db.scalars(select(ExpectedPaymentModel).where(ExpectedPaymentModel.user_id == user.id)).all()
 
     return SyncPullResponse(
         budgets=budgets_rows,
         merchant_aliases=alias_rows,
+        expected_payments=expected_rows,
         transactions=selected_rows,
         categories=categories_rows,
         categories_complete=True,

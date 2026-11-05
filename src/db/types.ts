@@ -3,7 +3,7 @@ export type TransactionSource = 'manual' | 'sms';
 export type SyncStatus = 'synced' | 'pending_create' | 'pending_update' | 'pending_delete' | 'failed';
 export type CategoryType = 'income' | 'expense' | 'both';
 export type SyncOperation = 'create' | 'update' | 'delete';
-export type SyncEntityType = 'transaction' | 'category' | 'device' | 'budget' | 'merchant_alias';
+export type SyncEntityType = 'transaction' | 'category' | 'device' | 'budget' | 'merchant_alias' | 'expected_payment';
 
 export interface TransactionEntity {
   id: string; // Stable UUID v4

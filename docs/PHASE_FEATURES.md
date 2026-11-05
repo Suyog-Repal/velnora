@@ -32,3 +32,26 @@ flagged for the user and nothing is saved without confirmation.
 ## Receipt storage
 Images are copied into the app's private `documentDirectory/receipts/`. On the server they are stored in the application database (max 5 MB,
 JPEG/PNG/WebP, content sniffed) and only the owning user can read or delete them. No external storage service is used.
+
+## Expected payments ("who owes me")
+- Local table `expected_payments` (migration v5) and backend table `expected_payments` (Alembic `e5b2c8d4a7f1`); syncs through the same queue as
+  budgets and merchant names (`entity_type = 'expected_payment'`).
+- Each item has a person, direction (`receive` = they pay me, `pay` = I pay them), amount and paid amount (integer paise), an optional
+  reason/note and due date, a status (`pending`/`settled`) and a payment history.
+- A payment can be recorded by hand (optionally also creating the income/expense transaction) or arrives on its own: when an incoming
+  transaction (SMS or manual) has the *exact* same normalized name and the *exact* outstanding amount, the item is settled and linked.
+  Anything fuzzier (different amount, similar name) is never auto-linked: manual entry asks, SMS leaves it for the user.
+- Overdue = pending with a due date before today.
+
+## People
+Aggregates (sum and count of incoming/outgoing, net) are computed from saved transactions in integer paise. People are grouped by exact
+normalized name. Tapping a person opens their full history with All/Incoming/Outgoing and All time/This month filters.
+
+## OCR details
+Dates: numeric (day-first unless the digits prove month-first), ISO, "5 Nov 2026", "Nov 5, 2026", ordinals, 2-digit years, OCR digit
+confusions (O/l for 0/1), and a time of day when present. Expiry/validity dates are ignored. Payment screenshots (UPI/bank): who was paid or
+who paid, direction, reference/UTR and status are read; amounts are only taken from a total line or, on payment screens, the first
+currency-marked amount. Images can come from the camera, the gallery or a file picker. PDFs are not read.
+
+## Currency
+The Currency setting changes the symbol and number format only. Velnora does not convert between currencies.

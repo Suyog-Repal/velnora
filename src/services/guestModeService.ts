@@ -15,6 +15,7 @@ export interface GuestDataSummary {
   transactionCount: number;
   budgetCount: number;
   categoryCount: number;
+  expectedCount: number;
 }
 
 export interface GuestImportResult {
@@ -50,7 +51,8 @@ export async function getGuestDataSummary(database?: IDatabase): Promise<GuestDa
   );
   const b = await db.getFirstAsync<{ count: number }>('SELECT COUNT(*) AS count FROM budgets WHERE user_id IS NULL AND deleted_at IS NULL');
   const c = await db.getFirstAsync<{ count: number }>('SELECT COUNT(*) AS count FROM categories WHERE is_custom = 1 AND user_id IS NULL');
-  return { transactionCount: row?.count ?? 0, budgetCount: b?.count ?? 0, categoryCount: c?.count ?? 0 };
+  const x = await db.getFirstAsync<{ count: number }>('SELECT COUNT(*) AS count FROM expected_payments WHERE user_id IS NULL AND deleted_at IS NULL');
+  return { transactionCount: row?.count ?? 0, budgetCount: b?.count ?? 0, categoryCount: c?.count ?? 0, expectedCount: x?.count ?? 0 };
 }
 
 /**
@@ -131,6 +133,17 @@ export async function importGuestData(userId: string, database?: IDatabase): Pro
            VALUES (?, 'budget', ?, 'create', ?, 0, ?)
            ON CONFLICT(entity_type, entity_id) DO UPDATE SET payload = excluded.payload, operation = 'create'`,
           `import-bud-${b.id}`, b.id, JSON.stringify({ user_id: id, category: b.category, amount_paise: b.amount_paise }), now);
+      }
+      const guestExpected = await db.getAllAsync<{ id: string; person: string; direction: string; amount_paise: number; paid_paise: number; note: string | null; due_date: string | null; status: string; settled_at: string | null; payments_json: string }>(
+        'SELECT id, person, direction, amount_paise, paid_paise, note, due_date, status, settled_at, payments_json FROM expected_payments WHERE user_id IS NULL AND deleted_at IS NULL');
+      for (const e of guestExpected) {
+        await db.runAsync(`UPDATE expected_payments SET user_id = ?, sync_status = 'pending_create', updated_at = ? WHERE id = ?`, id, now, e.id);
+        let payments: unknown = []; try { payments = JSON.parse(e.payments_json); } catch { /* history unreadable: import without it */ }
+        await db.runAsync(
+          `INSERT INTO sync_queue (id, entity_type, entity_id, operation, payload, retry_count, created_at)
+           VALUES (?, 'expected_payment', ?, 'create', ?, 0, ?)
+           ON CONFLICT(entity_type, entity_id) DO UPDATE SET payload = excluded.payload, operation = 'create'`,
+          `import-exp-${e.id}`, e.id, JSON.stringify({ user_id: id, person: e.person, direction: e.direction, amount_paise: e.amount_paise, paid_paise: e.paid_paise, note: e.note, due_date: e.due_date, status: e.status, settled_at: e.settled_at, payments }), now);
       }
       await db.execAsync('COMMIT');
       return { imported, skippedDuplicates: skipped };

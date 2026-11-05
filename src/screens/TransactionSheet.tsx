@@ -3,7 +3,7 @@ import { Alert, Image, ScrollView, Text, View } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { palette } from '../../theme';
 import { Camera, ImageIcon, MapPin, Phone, Trash } from '../../icons';
-import { Button, Chip, Input, Labeled, Sheet, formatPaise, type Colors } from '../ui/common';
+import { Button, Chip, Input, Labeled, Sheet, currencySymbol, formatPaise, type Colors } from '../ui/common';
 import { LocationPicker } from './LocationPicker';
 import { buildMerchantPhone, formatDateInput, formatTimeInput, parseLocalDateTime } from '../services/transactionDetails';
 import { deleteTransaction, getServiceDb, updateTransactionDetails } from '../services/transactionService';
@@ -114,7 +114,7 @@ export function TransactionSheet({ tx, session, categories, colors, onClose, onC
     <Text style={{ color: colors.muted, marginBottom: 16 }}>{tx.source === 'sms' ? 'Detected from SMS' : 'Added manually'} · {tx.user_id ? (tx.sync_status === 'synced' ? 'Synced' : 'Waiting to sync') : 'Stored on this device only'}</Text>
 
     <Labeled label="MERCHANT" colors={colors}><Input colors={colors} value={merchant} onChangeText={setMerchant} accessibilityLabel="Merchant" /></Labeled>
-    <Labeled label="AMOUNT (₹)" colors={colors}><Input colors={colors} value={amount} onChangeText={setAmount} keyboardType="decimal-pad" accessibilityLabel="Amount" /></Labeled>
+    <Labeled label={`AMOUNT (${currencySymbol()})`} colors={colors}><Input colors={colors} value={amount} onChangeText={setAmount} keyboardType="decimal-pad" accessibilityLabel="Amount" /></Labeled>
     <View style={{ flexDirection: 'row', gap: 10 }}>
       <View style={{ flex: 3 }}><Labeled label="DATE" colors={colors}><Input colors={colors} value={date} onChangeText={setDate} placeholder="YYYY-MM-DD" autoCapitalize="none" /></Labeled></View>
       <View style={{ flex: 2 }}><Labeled label="TIME" colors={colors}><Input colors={colors} value={time} onChangeText={setTime} placeholder="HH:MM" /></Labeled></View>

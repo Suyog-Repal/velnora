@@ -78,8 +78,8 @@ async function main() {
     const db = new NodeSqliteAdapter();
     assert.equal(await runMigrations(db), MIGRATIONS.length);
     assert.equal(await runMigrations(db), 0);
-    assert.equal(await getCurrentSchemaVersion(db), 4);
-    console.log('✓ migrations, idempotent (fresh DB reaches v4)');
+    assert.equal(await getCurrentSchemaVersion(db), 5);
+    console.log('✓ migrations, idempotent (fresh DB reaches v5)');
   }
 
   // 2. Receive with no JS/bridge → staged → drained later (app recreation) → persisted + queued, body wiped

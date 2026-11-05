@@ -1,7 +1,7 @@
 import { StatusBar } from 'expo-status-bar';
-import { AppState, KeyboardAvoidingView, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Alert, Animated, AppState, Easing, KeyboardAvoidingView, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { clearSession, loadSession, login, logout, refreshSession, register, requestPasswordReset, saveSession, type Session } from './auth';
 import { restoreSession } from './src/services/sessionRestore';
 import { getGuestDataSummary, importGuestData, isGuestModeChosen, setGuestModeChosen } from './src/services/guestModeService';
@@ -10,7 +10,12 @@ import { drainNativeStagedSms, recordSmsOwner } from './src/services/smsStagingS
 import { LocalDataSection } from './src/components/LocalDataSection';
 import { SmsStagingStatusSection } from './src/components/SmsStagingStatusSection';
 import { DEFAULT_SMS_RULE, parseSmsTransaction } from './transactionParser';
-import { palette, useThemeMode, type ThemeMode } from './theme';
+import { applyAccent, palette, useAccent, useCurrency, useResolvedScheme, useThemeMode, type ThemeMode } from './theme';
+import { ProfileView } from './src/screens/ProfileView';
+import { PeopleView } from './src/screens/PeopleView';
+import { findOpenForPerson, outstandingPaise, recordPayment } from './src/services/expectedPaymentService';
+import { CurrencySheet, SettingsPage } from './src/screens/SettingsPages';
+import { CURRENCIES } from './src/ui/currency';
 import { ArrowDownLeft, ArrowUpRight, Bell, Chart, ChevronRight, CirclePlus, Eye, EyeOff, Home, KeyRound, LayoutGrid, LockKeyhole, LogOut, PiggyBank, Plus, Search, Settings, Sliders, Target, UserRound, Users, WalletCards, X } from './icons';
 import {
   initTransactionService,
@@ -29,6 +34,8 @@ import { expoReceiptFs, expoReceiptUploader } from './src/services/receiptFiles'
 import { triggerSync } from './src/services/syncEngine';
 import { API_URL } from './auth';
 import { useOnline } from './src/ui/common';
+import { Splash } from './src/ui/Splash';
+import { formatAmount, setActiveCurrency } from './src/ui/currency';
 import { TransactionsView } from './src/screens/TransactionsView';
 import { TransactionSheet } from './src/screens/TransactionSheet';
 import { AnalyticsView } from './src/screens/AnalyticsView';
@@ -42,6 +49,7 @@ type Contact = { name: string; received: number; paid: number; count: number };
 
 const DEFAULT_CATEGORIES = ['Food & Dining', 'Groceries', 'Transportation', 'Bills & Utilities', 'Other Expenses'];
 const smsRules = [DEFAULT_SMS_RULE];
+const TAB_ORDER: Tab[] = ['home', 'transactions', 'analytics', 'budgets', 'people', 'profile'];
 
 function toUiTransaction(entity: TransactionEntity): Transaction {
   return {
@@ -51,9 +59,13 @@ function toUiTransaction(entity: TransactionEntity): Transaction {
   };
 }
 
-function money(value: number) { return `₹${value.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`; }
+function money(value: number) { return formatAmount(value); }
 
 export default function App() {
+  return <View style={{ flex: 1 }}><AppInner /><Splash /></View>;
+}
+
+function AppInner() {
   const [session, setSession] = useState<Session | null>(null);
   const [authReady, setAuthReady] = useState(false);
   const [authScreen, setAuthScreen] = useState<'welcome' | 'signup' | 'signin' | 'forgot'>('welcome');
@@ -90,11 +102,31 @@ export default function App() {
   const [showAliases, setShowAliases] = useState(false);
   const [drillCategory, setDrillCategory] = useState<string | null>(null);
   const [dataTick, setDataTick] = useState(0);
+  const [showSettings, setShowSettings] = useState(false);
+  const [showCurrency, setShowCurrency] = useState(false);
   const online = useOnline();
   const scope = session?.user.id ?? null;
-  const [mode, setMode] = useThemeMode();
 
-  const dark = mode === 'dark';
+  // Screen transition: content slides in from the direction of travel while fading in.
+  const enter = useRef(new Animated.Value(1)).current;
+  const slideDir = useRef(1);
+  const changeTab = (next: Tab) => {
+    if (next === tab) return;
+    slideDir.current = TAB_ORDER.indexOf(next) >= TAB_ORDER.indexOf(tab) ? 1 : -1;
+    if (next !== 'transactions') setDrillCategory(null);
+    setTab(next);
+    enter.stopAnimation();
+    enter.setValue(0);
+    Animated.timing(enter, { toValue: 1, duration: 260, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start();
+  };
+  const [mode, setMode] = useThemeMode();
+  const [accent, setAccent] = useAccent();
+  const [currency, setCurrency] = useCurrency(setActiveCurrency);
+  const scheme = useResolvedScheme(mode);
+  // The accent colour is baked into StyleSheet objects: rebuild them whenever the accent changes (before children render).
+  if (stylesAccent !== accent) { applyAccent(accent); styles = buildStyles(); stylesAccent = accent; }
+
+  const dark = scheme === 'dark';
   const colors = dark ? { canvas: palette.darkCanvas, card: palette.darkCard, border: palette.darkBorder, text: palette.darkText, muted: palette.darkMuted } : { canvas: palette.canvas, card: palette.card, border: palette.border, text: palette.ink, muted: palette.muted };
   const totals = useMemo(() => transactions.reduce((result, item) => { result.income += item.direction === 'income' ? item.amount : 0; result.expense += item.direction === 'expense' ? item.amount : 0; return result; }, { income: 0, expense: 0 }), [transactions]);
   const contacts = useMemo(() => {
@@ -237,9 +269,9 @@ export default function App() {
     setAuthBusy(true); setAuthError('');
     try { const next = screen === 'signup' ? await register(fullName.trim(), normalizedEmail, password) : await login(normalizedEmail, password); await saveSession(next);
       // Guest data is never attached silently: ask first, and only if there is something to import.
-      const guest = await getGuestDataSummary().catch(() => ({ transactionCount: 0, budgetCount: 0, categoryCount: 0 }));
+      const guest = await getGuestDataSummary().catch(() => ({ transactionCount: 0, budgetCount: 0, categoryCount: 0, expectedCount: 0 }));
       setSession(next); setSessionStale(false); setShowAuth(false); setPassword(''); setConfirmPassword('');
-      if (guest.transactionCount + guest.budgetCount + guest.categoryCount > 0) setImportPrompt({ count: guest.transactionCount }); } catch (caught) { setAuthError(caught instanceof Error ? caught.message : 'Authentication failed. Try again.'); } finally { setAuthBusy(false); }
+      if (guest.transactionCount + guest.budgetCount + guest.categoryCount + guest.expectedCount > 0) setImportPrompt({ count: guest.transactionCount }); } catch (caught) { setAuthError(caught instanceof Error ? caught.message : 'Authentication failed. Try again.'); } finally { setAuthBusy(false); }
   };
   const submitForgot = async () => { setAuthBusy(true); setAuthError(''); try { await requestPasswordReset(email.trim().toLowerCase()); setAuthNotice('Password reset delivery is not configured in this environment.'); } catch (caught) { setAuthError(caught instanceof Error ? caught.message : 'Password reset is unavailable.'); } finally { setAuthBusy(false); } };
 
@@ -255,6 +287,18 @@ export default function App() {
         description: direction === 'income' ? `Received from ${counterparty.trim()}` : `Paid to ${counterparty.trim()}`,
         source: 'manual',
       }, session);
+      // A payment from/to someone with a pending expected amount: exact matches settle automatically; otherwise ask.
+      try {
+        const open = (await findOpenForPerson(getServiceDb(), scope, created.counterparty, created.direction === 'income' ? 'receive' : 'pay')).filter((e) => !e.payments.some((p) => p.transaction_id === created.id));
+        const target = open.find((e) => outstandingPaise(e) >= created.amount_paise) ?? open[0];
+        if (target) {
+          const apply = Math.min(created.amount_paise, outstandingPaise(target));
+          Alert.alert('Apply to expected payment?', `${target.person} was expected to ${target.direction === 'receive' ? 'pay you' : 'be paid'} ${money(outstandingPaise(target) / 100)}${target.note ? ` (${target.note})` : ''}. Count ${money(apply / 100)} of this transaction towards it?`, [
+            { text: 'Not now', style: 'cancel' },
+            { text: 'Apply', onPress: () => { void recordPayment(getServiceDb(), scope, target.id, { amountPaise: apply, transactionId: created.id }).then(() => { setDataTick((n) => n + 1); if (session) void syncPendingTransactions(session); }).catch(() => undefined); } },
+          ]);
+        }
+      } catch { /* the prompt is a convenience; the transaction is already saved */ }
       const uiRecord = toUiTransaction(created);
       setTransactions((current) => [uiRecord, ...current.filter((item) => item.id !== uiRecord.id)]);
       setAmount('');
@@ -287,20 +331,24 @@ export default function App() {
 
   return <SafeAreaView style={[styles.safe, { backgroundColor: colors.canvas }]}><StatusBar style={dark ? 'light' : 'dark'} /><View style={styles.shell}>
     <ScrollView contentContainerStyle={styles.content}>
-      <View style={styles.header}><View><Text style={[styles.overline, { color: palette.emerald }]}>VELNORA</Text><Text style={[styles.title, { color: colors.text }]}>{tab === 'home' ? `Good evening${session ? `, ${session.user.full_name.split(' ')[0]}` : ''}` : tab.charAt(0).toUpperCase() + tab.slice(1)}</Text></View><Pressable style={[styles.iconButton, { backgroundColor: colors.card, borderColor: colors.border }]} onPress={() => setTab('profile')}><Text style={[styles.avatarText, { color: palette.navy }]}>{session ? session.user.full_name.charAt(0).toUpperCase() : 'G'}</Text></Pressable></View>
+      <View style={styles.header}><View><Text style={[styles.overline, { color: palette.emerald }]}>VELNORA</Text><Text style={[styles.title, { color: colors.text }]}>{tab === 'home' ? `Good evening${session ? `, ${session.user.full_name.split(' ')[0]}` : ''}` : tab.charAt(0).toUpperCase() + tab.slice(1)}</Text></View><Pressable style={[styles.iconButton, { backgroundColor: colors.card, borderColor: colors.border }]} onPress={() => changeTab('profile')}><Text style={[styles.avatarText, { color: colors.text }]}>{session ? session.user.full_name.charAt(0).toUpperCase() : 'G'}</Text></Pressable></View>
       {!session && <Text style={[styles.caption, { color: colors.muted, marginBottom: 12 }]}>Guest mode · data stays on this device and is not synced.</Text>}
       {importNotice ? <Text style={styles.noticeText}>{importNotice}</Text> : null}
       {session && sessionStale ? <Text style={[styles.caption, { color: colors.muted, marginBottom: 12 }]}>Offline · working from local data; sync resumes when you reconnect.</Text> : null}
-      {tab === 'home' && <HomeScreen onOpen={setOpenTx} transactions={transactions} totals={totals} colors={colors} onAddIncome={() => { setDirection('income'); setShowForm(true); }} onAddExpense={() => { setDirection('expense'); setShowForm(true); }} onViewAll={() => setTab('transactions')} />}
+      <Animated.View style={{ opacity: enter, transform: [{ translateX: enter.interpolate({ inputRange: [0, 1], outputRange: [slideDir.current * 28, 0] }) }] }}>
+      {tab === 'home' && <HomeScreen onOpen={setOpenTx} transactions={transactions} totals={totals} colors={colors} onAddIncome={() => { setDirection('income'); setShowForm(true); }} onAddExpense={() => { setDirection('expense'); setShowForm(true); }} onViewAll={() => changeTab('transactions')} />}
       {tab === 'transactions' && <TransactionsView key={drillCategory ?? 'all'} transactions={transactions} categories={catViews} colors={colors} loading={txLoading} online={online} onOpen={setOpenTx} onAdd={() => setShowForm(true)} initialCategory={drillCategory} />}
-      {tab === 'analytics' && <AnalyticsView scope={scope} colors={colors} refreshKey={dataTick} onDrill={(c) => { setDrillCategory(c); setTab('transactions'); }} />}
+      {tab === 'analytics' && <AnalyticsView scope={scope} colors={colors} refreshKey={dataTick} onDrill={(c) => { setDrillCategory(c); changeTab('transactions'); }} />}
       {tab === 'budgets' && <BudgetsView scope={scope} categories={catViews} colors={colors} refreshKey={dataTick} />}
-      {tab === 'people' && <PeopleScreen contacts={contacts} colors={colors} onAdd={() => setShowForm(true)} />}
-      {tab === 'profile' && !session && <GuestProfile onOpenCategories={() => setShowCats(true)} onOpenAliases={() => setShowAliases(true)} colors={colors} mode={mode} setMode={setMode} onSignIn={() => openAuth('signin')} onCreate={() => openAuth('signup')} />}
-      {tab === 'profile' && session && <ProfileScreen onOpenCategories={() => setShowCats(true)} onOpenAliases={() => setShowAliases(true)} session={session} colors={colors} mode={mode} setMode={setMode} smsStatusTick={smsStatusTick} onDataDeleted={() => { setTransactions([]); setSmsStatusTick((n) => n + 1); }} onLogout={async () => { await logout(session); setSession(null); setSessionStale(false); setTransactions([]); setAuthScreen('welcome'); setShowAuth(true); }} />}
+            {tab === 'people' && <PeopleView transactions={transactions} categories={catViews} session={session} colors={colors} refreshKey={dataTick} onOpenTx={setOpenTx} onChanged={() => void reloadData()} onAddTransaction={() => setShowForm(true)} />}
+      {tab === 'profile' && <ProfileView session={session} colors={colors} mode={mode} accent={accent} transactions={transactions} online={online} onOpenSettings={() => setShowSettings(true)} onOpenCurrency={() => setShowCurrency(true)} currencyLabel={(() => { const c = CURRENCIES.find((x) => x.code === currency); return c ? `${c.name} (${c.symbol.trim()})` : currency; })()}
+        onOpenCategories={() => setShowCats(true)} onOpenAliases={() => setShowAliases(true)} onSignIn={() => openAuth('signin')} onCreate={() => openAuth('signup')}
+        onLogout={async () => { if (!session) return; await logout(session); setSession(null); setSessionStale(false); setTransactions([]); setAuthScreen('welcome'); setShowAuth(true); }}
+        accountSections={session ? <><LocalDataSection userId={session.user.id} colors={colors} onDeleted={() => { setTransactions([]); setSmsStatusTick((n) => n + 1); }} /><SmsStagingStatusSection userId={session.user.id} colors={colors} refreshKey={smsStatusTick} /></> : null} />}
+      </Animated.View>
     </ScrollView>
-    <Pressable style={styles.fab} onPress={() => setShowForm(true)}><Plus color="#FFFFFF" size={20} /><Text style={styles.fabText}>Add transaction</Text></Pressable>
-    <BottomNav tab={tab} setTab={(t) => { if (t !== 'transactions') setDrillCategory(null); setTab(t); }} colors={colors} />
+    {tab !== 'profile' && <Pressable style={styles.fab} onPress={() => setShowForm(true)}><Plus color="#FFFFFF" size={20} /><Text style={styles.fabText}>Add transaction</Text></Pressable>}
+    <BottomNav tab={tab} setTab={changeTab} colors={colors} />
   </View>
   <Modal visible={importPrompt !== null} transparent animationType="fade" onRequestClose={() => setImportPrompt(null)}><View style={styles.modalBackdrop}><View style={[styles.modal, { backgroundColor: colors.card }]}>
     <Text style={[styles.modalTitle, { color: colors.text }]}>Import local data?</Text>
@@ -311,6 +359,8 @@ export default function App() {
   <Modal visible={showForm} transparent animationType="slide" onRequestClose={() => setShowForm(false)}><View style={styles.modalBackdrop}><View style={[styles.modal, { backgroundColor: colors.card }]}><View style={styles.modalHeader}><Text style={[styles.modalTitle, { color: colors.text }]}>Record transaction</Text><Pressable onPress={() => setShowForm(false)}><X color={colors.muted} /></Pressable></View><Text style={[styles.label, { color: colors.muted }]}>TYPE</Text><View style={styles.segment}><Pressable onPress={() => setDirection('expense')} style={[styles.segmentItem, direction === 'expense' && styles.segmentActive]}><ArrowUpRight color={direction === 'expense' ? palette.danger : colors.muted} size={17} /><Text style={[styles.segmentText, { color: colors.text }]}>Expense</Text></Pressable><Pressable onPress={() => setDirection('income')} style={[styles.segmentItem, direction === 'income' && styles.segmentActive]}><ArrowDownLeft color={direction === 'income' ? palette.emerald : colors.muted} size={17} /><Text style={[styles.segmentText, { color: colors.text }]}>Income</Text></Pressable></View><Text style={[styles.label, { color: colors.muted }]}>AMOUNT</Text><TextInput value={amount} onChangeText={setAmount} keyboardType="decimal-pad" placeholder="0.00" placeholderTextColor={colors.muted} style={[styles.input, { color: colors.text, borderColor: colors.border }]} /><Text style={[styles.label, { color: colors.muted }]}>MERCHANT OR COUNTERPARTY</Text><TextInput value={counterparty} onChangeText={setCounterparty} placeholder="e.g. Grocery store" placeholderTextColor={colors.muted} style={[styles.input, { color: colors.text, borderColor: colors.border }]} /><Text style={[styles.label, { color: colors.muted }]}>CATEGORY</Text><ScrollView horizontal showsHorizontalScrollIndicator={false}>{(catViews.length ? catViews.filter((c) => c.type === direction).map((c) => c.name) : categoriesList).map((item) => <Pressable key={item} onPress={() => setCategory(item)} style={[styles.chip, category === item && styles.chipActive]}><Text style={[styles.chipText, { color: category === item ? palette.navy : colors.muted }]}>{item}</Text></Pressable>)}</ScrollView><Pressable style={styles.primaryButton} onPress={addTransaction}><Text style={styles.primaryButtonText}>Save transaction</Text></Pressable><Pressable onPress={() => { setShowForm(false); setShowScan(true); }} accessibilityRole="button"><Text style={[styles.link, { textAlign: 'center', marginTop: 16 }]}>Scan a receipt instead</Text></Pressable></View></View></Modal>
   <TransactionSheet tx={openTx} session={session} categories={catViews} colors={colors} onClose={() => setOpenTx(null)} onChanged={() => void reloadData()} />
   <ReceiptScan visible={showScan} session={session} categories={catViews} colors={colors} onClose={() => setShowScan(false)} onSaved={() => void reloadData()} />
+  <SettingsPage visible={showSettings} onClose={() => setShowSettings(false)} colors={colors} mode={mode} setMode={setMode} accent={accent} setAccent={setAccent} />
+  <CurrencySheet visible={showCurrency} onClose={() => setShowCurrency(false)} colors={colors} code={currency} setCode={setCurrency} />
   <CategoryManager visible={showCats} scope={scope} colors={colors} onClose={() => setShowCats(false)} onChanged={() => void reloadData()} />
   <MerchantNamesManager visible={showAliases} userId={scope} colors={colors} onClose={() => setShowAliases(false)} />
   </SafeAreaView>;
@@ -336,17 +386,38 @@ function BudgetsScreen({ colors, onAdd }: { colors: Colors; onAdd: () => void })
 
 function PeopleScreen({ contacts, colors, onAdd }: { contacts: Contact[]; colors: Colors; onAdd: () => void }) { return <><Text style={[styles.subtitle, { color: colors.muted }]}>Track money received, money paid, and your recorded history with each person.</Text>{contacts.length ? contacts.map((contact) => <View key={contact.name} style={[styles.personRow, { borderBottomColor: colors.border }]}><View style={styles.personAvatar}><Text style={styles.personInitial}>{contact.name.charAt(0).toUpperCase()}</Text></View><View style={styles.rowBody}><Text style={[styles.rowTitle, { color: colors.text }]}>{contact.name}</Text><Text style={[styles.caption, { color: colors.muted }]}>{contact.count} transaction{contact.count === 1 ? '' : 's'} · Received {money(contact.received)}</Text></View><Text style={[styles.rowAmount, { color: palette.danger }]}>{money(contact.paid)}</Text></View>) : <EmptyState colors={colors} onAdd={onAdd} />}</>; }
 
-function ProfileScreen({ onOpenCategories, onOpenAliases, session, colors, mode, setMode, onLogout, onDataDeleted, smsStatusTick }: { onOpenCategories: () => void; onOpenAliases: () => void; smsStatusTick: number; onDataDeleted: () => void; session: Session; colors: Colors; mode: ThemeMode; setMode: (mode: ThemeMode) => void; onLogout: () => void }) { return <><View style={[styles.profileCard, { backgroundColor: colors.card, borderColor: colors.border }]}><View style={styles.profileAvatar}><Text style={styles.profileInitial}>{session.user.full_name.charAt(0).toUpperCase()}</Text></View><Text style={[styles.profileName, { color: colors.text }]}>{session.user.full_name}</Text><Text style={[styles.caption, { color: colors.muted }]}>{session.user.email}</Text></View><SectionHeader title="Preferences" colors={colors} /><SettingRow icon={<Sliders color={palette.navy} />} title="Currency" value="INR (₹)" colors={colors} /><SettingRow icon={<Bell color={palette.navy} />} title="Notifications" value="Available when configured" colors={colors} /><View style={[styles.settingRow, { borderBottomColor: colors.border }]}><View style={styles.settingIcon}><Settings color={palette.navy} size={18} /></View><View style={styles.rowBody}><Text style={[styles.rowTitle, { color: colors.text }]}>Theme</Text><Text style={[styles.caption, { color: colors.muted }]}>Choose your preferred appearance</Text></View><Pressable onPress={() => setMode(mode === 'light' ? 'dark' : 'light')}><Text style={styles.link}>{mode === 'light' ? 'Light' : 'Dark'}</Text></Pressable></View><SectionHeader title="Your data" colors={colors} /><SettingRow icon={<Sliders color={palette.navy} />} title="Categories" value="Create, edit and organise" colors={colors} onPress={onOpenCategories} /><SettingRow icon={<Sliders color={palette.navy} />} title="Merchant names" value="Corrections Velnora remembers" colors={colors} onPress={onOpenAliases} /><SectionHeader title="Account" colors={colors} /><SettingRow icon={<LockKeyhole color={palette.navy} />} title="Data and privacy" value="Review controls" colors={colors} /><LocalDataSection userId={session.user.id} colors={colors} onDeleted={onDataDeleted} /><SmsStagingStatusSection userId={session.user.id} colors={colors} refreshKey={smsStatusTick} /><Pressable style={styles.logoutButton} onPress={onLogout}><LogOut color={palette.danger} size={18} /><Text style={{ color: palette.danger, fontWeight: '700' }}>Sign out</Text></Pressable><Text style={[styles.caption, { color: colors.muted, textAlign: 'center', marginTop: 24 }]}>Velnora · Personal Finance & Expense Tracker</Text></>; }
 
 type Colors = { canvas: string; card: string; border: string; text: string; muted: string };
-function GuestProfile({ onOpenCategories, onOpenAliases, colors, mode, setMode, onSignIn, onCreate }: { onOpenCategories: () => void; onOpenAliases: () => void; colors: Colors; mode: ThemeMode; setMode: (mode: ThemeMode) => void; onSignIn: () => void; onCreate: () => void }) { return <><View style={[styles.profileCard, { backgroundColor: colors.card, borderColor: colors.border }]}><View style={styles.profileAvatar}><UserRound color="#FFFFFF" size={26} /></View><Text style={[styles.profileName, { color: colors.text }]}>Guest</Text><Text style={[styles.caption, { color: colors.muted, textAlign: 'center' }]}>Your data is stored only on this device. Create an account to sync across devices.</Text></View><Pressable style={styles.primaryButton} onPress={onCreate}><Text style={styles.primaryButtonText}>Create an account</Text></Pressable><Pressable onPress={onSignIn}><Text style={[styles.link, { textAlign: 'center', marginTop: 16 }]}>Sign in</Text></Pressable><SectionHeader title="Your data" colors={colors} /><SettingRow icon={<Sliders color={palette.navy} />} title="Categories" value="Create, edit and organise" colors={colors} onPress={onOpenCategories} /><SettingRow icon={<Sliders color={palette.navy} />} title="Merchant names" value="Sign in to use" colors={colors} onPress={onOpenAliases} /><SectionHeader title="Preferences" colors={colors} /><View style={[styles.settingRow, { borderBottomColor: colors.border }]}><View style={styles.settingIcon}><Settings color={palette.navy} size={18} /></View><View style={styles.rowBody}><Text style={[styles.rowTitle, { color: colors.text }]}>Theme</Text></View><Pressable onPress={() => setMode(mode === 'light' ? 'dark' : 'light')}><Text style={styles.link}>{mode === 'light' ? 'Light' : 'Dark'}</Text></Pressable></View></>; }
 function SettingRow({ icon, title, value, colors, onPress }: { icon: React.ReactNode; title: string; value: string; colors: Colors; onPress?: () => void }) { return <Pressable disabled={!onPress} onPress={onPress} accessibilityRole={onPress ? 'button' : undefined} style={[styles.settingRow, { borderBottomColor: colors.border }]}><View style={styles.settingIcon}>{icon}</View><View style={styles.rowBody}><Text style={[styles.rowTitle, { color: colors.text }]}>{title}</Text><Text style={[styles.caption, { color: colors.muted }]}>{value}</Text></View><ChevronRight color={colors.muted} size={18} /></Pressable>; }
 function Metric({ label, value, positive }: { label: string; value: string; positive?: boolean }) { return <View style={styles.metric}><Text style={styles.heroLabel}>{label}</Text><Text style={[styles.metricValue, { color: positive ? palette.emerald : '#FFFFFF' }]}>{value}</Text></View>; }
 function ActionButton({ icon, label, onPress, colors }: { icon: React.ReactNode; label: string; onPress: () => void; colors: Colors }) { return <Pressable style={[styles.actionButton, { backgroundColor: colors.card, borderColor: colors.border }]} onPress={onPress}>{icon}<Text style={[styles.actionLabel, { color: colors.text }]}>{label}</Text></Pressable>; }
 function SectionHeader({ title, action, onPress, colors }: { title: string; action?: string; onPress?: () => void; colors: Colors }) { return <View style={styles.sectionHeader}><Text style={[styles.sectionTitle, { color: colors.text }]}>{title}</Text>{action && <Pressable onPress={onPress}><Text style={styles.link}>{action}</Text></Pressable>}</View>; }
 function TransactionRow({ item, colors }: { item: Transaction; colors: Colors }) { const incoming = item.direction === 'income'; return <View style={[styles.transactionRow, { borderBottomColor: colors.border }]}><View style={[styles.transactionIcon, { backgroundColor: incoming ? palette.emeraldSoft : '#FCE7EA' }]}>{incoming ? <ArrowDownLeft color={palette.emerald} size={18} /> : <ArrowUpRight color={palette.danger} size={18} />}</View><View style={styles.rowBody}><Text style={[styles.rowTitle, { color: colors.text }]}>{item.counterparty}</Text><Text style={[styles.caption, { color: colors.muted }]}>{item.category} · {new Date(item.date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}</Text><Text style={[styles.sourceLabel, { color: item.source === 'sms' ? palette.emerald : colors.muted }]}>{item.source === 'sms' ? 'SMS detected' : 'Manual'}</Text></View><Text style={[styles.rowAmount, { color: incoming ? palette.emerald : palette.danger }]}>{incoming ? '+' : '-'}{money(item.amount)}</Text></View>; }
 function EmptyState({ colors, onAdd }: { colors: Colors; onAdd: () => void }) { return <View style={[styles.emptyCard, { backgroundColor: colors.card, borderColor: colors.border }]}><WalletCards color={palette.emerald} size={26} /><Text style={[styles.emptyTitle, { color: colors.text }]}>No transactions yet</Text><Text style={[styles.caption, { color: colors.muted }]}>Add your first income or expense to start understanding your cash flow.</Text><Pressable onPress={onAdd}><Text style={styles.link}>Add transaction</Text></Pressable></View>; }
-function BottomNav({ tab, setTab, colors }: { tab: Tab; setTab: (tab: Tab) => void; colors: Colors }) { const items: [Tab, typeof Home, string][] = [['home', Home, 'Home'], ['transactions', LayoutGrid, 'Transactions'], ['analytics', Chart, 'Analytics'], ['budgets', WalletCards, 'Budgets'], ['people', Users, 'People']]; return <View style={[styles.nav, { backgroundColor: colors.card, borderTopColor: colors.border }]}>{items.map(([key, Icon, label]) => <Pressable key={key} style={styles.navItem} onPress={() => setTab(key)}><Icon size={19} color={tab === key ? palette.emerald : colors.muted} /><Text style={[styles.navLabel, { color: tab === key ? palette.emerald : colors.muted }]}>{label}</Text></Pressable>)}</View>; }
+function NavItem({ Icon, label, active, onPress, colors }: { Icon: typeof Home; label: string; active: boolean; onPress: () => void; colors: Colors }) {
+  const scale = useRef(new Animated.Value(active ? 1.12 : 1)).current;
+  useEffect(() => { Animated.spring(scale, { toValue: active ? 1.12 : 1, friction: 6, tension: 140, useNativeDriver: true }).start(); }, [active, scale]);
+  return <Pressable style={styles.navItem} onPress={onPress} accessibilityRole="button" accessibilityState={{ selected: active }} accessibilityLabel={label}>
+    <Animated.View style={{ transform: [{ scale }] }}><Icon size={19} color={active ? palette.emerald : colors.muted} /></Animated.View>
+    <Text style={[styles.navLabel, { color: active ? palette.emerald : colors.muted }]}>{label}</Text>
+  </Pressable>;
+}
+function BottomNav({ tab, setTab, colors }: { tab: Tab; setTab: (tab: Tab) => void; colors: Colors }) {
+  const items: [Tab, typeof Home, string][] = [['home', Home, 'Home'], ['transactions', LayoutGrid, 'Transactions'], ['analytics', Chart, 'Analytics'], ['budgets', WalletCards, 'Budgets'], ['people', Users, 'People']];
+  const [width, setWidth] = useState(0);
+  const index = items.findIndex(([key]) => key === tab);
+  const x = useRef(new Animated.Value(0)).current;
+  const visible = useRef(new Animated.Value(index >= 0 ? 1 : 0)).current;
+  useEffect(() => {
+    if (!width) return;
+    if (index >= 0) Animated.spring(x, { toValue: index * (width / items.length), friction: 8, tension: 90, useNativeDriver: true }).start();
+    Animated.timing(visible, { toValue: index >= 0 ? 1 : 0, duration: 160, useNativeDriver: true }).start();
+  }, [index, width, x, visible, items.length]);
+  return <View style={[styles.nav, { backgroundColor: colors.card, borderTopColor: colors.border }]} onLayout={(e) => setWidth(e.nativeEvent.layout.width)}>
+    {width > 0 ? <Animated.View pointerEvents="none" style={{ position: 'absolute', top: -1, left: 0, width: width / items.length, alignItems: 'center', opacity: visible, transform: [{ translateX: x }] }}><View style={{ width: 32, height: 3, borderRadius: 2, backgroundColor: palette.emerald }} /></Animated.View> : null}
+    {items.map(([key, Icon, label]) => <NavItem key={key} Icon={Icon} label={label} active={tab === key} onPress={() => setTab(key)} colors={colors} />)}
+  </View>;
+}
 
 function AuthLoading({ colors }: { colors: Colors }) { return <SafeAreaView style={[styles.safe, { backgroundColor: colors.canvas }]}><View style={styles.loading}><Text style={[styles.brand, { color: palette.emerald }]}>VELNORA</Text></View></SafeAreaView>; }
 type AuthProps = { onGuest: () => void; screen: 'welcome' | 'signup' | 'signin' | 'forgot'; setScreen: (screen: 'welcome' | 'signup' | 'signin' | 'forgot') => void; fullName: string; setFullName: (value: string) => void; email: string; setEmail: (value: string) => void; password: string; setPassword: (value: string) => void; confirmPassword: string; setConfirmPassword: (value: string) => void; showPassword: boolean; setShowPassword: (value: boolean) => void; termsAccepted: boolean; setTermsAccepted: (value: boolean) => void; busy: boolean; error: string; notice: string; onSubmit: (screen: 'signup' | 'signin') => Promise<void>; onForgot: () => Promise<void>; colors: Colors };
@@ -354,6 +425,9 @@ function AuthScreens(props: AuthProps) { const signup = props.screen === 'signup
 function AuthField({ label, value, onChangeText, placeholder, icon, colors }: { label: string; value: string; onChangeText: (value: string) => void; placeholder: string; icon: React.ReactNode; colors: Colors }) { return <View style={styles.authField}><Text style={[styles.label, { color: colors.muted }]}>{label}</Text><View style={[styles.authInputWrap, { backgroundColor: colors.card, borderColor: colors.border }]}>{icon}<TextInput value={value} onChangeText={onChangeText} placeholder={placeholder} placeholderTextColor={colors.muted} style={[styles.inputBare, { color: colors.text }]} autoCapitalize="none" /></View></View>; }
 function PasswordField({ label, value, onChangeText, visible, toggle, colors }: { label: string; value: string; onChangeText: (value: string) => void; visible: boolean; toggle: () => void; colors: Colors }) { return <View style={styles.authField}><Text style={[styles.label, { color: colors.muted }]}>{label}</Text><View style={[styles.authInputWrap, { backgroundColor: colors.card, borderColor: colors.border }]}><LockKeyhole color={colors.muted} size={17} /><TextInput value={value} onChangeText={onChangeText} placeholder="8+ characters" placeholderTextColor={colors.muted} secureTextEntry={!visible} style={[styles.inputBare, { color: colors.text }]} /><Pressable onPress={toggle}>{visible ? <EyeOff color={colors.muted} size={18} /> : <Eye color={colors.muted} size={18} />}</Pressable></View></View>; }
 
-const styles = StyleSheet.create({
+const buildStyles = () => StyleSheet.create({
   safe: { flex: 1 }, shell: { flex: 1 }, content: { padding: 20, paddingBottom: 150 }, header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }, overline: { fontSize: 11, fontWeight: '800', letterSpacing: 2 }, title: { fontSize: 26, fontWeight: '800', marginTop: 6 }, iconButton: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center', borderWidth: 1 }, avatarText: { fontSize: 17, fontWeight: '800' }, heroCard: { borderRadius: 24, padding: 22, marginBottom: 24 }, heroLabel: { color: '#B9C9D7', fontSize: 10, fontWeight: '800', letterSpacing: 1.2 }, heroValue: { color: '#FFFFFF', fontSize: 38, fontWeight: '800', marginTop: 9 }, heroHint: { color: '#C8D5DF', fontSize: 12, lineHeight: 18, marginTop: 8 }, heroTitle: { color: '#FFFFFF', fontSize: 21, fontWeight: '800', marginTop: 14 }, metricRow: { flexDirection: 'row', gap: 30, borderTopWidth: 1, borderTopColor: '#29405A', marginTop: 20, paddingTop: 16 }, metric: { flex: 1 }, metricValue: { fontSize: 16, fontWeight: '800', marginTop: 6 }, sectionHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 22, marginBottom: 12 }, sectionTitle: { fontSize: 18, fontWeight: '800' }, link: { color: palette.emerald, fontWeight: '800', fontSize: 13 }, actionRow: { flexDirection: 'row', gap: 12 }, actionButton: { flex: 1, minHeight: 72, borderRadius: 16, borderWidth: 1, padding: 14, gap: 7 }, actionLabel: { fontSize: 13, fontWeight: '700' }, card: { borderRadius: 18, borderWidth: 1, padding: 18 }, cardTitle: { fontSize: 15, fontWeight: '800' }, flowValue: { fontSize: 28, fontWeight: '800', marginTop: 8 }, progressTrack: { height: 7, borderRadius: 5, backgroundColor: '#DDE5EB', overflow: 'hidden', marginTop: 14 }, progressFill: { height: '100%', borderRadius: 5 }, caption: { fontSize: 12, lineHeight: 18, marginTop: 7 }, transactionRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 14, borderBottomWidth: 1 }, transactionIcon: { width: 42, height: 42, borderRadius: 14, alignItems: 'center', justifyContent: 'center', marginRight: 12 }, rowBody: { flex: 1 }, rowTitle: { fontSize: 15, fontWeight: '700' }, rowAmount: { fontSize: 14, fontWeight: '800' }, sourceLabel: { fontSize: 10, fontWeight: '800', marginTop: 3, textTransform: 'uppercase' }, searchBox: { minHeight: 48, borderRadius: 14, borderWidth: 1, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, gap: 9 }, searchInput: { flex: 1, fontSize: 14 }, filterRow: { flexDirection: 'row', gap: 8, marginTop: 14 }, filterChip: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 20, backgroundColor: '#E8EEF2' }, filterChipActive: { backgroundColor: palette.emeraldSoft }, filterChipText: { fontSize: 12, fontWeight: '800' }, categoryScroll: { marginTop: 10 }, chip: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 18, marginRight: 7, backgroundColor: '#EEF2F4' }, chipActive: { backgroundColor: palette.emeraldSoft }, chipText: { fontSize: 12, fontWeight: '700' }, chart: { height: 160, flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'center', gap: 18, paddingTop: 16 }, chartBar: { width: 46, borderRadius: 10 }, legend: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 12 }, budgetRow: { flexDirection: 'row', alignItems: 'center', gap: 14, marginBottom: 15 }, emptyCard: { borderRadius: 18, borderWidth: 1, padding: 20, alignItems: 'flex-start', gap: 7 }, emptyTitle: { fontSize: 16, fontWeight: '800' }, personRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 13, borderBottomWidth: 1 }, personAvatar: { width: 42, height: 42, borderRadius: 21, backgroundColor: palette.emeraldSoft, alignItems: 'center', justifyContent: 'center', marginRight: 12 }, personInitial: { color: palette.navy, fontSize: 16, fontWeight: '800' }, profileCard: { borderRadius: 20, borderWidth: 1, alignItems: 'center', padding: 22 }, profileAvatar: { width: 64, height: 64, borderRadius: 32, backgroundColor: palette.emeraldSoft, alignItems: 'center', justifyContent: 'center' }, profileInitial: { color: palette.navy, fontSize: 26, fontWeight: '800' }, profileName: { fontSize: 20, fontWeight: '800', marginTop: 12 }, settingRow: { minHeight: 66, flexDirection: 'row', alignItems: 'center', borderBottomWidth: 1, gap: 12 }, settingIcon: { width: 34, height: 34, borderRadius: 11, backgroundColor: palette.emeraldSoft, alignItems: 'center', justifyContent: 'center' }, logoutButton: { flexDirection: 'row', alignItems: 'center', gap: 9, paddingVertical: 20 }, fab: { position: 'absolute', right: 20, bottom: 82, borderRadius: 25, height: 50, paddingHorizontal: 17, backgroundColor: palette.navy, flexDirection: 'row', alignItems: 'center', gap: 7, elevation: 5 }, fabText: { color: '#FFFFFF', fontWeight: '800' }, nav: { position: 'absolute', left: 0, right: 0, bottom: 0, height: 74, borderTopWidth: 1, flexDirection: 'row', justifyContent: 'space-around', paddingTop: 11 }, navItem: { flex: 1, alignItems: 'center', gap: 4 }, navLabel: { fontSize: 10, fontWeight: '800' }, modalBackdrop: { flex: 1, backgroundColor: '#00000066', justifyContent: 'flex-end' }, modal: { borderTopLeftRadius: 26, borderTopRightRadius: 26, padding: 22, paddingBottom: 34 }, modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 18 }, modalTitle: { fontSize: 21, fontWeight: '800' }, label: { fontSize: 10, fontWeight: '800', letterSpacing: 1.1, marginTop: 15, marginBottom: 7 }, segment: { flexDirection: 'row', gap: 10 }, segmentItem: { flex: 1, minHeight: 45, borderRadius: 12, backgroundColor: '#EEF2F4', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7 }, segmentActive: { backgroundColor: palette.emeraldSoft }, segmentText: { fontSize: 13, fontWeight: '800' }, input: { minHeight: 48, borderWidth: 1, borderRadius: 12, paddingHorizontal: 13, fontSize: 15 }, primaryButton: { minHeight: 52, borderRadius: 13, backgroundColor: palette.emerald, alignItems: 'center', justifyContent: 'center', marginTop: 22 }, primaryButtonText: { color: '#062119', fontWeight: '800', fontSize: 15 }, outlineButton: { alignSelf: 'flex-start', paddingHorizontal: 15, paddingVertical: 10, borderRadius: 12, borderWidth: 1, borderColor: palette.emerald, marginTop: 18 }, outlineButtonText: { color: palette.emerald, fontWeight: '800' }, loading: { flex: 1, alignItems: 'center', justifyContent: 'center' }, brand: { color: palette.emerald, fontSize: 13, fontWeight: '900', letterSpacing: 3 }, welcome: { flexGrow: 1, justifyContent: 'center', padding: 26 }, logoMark: { width: 62, height: 62, borderRadius: 20, backgroundColor: '#173A4D', alignItems: 'center', justifyContent: 'center', marginBottom: 20 }, welcomeTitle: { color: '#FFFFFF', fontSize: 40, lineHeight: 46, fontWeight: '800', marginTop: 30 }, welcomeDescription: { color: '#D6E1E9', fontSize: 17, lineHeight: 25, marginTop: 18 }, productDescriptor: { color: palette.emerald, fontSize: 12, fontWeight: '800', marginTop: 22 }, secondaryButton: { minHeight: 52, borderRadius: 13, borderWidth: 1, borderColor: '#45617B', alignItems: 'center', justifyContent: 'center', marginTop: 12 }, secondaryButtonText: { color: '#FFFFFF', fontWeight: '800' }, formScreen: { padding: 24, paddingBottom: 50 }, authTitle: { fontSize: 30, fontWeight: '800', marginTop: 18 }, subtitle: { fontSize: 13, lineHeight: 20, marginBottom: 12 }, authField: { marginTop: 17 }, authInputWrap: { minHeight: 50, borderRadius: 12, borderWidth: 1, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 13, gap: 9 }, inputBare: { flex: 1, paddingVertical: 12, fontSize: 15 }, termsRow: { flexDirection: 'row', alignItems: 'center', gap: 9, marginTop: 18 }, checkbox: { width: 21, height: 21, borderRadius: 6, borderWidth: 1, borderColor: '#92A0AD', alignItems: 'center', justifyContent: 'center' }, checkboxActive: { backgroundColor: palette.emerald, borderColor: palette.emerald }, errorText: { color: palette.danger, fontSize: 13, marginTop: 15 }, noticeText: { color: palette.warning, fontSize: 13, marginTop: 15 },
 });
+
+let styles = buildStyles();
+let stylesAccent: string = 'emerald';

@@ -10,6 +10,7 @@ from decimal import Decimal
 from uuid import uuid4
 
 from sqlalchemy import (
+    JSON,
     BigInteger,
     Float,
     LargeBinary,
@@ -250,3 +251,23 @@ class Receipt(Base):
     size_bytes = Column(Integer, nullable=False)
     data = Column(LargeBinary, nullable=False)
     created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class ExpectedPayment(Base):
+    """Money someone is expected to pay the user ('receive') or the user is expected to pay ('pay'), with partial payments."""
+    __tablename__ = "expected_payments"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    person = Column(String(80), nullable=False)
+    direction = Column(String(8), nullable=False, default="receive")
+    amount_paise = Column(BigInteger, nullable=False)
+    paid_paise = Column(BigInteger, nullable=False, default=0)
+    note = Column(String(200), nullable=True)
+    due_date = Column(String(10), nullable=True)
+    status = Column(String(12), nullable=False, default="pending")
+    settled_at = Column(DateTime(timezone=True), nullable=True)
+    payments = Column(JSON, nullable=False, default=list)
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
