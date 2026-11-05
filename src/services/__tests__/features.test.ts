@@ -416,8 +416,11 @@ async function expectedPayments() {
   const ravi = await createExpected(db, 'user-A', { person: 'Ravi Kumar', amountPaise: 50000, note: 'Dinner split', dueDate: '2020-01-01' });
   const anita = await createExpected(db, 'user-A', { person: 'Anita', amountPaise: 120000 });
   const iOwe = await createExpected(db, 'user-A', { person: 'Landlord', amountPaise: 700000, direction: 'pay' });
+  // explicit creation times: ordering must not depend on how fast this machine is
+  await db.runAsync("UPDATE expected_payments SET created_at = '2026-01-01T00:00:00.000Z' WHERE id = ?", anita.id);
+  await db.runAsync("UPDATE expected_payments SET created_at = '2026-01-02T00:00:00.000Z' WHERE id = ?", iOwe.id);
   assert.equal(ravi.status, 'pending'); assert.equal(isOverdue(ravi), true); assert.equal(isOverdue(anita), false);
-  assert.deepEqual((await listExpected(db, 'user-A')).map((e) => e.person), ['Ravi Kumar', 'Anita', 'Landlord'], 'due-dated first, then newest');
+  assert.deepEqual((await listExpected(db, 'user-A')).map((e) => e.person), ['Ravi Kumar', 'Landlord', 'Anita'], 'due-dated first, then newest first');
   let q = await db.getFirstAsync<{ operation: string; payload: string }>("SELECT operation, payload FROM sync_queue WHERE entity_id = ?", ravi.id);
   assert.equal(q!.operation, 'create'); assert.equal(JSON.parse(q!.payload).user_id, 'user-A'); assert.equal(JSON.parse(q!.payload).note, 'Dinner split');
 

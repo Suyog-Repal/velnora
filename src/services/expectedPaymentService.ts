@@ -77,7 +77,8 @@ export async function listExpected(db: IDatabase, scope: Scope): Promise<Expecte
     if (a.due_date && b.due_date) return a.due_date.localeCompare(b.due_date);
     if (a.due_date) return -1;
     if (b.due_date) return 1;
-    return b.created_at.localeCompare(a.created_at);
+    // newest first; identical timestamps fall back to id so the order never depends on clock resolution
+    return b.created_at.localeCompare(a.created_at) || a.id.localeCompare(b.id);
   });
 }
 

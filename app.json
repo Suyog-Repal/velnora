@@ -17,7 +17,11 @@
         "monochromeImage": "./assets/android-icon-monochrome.png"
       },
       "predictiveBackGestureEnabled": false,
-      "package": "com.anonymous.velnora"
+      "package": "com.anonymous.velnora",
+      "blockedPermissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.SYSTEM_ALERT_WINDOW"
+      ]
     },
     "plugins": [
       [
@@ -33,7 +37,8 @@
         "expo-image-picker",
         {
           "photosPermission": "Velnora uses your photos only when you choose a receipt image to attach to a transaction.",
-          "cameraPermission": "Velnora uses the camera only when you capture a receipt or bill photo for a transaction."
+          "cameraPermission": "Velnora uses the camera only when you capture a receipt or bill photo for a transaction.",
+          "microphonePermission": false
         }
       ],
       [
