@@ -1,6 +1,7 @@
 import * as SecureStore from 'expo-secure-store';
 import Constants from 'expo-constants';
-import { getDatabase } from './src/db/database.ts';
+import { deleteUserLocalData, getLocalDataSummary } from './src/services/localDataService.ts';
+import { purgeStagedSmsForUser } from './src/services/smsStagingService.ts';
 import type { AuthUser, Session } from './src/db/types.ts';
 
 export type { AuthUser, Session };
@@ -94,43 +95,19 @@ export async function refreshSession(session: Session): Promise<Session> {
 
 /**
  * Returns count of unsynchronized transactions for a given user.
- * Used to warn users before any manual local data wipe.
+ * Throws on failure (a failed count must never be shown as "0 unsynchronized").
  */
 export async function getUnsyncedTransactionCount(userId: string): Promise<number> {
-  try {
-    const db = await getDatabase();
-    const row = await db.getFirstAsync<{ count: number }>(
-      "SELECT COUNT(*) as count FROM transactions WHERE user_id = ? AND sync_status != 'synced'",
-      userId,
-    );
-    return row?.count ?? 0;
-  } catch {
-    return 0;
-  }
+  return (await getLocalDataSummary(userId)).unsyncedCount;
 }
 
 /**
  * Explicit user-initiated local data purge for a specific user account.
- * Requires explicit confirmation from the user after warning about unsynchronized records.
+ * Callers must obtain explicit confirmation after warning about unsynchronized records.
  */
 export async function clearUserLocalDataWithWarning(userId: string): Promise<{ cleared: boolean; unsyncedCount: number }> {
-  const unsyncedCount = await getUnsyncedTransactionCount(userId);
-  const db = await getDatabase();
-  await db.execAsync('BEGIN TRANSACTION');
-  try {
-    await db.runAsync('DELETE FROM transactions WHERE user_id = ?', userId);
-    await db.runAsync("DELETE FROM sync_queue WHERE json_extract(payload, '$.user_id') = ?", userId);
-    await db.runAsync(
-      "DELETE FROM app_metadata WHERE key IN (?, ?)",
-      `last_sync_cursor_${userId}`,
-      `last_sync_at_${userId}`,
-    );
-    await db.execAsync('COMMIT');
-    return { cleared: true, unsyncedCount };
-  } catch (err) {
-    await db.execAsync('ROLLBACK');
-    throw err;
-  }
+  const { cleared, unsyncedCount } = await deleteUserLocalData(userId, undefined, purgeStagedSmsForUser);
+  return { cleared, unsyncedCount };
 }
 
 export async function clearLocalUserData(): Promise<void> {

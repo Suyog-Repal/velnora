@@ -12,6 +12,7 @@
  */
 
 import { pushSync, pullSync, SyncApiError } from './syncApi.ts';
+import { withWriteLock } from '../db/writeLock.ts';
 import { CategoryRepository } from '../db/repositories/categoryRepository.ts';
 import { MetadataRepository } from '../db/repositories/metadataRepository.ts';
 import { SyncQueueRepository } from '../db/repositories/syncQueueRepository.ts';
@@ -54,7 +55,12 @@ export interface RemoteCategory {
   updated_at: string;
 }
 
+export interface RemoteBudget { id: string; category: string | null; amount_paise: number; deleted_at?: string | null; created_at: string; updated_at: string }
+export interface RemoteAlias { id: string; match_key: string; original_text: string; display_name: string; category: string | null; deleted_at?: string | null; created_at: string; updated_at: string }
+
 export interface SyncPullServerResponse {
+  budgets?: RemoteBudget[];
+  merchant_aliases?: RemoteAlias[];
   transactions: RemoteTransaction[];
   categories?: RemoteCategory[];
   categories_complete?: boolean;
@@ -81,6 +87,13 @@ type StateListener = (state: SyncEngineState) => void;
 const MIN_RECONNECT_INTERVAL_MS = 5000;
 const MAX_RETRY_ATTEMPTS = 10;
 const PERMANENT_FAILURE_DATE = '9999-12-31T23:59:59Z';
+
+function buildSimplePayload(entityType: string, p: Record<string, unknown>, isDelete: boolean): Record<string, unknown> {
+  if (isDelete) return {};
+  if (entityType === 'category') return { category: p.category, direction: p.direction, icon: p.icon, color: p.color };
+  if (entityType === 'budget') return { category: p.category ?? null, amount_paise: p.amount_paise };
+  return { match_key: p.match_key, original_text: p.original_text, display_name: p.display_name, category: p.category ?? null };
+}
 
 export class SyncEngine {
   private isSyncing = false;
@@ -275,7 +288,7 @@ export class SyncEngine {
     session: SyncSession,
     apiBaseUrl?: string,
   ): Promise<{ pushed: number; conflicts: number; errors: string[] }> {
-    const { syncQueueRepo, txRepo } = await this.getRepos();
+    const { db, syncQueueRepo, txRepo } = await this.getRepos();
     const pendingItems = await syncQueueRepo.peekEligible(50, session.user?.id);
 
     if (pendingItems.length === 0) {
@@ -321,6 +334,19 @@ export class SyncEngine {
           }
         }
 
+        if (item.entity_type !== 'transaction') {
+          // Categories, budgets and merchant aliases: ownership already verified above (payload.user_id === session user).
+          pushItems.push({
+            operation_id: item.id,
+            entity_type: item.entity_type,
+            entity_id: item.entity_id,
+            operation: item.operation,
+            client_version: 1,
+            payload: buildSimplePayload(item.entity_type, payloadObj as unknown as Record<string, unknown>, isDelete),
+          });
+          continue;
+        }
+
         pushItems.push({
           operation_id: item.id,
           entity_type: item.entity_type,
@@ -337,6 +363,14 @@ export class SyncEngine {
                 counterparty: (payloadObj as TransactionEntity).counterparty,
                 category: (payloadObj as TransactionEntity).category,
                 category_id: (payloadObj as TransactionEntity).category_id,
+                merchant_phone: (payloadObj as TransactionEntity).merchant_phone ?? null,
+                payment_method: (payloadObj as TransactionEntity).payment_method ?? null,
+                receipt_remote_id: (payloadObj as TransactionEntity).receipt_remote_id ?? null,
+                location_lat: (payloadObj as TransactionEntity).location_lat ?? null,
+                location_lng: (payloadObj as TransactionEntity).location_lng ?? null,
+                location_name: (payloadObj as TransactionEntity).location_name ?? null,
+                location_address: (payloadObj as TransactionEntity).location_address ?? null,
+                location_confirmed: Boolean((payloadObj as TransactionEntity).location_confirmed),
                 description: (payloadObj as TransactionEntity).description,
                 transaction_date: (payloadObj as TransactionEntity).transaction_date,
                 source: (payloadObj as TransactionEntity).source,
@@ -419,6 +453,12 @@ export class SyncEngine {
         pushed++;
         // Queue items are removed ONLY upon confirmed server acknowledgement
         await txRepo.updateSyncStatus(ack.entity_id, 'synced', ack.server_version);
+        const ackedItem = pendingItems.find((p) => p.id === ack.operation_id);
+        if (ackedItem?.entity_type === 'budget') {
+          await db.runAsync("UPDATE budgets SET sync_status = 'synced' WHERE id = ?", ack.entity_id);
+        } else if (ackedItem?.entity_type === 'merchant_alias') {
+          await db.runAsync("UPDATE merchant_aliases SET sync_status = 'synced' WHERE id = ?", ack.entity_id);
+        }
         await syncQueueRepo.dequeue(ack.operation_id);
       } else {
         const errorMsg = ack.error || 'Server rejected item';
@@ -484,7 +524,9 @@ export class SyncEngine {
         apiBaseUrl,
       );
 
-      // Wrap page processing in an atomic SQLite transaction
+      // Wrap page processing in an atomic SQLite transaction, serialized with other multi-statement writers
+      // (manual add / SMS drain / deletion) so none can start or be swept into this transaction.
+      await withWriteLock(async () => {
       await db.execAsync('BEGIN TRANSACTION');
       try {
         // 1. Reconcile categories: ONLY prune if server explicitly indicates categories_complete === true
@@ -504,6 +546,7 @@ export class SyncEngine {
               name: cat.name,
               transaction_type: cat.direction === 'income' ? 'income' : 'expense',
               icon: cat.icon,
+              color: cat.color,
             });
           }
 
@@ -515,7 +558,7 @@ export class SyncEngine {
           );
 
           for (const localCat of localCats) {
-            if (localCat.user_id && !serverCatIds.has(localCat.id) && !pendingCatIds.has(localCat.id)) {
+            if (localCat.user_id && localCat.user_id === session.user?.id && !serverCatIds.has(localCat.id) && !pendingCatIds.has(localCat.id)) {
               await catRepo.delete(localCat.id);
             }
           }
@@ -528,7 +571,43 @@ export class SyncEngine {
               name: cat.name,
               transaction_type: cat.direction === 'income' ? 'income' : 'expense',
               icon: cat.icon,
+              color: cat.color,
             });
+          }
+        }
+
+        // 1b. Merge budgets and merchant aliases (this user's rows only; local unsynced edits win until pushed)
+        const ownerId = session.user?.id;
+        if (ownerId) {
+          for (const rb of pullResp.budgets ?? []) {
+            const local = await db.getFirstAsync<{ sync_status: string }>('SELECT sync_status FROM budgets WHERE id = ?', rb.id);
+            if (!local) {
+              if (!rb.deleted_at) {
+                await db.runAsync(
+                  `INSERT INTO budgets (id, user_id, category, amount_paise, sync_status, deleted_at, created_at, updated_at) VALUES (?, ?, ?, ?, 'synced', NULL, ?, ?)`,
+                  rb.id, ownerId, rb.category, rb.amount_paise, rb.created_at, rb.updated_at);
+              }
+            } else if (local.sync_status === 'synced') {
+              await db.runAsync(
+                `UPDATE budgets SET category = ?, amount_paise = ?, deleted_at = ?, updated_at = ? WHERE id = ? AND user_id = ?`,
+                rb.category, rb.amount_paise, rb.deleted_at ?? null, rb.updated_at, rb.id, ownerId);
+            }
+          }
+          for (const ra of pullResp.merchant_aliases ?? []) {
+            const local = await db.getFirstAsync<{ sync_status: string }>('SELECT sync_status FROM merchant_aliases WHERE id = ? AND user_id = ?', ra.id, ownerId);
+            if (!local) {
+              const keyClash = await db.getFirstAsync<{ id: string }>(
+                'SELECT id FROM merchant_aliases WHERE user_id = ? AND match_key = ? AND deleted_at IS NULL', ownerId, ra.match_key);
+              if (!ra.deleted_at && !keyClash) {
+                await db.runAsync(
+                  `INSERT INTO merchant_aliases (id, user_id, match_key, original_text, display_name, category, sync_status, deleted_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'synced', NULL, ?, ?)`,
+                  ra.id, ownerId, ra.match_key, ra.original_text, ra.display_name, ra.category, ra.created_at, ra.updated_at);
+              }
+            } else if (local.sync_status === 'synced') {
+              await db.runAsync(
+                `UPDATE merchant_aliases SET display_name = ?, category = ?, deleted_at = ?, updated_at = ? WHERE id = ? AND user_id = ?`,
+                ra.display_name, ra.category, ra.deleted_at ?? null, ra.updated_at, ra.id, ownerId);
+            }
           }
         }
 
@@ -554,6 +633,7 @@ export class SyncEngine {
         await db.execAsync('ROLLBACK');
         throw pageErr;
       }
+      });
 
       hasMore = pullResp.has_more;
       if (!hasMore || pullResp.transactions.length === 0) {

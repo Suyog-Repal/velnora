@@ -11,6 +11,8 @@ from uuid import uuid4
 
 from sqlalchemy import (
     BigInteger,
+    Float,
+    LargeBinary,
     Boolean,
     Column,
     DateTime,
@@ -141,6 +143,16 @@ class Transaction(Base):
     created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False, index=True)
 
+    # Optional user-entered details (E.164 merchant phone, receipt reference, user-confirmed location)
+    merchant_phone = Column(String(20), nullable=True)
+    payment_method = Column(String(40), nullable=True)
+    receipt_remote_id = Column(String(64), nullable=True)
+    location_lat = Column(Float, nullable=True)
+    location_lng = Column(Float, nullable=True)
+    location_name = Column(String(200), nullable=True)
+    location_address = Column(Text, nullable=True)
+    location_confirmed = Column(Boolean, nullable=False, default=False, server_default=text("false"))
+
     # Relationships
     user = relationship("User", back_populates="transactions")
     category_rel = relationship("Category", back_populates="transactions")
@@ -197,3 +209,44 @@ class RefreshToken(Base):
 
     def __repr__(self) -> str:
         return f"<RefreshToken id={self.id} user_id={self.user_id} revoked={bool(self.revoked_at)}>"
+
+
+class MerchantAlias(Base):
+    """User-specific merchant correction. Matching is by exact normalized key only."""
+    __tablename__ = "merchant_aliases"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    match_key = Column(String(200), nullable=False)
+    original_text = Column(String(200), nullable=False)
+    display_name = Column(String(160), nullable=False)
+    category = Column(String(80), nullable=True)
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class Budget(Base):
+    """Monthly budget in integer paise. category NULL = overall monthly budget."""
+    __tablename__ = "budgets"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    category = Column(String(80), nullable=True)
+    amount_paise = Column(BigInteger, nullable=False)
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class Receipt(Base):
+    """Receipt/food photo stored in the app's own database (no external storage service)."""
+    __tablename__ = "receipts"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    transaction_id = Column(UUID(as_uuid=True), nullable=False, index=True)
+    content_type = Column(String(40), nullable=False)
+    size_bytes = Column(Integer, nullable=False)
+    data = Column(LargeBinary, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)

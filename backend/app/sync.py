@@ -13,7 +13,9 @@ from typing import List, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, ConfigDict, Field
+import re
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import func, or_, select, text
 from sqlalchemy.orm import Session
 
@@ -21,6 +23,8 @@ from backend.app.auth import current_user
 from backend.app.db.models import Transaction as TransactionModel
 from backend.app.db.models import Category as CategoryModel
 from backend.app.db.models import User as UserModel
+from backend.app.db.models import Budget as BudgetModel
+from backend.app.db.models import MerchantAlias as MerchantAliasModel
 from backend.app.db.session import get_db
 
 router = APIRouter(prefix="/api/v1/sync", tags=["sync"])
@@ -28,6 +32,7 @@ router = APIRouter(prefix="/api/v1/sync", tags=["sync"])
 PAISE_FACTOR = Decimal("100")
 PAISE_UNIT = Decimal("1")
 CLOCK_SKEW_TOLERANCE = timedelta(seconds=60)
+E164_RE = re.compile(r"\+[1-9]\d{7,14}")
 
 
 def to_paise(amount: Decimal) -> int:
@@ -60,6 +65,29 @@ class SyncItemPayload(BaseModel):
     # Category payload fields
     icon: Optional[str] = "tag"
     color: Optional[str] = "#6366f1"
+    # Optional transaction details (explicit null clears; absent leaves unchanged)
+    merchant_phone: Optional[str] = None
+    payment_method: Optional[str] = Field(default=None, max_length=40)
+    receipt_remote_id: Optional[str] = Field(default=None, max_length=64)
+    location_lat: Optional[float] = Field(default=None, ge=-90, le=90)
+    location_lng: Optional[float] = Field(default=None, ge=-180, le=180)
+    location_name: Optional[str] = Field(default=None, max_length=200)
+    location_address: Optional[str] = None
+    location_confirmed: Optional[bool] = None
+    # Budget / merchant alias payload fields
+    amount_paise: Optional[int] = Field(default=None, gt=0)
+    match_key: Optional[str] = Field(default=None, max_length=200)
+    original_text: Optional[str] = Field(default=None, max_length=200)
+    display_name: Optional[str] = Field(default=None, max_length=160)
+
+    @field_validator("merchant_phone")
+    @classmethod
+    def _validate_phone(cls, value: Optional[str]) -> Optional[str]:
+        if value is None or value == "":
+            return None
+        if not E164_RE.fullmatch(value):
+            raise ValueError("merchant_phone must be E.164 (+ and 8-15 digits)")
+        return value
 
 
 class SyncPushItem(BaseModel):
@@ -97,6 +125,14 @@ class SyncPullTransaction(BaseModel):
     deleted_at: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
+    merchant_phone: Optional[str] = None
+    payment_method: Optional[str] = None
+    receipt_remote_id: Optional[str] = None
+    location_lat: Optional[float] = None
+    location_lng: Optional[float] = None
+    location_name: Optional[str] = None
+    location_address: Optional[str] = None
+    location_confirmed: bool = False
 
 
 class SyncPushItemResult(BaseModel):
@@ -129,7 +165,33 @@ class SyncCategoryItem(BaseModel):
     updated_at: datetime
 
 
+class SyncBudgetItem(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    category: Optional[str] = None
+    amount_paise: int
+    deleted_at: Optional[datetime] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class SyncAliasItem(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    match_key: str
+    original_text: str
+    display_name: str
+    category: Optional[str] = None
+    deleted_at: Optional[datetime] = None
+    created_at: datetime
+    updated_at: datetime
+
+
 class SyncPullResponse(BaseModel):
+    budgets: List[SyncBudgetItem] = Field(default_factory=list)
+    merchant_aliases: List[SyncAliasItem] = Field(default_factory=list)
     transactions: List[SyncPullTransaction]
     categories: List[SyncCategoryItem] = Field(default_factory=list)
     categories_complete: bool = True
@@ -150,6 +212,54 @@ class SyncStatusResponse(BaseModel):
 # ==============================================================================
 # Sync Endpoints Implementation
 # ==============================================================================
+def _apply_simple_entity(db: Session, user: UserModel, item: SyncPushItem, now: datetime) -> SyncPushItemResult:
+    """Idempotent upsert / soft-delete for budgets and merchant aliases. Another user's id is always refused."""
+    is_budget = item.entity_type == "budget"
+    model = BudgetModel if is_budget else MerchantAliasModel
+    row = db.scalar(select(model).where(model.id == item.entity_id).with_for_update())
+
+    def result(status_: str, error: Optional[str] = None) -> SyncPushItemResult:
+        return SyncPushItemResult(
+            operation_id=item.operation_id, entity_id=item.entity_id, operation=item.operation,
+            status=status_, server_version=1 if status_ == "synced" else 0, updated_at=now, error=error,
+        )
+
+    if row is not None and row.user_id != user.id:
+        return result("error", "Forbidden: entity belongs to another user")
+
+    if item.operation == SyncOperationType.delete:
+        if row is not None and row.deleted_at is None:
+            row.deleted_at = now
+            row.updated_at = now
+            db.flush()
+        return result("synced")
+
+    p = item.payload
+    if is_budget:
+        if p.amount_paise is None:
+            return result("error", "Missing amount_paise for budget")
+        values = {"category": (p.category or None), "amount_paise": p.amount_paise}
+    else:
+        if not p.match_key or not p.display_name:
+            return result("error", "Missing match_key/display_name for merchant alias")
+        values = {
+            "match_key": p.match_key.strip().lower(),
+            "original_text": (p.original_text or p.match_key).strip(),
+            "display_name": p.display_name.strip(),
+            "category": (p.category or None),
+        }
+    if row is None:
+        db.add(model(id=item.entity_id, user_id=user.id, created_at=now, updated_at=now, **values))
+    else:
+        if row.deleted_at is not None:
+            return result("synced")  # tombstone wins; no resurrection
+        for key, value in values.items():
+            setattr(row, key, value)
+        row.updated_at = now
+    db.flush()
+    return result("synced")
+
+
 @router.post("/push", response_model=SyncPushResponse)
 def sync_push(
     request: SyncPushRequest,
@@ -321,6 +431,13 @@ def sync_push(
                     continue
 
                 # ==============================================================
+                # 1b. BUDGET / MERCHANT ALIAS SYNC (last-write-wins, soft delete, strictly user-scoped)
+                # ==============================================================
+                if item.entity_type in ("budget", "merchant_alias"):
+                    results.append(_apply_simple_entity(db, user, item, now))
+                    continue
+
+                # ==============================================================
                 # 2. TRANSACTION SYNC
                 # ==============================================================
                 if item.entity_type != "transaction":
@@ -436,6 +553,14 @@ def sync_push(
                                 source=item.payload.source or "manual",
                                 reference_id=item.payload.reference_id.strip() if item.payload.reference_id else None,
                                 fingerprint=item.payload.fingerprint.strip() if item.payload.fingerprint else None,
+                                merchant_phone=item.payload.merchant_phone,
+                                payment_method=item.payload.payment_method,
+                                receipt_remote_id=item.payload.receipt_remote_id,
+                                location_lat=item.payload.location_lat,
+                                location_lng=item.payload.location_lng,
+                                location_name=item.payload.location_name,
+                                location_address=item.payload.location_address,
+                                location_confirmed=bool(item.payload.location_confirmed),
                                 sync_status="synced",
                                 server_version=1,
                                 created_at=now,
@@ -476,6 +601,14 @@ def sync_push(
                                 source=item.payload.source or "manual",
                                 reference_id=item.payload.reference_id.strip() if item.payload.reference_id else None,
                                 fingerprint=item.payload.fingerprint.strip() if item.payload.fingerprint else None,
+                                merchant_phone=item.payload.merchant_phone,
+                                payment_method=item.payload.payment_method,
+                                receipt_remote_id=item.payload.receipt_remote_id,
+                                location_lat=item.payload.location_lat,
+                                location_lng=item.payload.location_lng,
+                                location_name=item.payload.location_name,
+                                location_address=item.payload.location_address,
+                                location_confirmed=bool(item.payload.location_confirmed),
                                 sync_status="synced",
                                 server_version=1,
                                 created_at=now,
@@ -552,6 +685,13 @@ def sync_push(
                                 existing.description = item.payload.description.strip()
                             if item.payload.transaction_date is not None:
                                 existing.transaction_date = item.payload.transaction_date
+                            # Detail fields: applied when present in the payload; explicit null clears.
+                            for _field in ("merchant_phone", "payment_method", "receipt_remote_id", "location_lat",
+                                           "location_lng", "location_name", "location_address"):
+                                if _field in item.payload.model_fields_set:
+                                    setattr(existing, _field, getattr(item.payload, _field))
+                            if "location_confirmed" in item.payload.model_fields_set:
+                                existing.location_confirmed = bool(item.payload.location_confirmed)
 
                             existing.server_version += 1
                             existing.updated_at = now
@@ -704,7 +844,12 @@ def sync_pull(
     ).order_by(CategoryModel.name.asc())
     categories_rows = db.scalars(categories_stmt).all()
 
+    budgets_rows = db.scalars(select(BudgetModel).where(BudgetModel.user_id == user.id)).all()
+    alias_rows = db.scalars(select(MerchantAliasModel).where(MerchantAliasModel.user_id == user.id)).all()
+
     return SyncPullResponse(
+        budgets=budgets_rows,
+        merchant_aliases=alias_rows,
         transactions=selected_rows,
         categories=categories_rows,
         categories_complete=True,

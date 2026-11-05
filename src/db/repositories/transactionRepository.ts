@@ -7,6 +7,12 @@ import type {
   UpdateTransactionInput,
 } from '../types.ts';
 import { generateUUID, SyncQueueRepository } from './syncQueueRepository.ts';
+import { withWriteLock } from '../writeLock.ts';
+
+const EXTRA_UPDATE_COLUMNS = [
+  'merchant_phone', 'payment_method', 'receipt_local_path', 'receipt_remote_id', 'receipt_upload_pending',
+  'location_lat', 'location_lng', 'location_name', 'location_address', 'location_confirmed',
+] as const;
 
 export class TransactionRepository {
   private db: IDatabase;
@@ -17,7 +23,11 @@ export class TransactionRepository {
     this.syncQueueRepo = new SyncQueueRepository(db);
   }
 
-  async create(input: CreateTransactionInput): Promise<TransactionEntity> {
+  create(input: CreateTransactionInput): Promise<TransactionEntity> {
+    return withWriteLock(() => this.createUnlocked(input));
+  }
+
+  private async createUnlocked(input: CreateTransactionInput): Promise<TransactionEntity> {
     if (!input.amount || input.amount <= 0) {
       throw new Error('Transaction amount must be greater than zero');
     }
@@ -73,6 +83,16 @@ export class TransactionRepository {
       deleted_at: null,
       created_at: now,
       updated_at: now,
+      merchant_phone: input.merchant_phone ?? null,
+      payment_method: input.payment_method ?? null,
+      receipt_local_path: null,
+      receipt_remote_id: null,
+      receipt_upload_pending: 0,
+      location_lat: input.location_lat ?? null,
+      location_lng: input.location_lng ?? null,
+      location_name: input.location_name ?? null,
+      location_address: input.location_address ?? null,
+      location_confirmed: input.location_confirmed ?? 0,
     };
 
     await this.db.execAsync('BEGIN TRANSACTION');
@@ -81,8 +101,9 @@ export class TransactionRepository {
         `INSERT INTO transactions (
           id, user_id, amount, amount_paise, direction, counterparty, category_id, category,
           description, transaction_date, source, reference_id, fingerprint,
-          sync_status, server_version, deleted_at, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          sync_status, server_version, deleted_at, created_at, updated_at,
+          merchant_phone, payment_method, location_lat, location_lng, location_name, location_address, location_confirmed
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         record.id,
         record.user_id,
         record.amount,
@@ -101,6 +122,13 @@ export class TransactionRepository {
         record.deleted_at,
         record.created_at,
         record.updated_at,
+        record.merchant_phone,
+        record.payment_method,
+        record.location_lat,
+        record.location_lng,
+        record.location_name,
+        record.location_address,
+        record.location_confirmed,
       );
 
       // If pending, enqueue into sync_queue atomically
@@ -164,7 +192,11 @@ export class TransactionRepository {
     return row ? this.mapRow(row) : null;
   }
 
-  async update(id: string, updates: UpdateTransactionInput): Promise<TransactionEntity> {
+  update(id: string, updates: UpdateTransactionInput): Promise<TransactionEntity> {
+    return withWriteLock(() => this.updateUnlocked(id, updates));
+  }
+
+  private async updateUnlocked(id: string, updates: UpdateTransactionInput): Promise<TransactionEntity> {
     const existing = await this.getById(id);
     if (!existing) {
       throw new Error(`Transaction with ID ${id} not found`);
@@ -182,12 +214,21 @@ export class TransactionRepository {
 
     const syncStatus: SyncStatus = existing.sync_status === 'pending_create' ? 'pending_create' : 'pending_update';
 
+    // Optional detail fields: only columns explicitly present in `updates` are written (null clears).
+    const extraCols: string[] = [];
+    const extraValues: unknown[] = [];
+    for (const col of EXTRA_UPDATE_COLUMNS) {
+      const v = (updates as Record<string, unknown>)[col];
+      if (v !== undefined) { extraCols.push(`${col} = ?`); extraValues.push(v); }
+    }
+    const extraSet = extraCols.length ? `, ${extraCols.join(', ')}` : '';
+
     await this.db.execAsync('BEGIN TRANSACTION');
     try {
       await this.db.runAsync(
         `UPDATE transactions
          SET amount = ?, amount_paise = ?, direction = ?, counterparty = ?, category = ?, category_id = ?,
-             description = ?, transaction_date = ?, sync_status = ?, updated_at = ?
+             description = ?, transaction_date = ?, sync_status = ?, updated_at = ?${extraSet}
          WHERE id = ?`,
         amount,
         amountPaise,
@@ -199,6 +240,7 @@ export class TransactionRepository {
         transactionDate,
         syncStatus,
         now,
+        ...extraValues,
         id,
       );
 
@@ -219,7 +261,11 @@ export class TransactionRepository {
     }
   }
 
-  async delete(id: string): Promise<boolean> {
+  delete(id: string): Promise<boolean> {
+    return withWriteLock(() => this.deleteUnlocked(id));
+  }
+
+  private async deleteUnlocked(id: string): Promise<boolean> {
     const existing = await this.getById(id);
     if (!existing) return false;
 
@@ -332,6 +378,25 @@ export class TransactionRepository {
   }
 
   async mergeRemoteTransaction(
+    remote: RemoteTransaction,
+    options?: { forceServerWin?: boolean },
+  ): Promise<'inserted' | 'updated' | 'conflict_preserved' | 'ignored'> {
+    const outcome = await this.mergeRemoteCore(remote, options);
+    if ((outcome === 'inserted' || outcome === 'updated') && remote.merchant_phone !== undefined) {
+      // Server-confirmed detail fields. Never touches receipt_local_path (device-private).
+      await this.db.runAsync(
+        `UPDATE transactions SET merchant_phone = ?, payment_method = ?, receipt_remote_id = ?,
+           location_lat = ?, location_lng = ?, location_name = ?, location_address = ?, location_confirmed = ?
+         WHERE id = ?`,
+        remote.merchant_phone ?? null, remote.payment_method ?? null, remote.receipt_remote_id ?? null,
+        remote.location_lat ?? null, remote.location_lng ?? null, remote.location_name ?? null,
+        remote.location_address ?? null, remote.location_confirmed ? 1 : 0, remote.id,
+      );
+    }
+    return outcome;
+  }
+
+  private async mergeRemoteCore(
     remote: RemoteTransaction,
     options?: { forceServerWin?: boolean },
   ): Promise<'inserted' | 'updated' | 'conflict_preserved' | 'ignored'> {

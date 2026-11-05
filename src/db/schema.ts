@@ -97,6 +97,95 @@ export const MIGRATIONS = [
       CREATE UNIQUE INDEX IF NOT EXISTS uq_sync_queue_entity ON sync_queue(entity_type, entity_id);
     `,
   },
+  {
+    version: 3,
+    description: 'Transaction details (merchant phone, receipt, location), category colors/archive, merchant aliases, budgets',
+    up: `
+      ALTER TABLE transactions ADD COLUMN merchant_phone TEXT;
+      ALTER TABLE transactions ADD COLUMN payment_method TEXT;
+      ALTER TABLE transactions ADD COLUMN receipt_local_path TEXT;
+      ALTER TABLE transactions ADD COLUMN receipt_remote_id TEXT;
+      ALTER TABLE transactions ADD COLUMN receipt_upload_pending INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE transactions ADD COLUMN location_lat REAL;
+      ALTER TABLE transactions ADD COLUMN location_lng REAL;
+      ALTER TABLE transactions ADD COLUMN location_name TEXT;
+      ALTER TABLE transactions ADD COLUMN location_address TEXT;
+      ALTER TABLE transactions ADD COLUMN location_confirmed INTEGER NOT NULL DEFAULT 0;
+
+      ALTER TABLE categories ADD COLUMN color TEXT;
+      ALTER TABLE categories ADD COLUMN archived_at TEXT;
+
+      CREATE TABLE IF NOT EXISTS merchant_aliases (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        match_key TEXT NOT NULL,
+        original_text TEXT NOT NULL,
+        display_name TEXT NOT NULL,
+        category TEXT,
+        sync_status TEXT NOT NULL DEFAULT 'pending_create',
+        deleted_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_merchant_alias_user_key ON merchant_aliases(user_id, match_key) WHERE deleted_at IS NULL;
+
+      CREATE TABLE IF NOT EXISTS budgets (
+        id TEXT PRIMARY KEY,
+        user_id TEXT,
+        category TEXT,
+        amount_paise INTEGER NOT NULL CHECK(amount_paise > 0),
+        sync_status TEXT NOT NULL DEFAULT 'pending_create',
+        deleted_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_budgets_user ON budgets(user_id);
+
+      -- sync_queue CHECK constraint cannot be altered in place: copy -> drop -> rename (data preserved)
+      CREATE TABLE sync_queue_v3 (
+        id TEXT PRIMARY KEY,
+        entity_type TEXT NOT NULL CHECK(entity_type IN ('transaction', 'category', 'device', 'budget', 'merchant_alias')),
+        entity_id TEXT NOT NULL,
+        operation TEXT NOT NULL CHECK(operation IN ('create', 'update', 'delete')),
+        payload TEXT NOT NULL,
+        retry_count INTEGER NOT NULL DEFAULT 0,
+        last_attempt_at TEXT,
+        next_retry_at TEXT,
+        error_code TEXT,
+        created_at TEXT NOT NULL
+      );
+      INSERT INTO sync_queue_v3 (id, entity_type, entity_id, operation, payload, retry_count, last_attempt_at, next_retry_at, error_code, created_at)
+        SELECT id, entity_type, entity_id, operation, payload, retry_count, last_attempt_at, next_retry_at, error_code, created_at FROM sync_queue;
+      DROP TABLE sync_queue;
+      ALTER TABLE sync_queue_v3 RENAME TO sync_queue;
+      CREATE INDEX IF NOT EXISTS idx_sync_queue_retry ON sync_queue(next_retry_at, retry_count);
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_sync_queue_entity ON sync_queue(entity_type, entity_id);
+    `,
+  },
+  {
+    version: 4,
+    description: 'Custom-category ownership flag, more default categories with colors',
+    up: `
+      ALTER TABLE categories ADD COLUMN is_custom INTEGER NOT NULL DEFAULT 0;
+      INSERT INTO categories (id, user_id, name, transaction_type, icon, color, created_at, updated_at) SELECT 'cat-shopping', NULL, 'Shopping', 'expense', 'ShoppingCart', '#8B5CF6', datetime('now'), datetime('now') WHERE NOT EXISTS (SELECT 1 FROM categories WHERE user_id IS NULL AND lower(name) = lower('Shopping'));
+      INSERT INTO categories (id, user_id, name, transaction_type, icon, color, created_at, updated_at) SELECT 'cat-health', NULL, 'Health', 'expense', 'HeartPulse', '#EF4444', datetime('now'), datetime('now') WHERE NOT EXISTS (SELECT 1 FROM categories WHERE user_id IS NULL AND lower(name) = lower('Health'));
+      INSERT INTO categories (id, user_id, name, transaction_type, icon, color, created_at, updated_at) SELECT 'cat-education', NULL, 'Education', 'expense', 'GraduationCap', '#3B82F6', datetime('now'), datetime('now') WHERE NOT EXISTS (SELECT 1 FROM categories WHERE user_id IS NULL AND lower(name) = lower('Education'));
+      INSERT INTO categories (id, user_id, name, transaction_type, icon, color, created_at, updated_at) SELECT 'cat-entertainment', NULL, 'Entertainment', 'expense', 'Film', '#EC4899', datetime('now'), datetime('now') WHERE NOT EXISTS (SELECT 1 FROM categories WHERE user_id IS NULL AND lower(name) = lower('Entertainment'));
+      INSERT INTO categories (id, user_id, name, transaction_type, icon, color, created_at, updated_at) SELECT 'cat-travel', NULL, 'Travel', 'expense', 'Plane', '#14B8A6', datetime('now'), datetime('now') WHERE NOT EXISTS (SELECT 1 FROM categories WHERE user_id IS NULL AND lower(name) = lower('Travel'));
+      INSERT INTO categories (id, user_id, name, transaction_type, icon, color, created_at, updated_at) SELECT 'cat-personal-care', NULL, 'Personal Care', 'expense', 'Sparkles', '#F59E0B', datetime('now'), datetime('now') WHERE NOT EXISTS (SELECT 1 FROM categories WHERE user_id IS NULL AND lower(name) = lower('Personal Care'));
+      INSERT INTO categories (id, user_id, name, transaction_type, icon, color, created_at, updated_at) SELECT 'cat-rent', NULL, 'Rent', 'expense', 'Home', '#6366F1', datetime('now'), datetime('now') WHERE NOT EXISTS (SELECT 1 FROM categories WHERE user_id IS NULL AND lower(name) = lower('Rent'));
+      INSERT INTO categories (id, user_id, name, transaction_type, icon, color, created_at, updated_at) SELECT 'cat-freelance', NULL, 'Freelance', 'income', 'Laptop', '#10B981', datetime('now'), datetime('now') WHERE NOT EXISTS (SELECT 1 FROM categories WHERE user_id IS NULL AND lower(name) = lower('Freelance'));
+      INSERT INTO categories (id, user_id, name, transaction_type, icon, color, created_at, updated_at) SELECT 'cat-business', NULL, 'Business', 'income', 'Store', '#059669', datetime('now'), datetime('now') WHERE NOT EXISTS (SELECT 1 FROM categories WHERE user_id IS NULL AND lower(name) = lower('Business'));
+      INSERT INTO categories (id, user_id, name, transaction_type, icon, color, created_at, updated_at) SELECT 'cat-investment', NULL, 'Investment', 'income', 'TrendingUp', '#0EA5E9', datetime('now'), datetime('now') WHERE NOT EXISTS (SELECT 1 FROM categories WHERE user_id IS NULL AND lower(name) = lower('Investment'));
+      UPDATE categories SET color = '#F97316' WHERE id = 'cat-food' AND color IS NULL;
+      UPDATE categories SET color = '#84CC16' WHERE id = 'cat-groceries' AND color IS NULL;
+      UPDATE categories SET color = '#0EA5E9' WHERE id = 'cat-transport' AND color IS NULL;
+      UPDATE categories SET color = '#64748B' WHERE id = 'cat-utilities' AND color IS NULL;
+      UPDATE categories SET color = '#94A3B8' WHERE id = 'cat-other-exp' AND color IS NULL;
+      UPDATE categories SET color = '#10B981' WHERE id = 'cat-salary' AND color IS NULL;
+      UPDATE categories SET color = '#22C55E' WHERE id = 'cat-other-inc' AND color IS NULL;
+    `,
+  },
 ];
 
 export const DEFAULT_CATEGORIES = [

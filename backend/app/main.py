@@ -53,9 +53,11 @@ def to_paise(amount: Decimal) -> int:
 
 
 from backend.app.sync import router as sync_router
+from backend.app.receipts import router as receipts_router
 
 app = FastAPI(title="Velnora API", version="0.2.0", docs_url="/api/docs")
 app.include_router(sync_router)
+app.include_router(receipts_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[origin.strip() for origin in getenv("VELNORA_CORS_ORIGINS", "http://localhost:8081").split(",") if origin.strip()],

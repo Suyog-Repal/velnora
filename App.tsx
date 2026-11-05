@@ -1,22 +1,40 @@
 import { StatusBar } from 'expo-status-bar';
-import { AppState, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { AppState, KeyboardAvoidingView, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useEffect, useMemo, useState } from 'react';
 import { clearSession, loadSession, login, logout, refreshSession, register, requestPasswordReset, saveSession, type Session } from './auth';
-import { addSmsReceivedListener, configureSupportedSenderPatterns } from './sms';
+import { restoreSession } from './src/services/sessionRestore';
+import { getGuestDataSummary, importGuestData, isGuestModeChosen, setGuestModeChosen } from './src/services/guestModeService';
+import { addSmsStagedListener, configureSupportedSenderPatterns } from './sms';
+import { drainNativeStagedSms, recordSmsOwner } from './src/services/smsStagingService';
+import { LocalDataSection } from './src/components/LocalDataSection';
+import { SmsStagingStatusSection } from './src/components/SmsStagingStatusSection';
 import { DEFAULT_SMS_RULE, parseSmsTransaction } from './transactionParser';
 import { palette, useThemeMode, type ThemeMode } from './theme';
 import { ArrowDownLeft, ArrowUpRight, Bell, Chart, ChevronRight, CirclePlus, Eye, EyeOff, Home, KeyRound, LayoutGrid, LockKeyhole, LogOut, PiggyBank, Plus, Search, Settings, Sliders, Target, UserRound, Users, WalletCards, X } from './icons';
 import {
   initTransactionService,
   getTransactions,
+  getGuestTransactions,
   getCategories,
   addTransaction as recordAddTransaction,
   addSmsTransaction as recordAddSmsTransaction,
   syncPendingTransactions,
 } from './src/services/transactionService';
-import { processIncomingSms } from './src/services/smsIntegrationService';
 import type { Direction, TransactionEntity } from './src/db/types';
+import { getServiceDb, setPostSyncHook } from './src/services/transactionService';
+import { listCategories, type CategoryView } from './src/services/categoryService';
+import { uploadPendingReceipts } from './src/services/receiptService';
+import { expoReceiptFs, expoReceiptUploader } from './src/services/receiptFiles';
+import { triggerSync } from './src/services/syncEngine';
+import { API_URL } from './auth';
+import { useOnline } from './src/ui/common';
+import { TransactionsView } from './src/screens/TransactionsView';
+import { TransactionSheet } from './src/screens/TransactionSheet';
+import { AnalyticsView } from './src/screens/AnalyticsView';
+import { BudgetsView } from './src/screens/BudgetsView';
+import { ReceiptScan } from './src/screens/ReceiptScan';
+import { CategoryManager, MerchantNamesManager } from './src/screens/ManageSheets';
 
 type Tab = 'home' | 'transactions' | 'analytics' | 'budgets' | 'people' | 'profile';
 type Transaction = TransactionEntity & { date: string; referenceId?: string };
@@ -56,6 +74,24 @@ export default function App() {
   const [amount, setAmount] = useState('');
   const [counterparty, setCounterparty] = useState('');
   const [category, setCategory] = useState(DEFAULT_CATEGORIES[0]);
+  const [smsStatusTick, setSmsStatusTick] = useState(0);
+  const [guestMode, setGuestMode] = useState(false);
+  const [showAuth, setShowAuth] = useState(false);
+  const [dbReady, setDbReady] = useState(false);
+  const [sessionStale, setSessionStale] = useState(false);
+  const [importPrompt, setImportPrompt] = useState<{ count: number } | null>(null);
+  const [importBusy, setImportBusy] = useState(false);
+  const [importNotice, setImportNotice] = useState('');
+  const [catViews, setCatViews] = useState<CategoryView[]>([]);
+  const [txLoading, setTxLoading] = useState(true);
+  const [openTx, setOpenTx] = useState<TransactionEntity | null>(null);
+  const [showScan, setShowScan] = useState(false);
+  const [showCats, setShowCats] = useState(false);
+  const [showAliases, setShowAliases] = useState(false);
+  const [drillCategory, setDrillCategory] = useState<string | null>(null);
+  const [dataTick, setDataTick] = useState(0);
+  const online = useOnline();
+  const scope = session?.user.id ?? null;
   const [mode, setMode] = useThemeMode();
 
   const dark = mode === 'dark';
@@ -67,65 +103,131 @@ export default function App() {
     return [...map.values()].sort((a, b) => b.count - a.count);
   }, [transactions]);
 
-  useEffect(() => { loadSession().then(async (stored) => { if (!stored) { setAuthReady(true); return; } try { setSession(await refreshSession(stored)); } catch { await clearSession(); } finally { setAuthReady(true); } }); }, []);
+  // After each sync, upload receipts whose transactions the server now has, then sync the resulting reference.
+  useEffect(() => {
+    setPostSyncHook(async (s) => {
+      const r = await uploadPendingReceipts(getServiceDb(), expoReceiptFs, expoReceiptUploader(API_URL), s);
+      if (r.uploaded > 0) await triggerSync(s);
+    });
+    return () => setPostSyncHook(null);
+  }, []);
+
+  // Restore the stored session without destroying it on a transient failure (offline, 5xx).
+  // Only an explicit server rejection of the refresh token ends the session; local data is never touched.
+  useEffect(() => {
+    loadSession().then(async (stored) => {
+      if (!stored) { setAuthReady(true); return; }
+      try {
+        const result = await restoreSession(stored, refreshSession);
+        if (result.status === 'expired') { await clearSession(); setAuthNotice('Your session has ended. Sign in again; your data on this device is preserved.'); }
+        setSession(result.session);
+        setSessionStale(result.status === 'offline');
+      } finally { setAuthReady(true); }
+    }).catch(() => setAuthReady(true));
+  }, []);
 
   // Initialize SQLite storage and load local categories
   useEffect(() => {
     let isMounted = true;
     initTransactionService().then(async () => {
+      const chosen = await isGuestModeChosen();
+      if (isMounted) { setGuestMode(chosen); setDbReady(true); }
       const storedCats = await getCategories();
       if (isMounted && storedCats.length > 0) {
-        setCategoriesList(storedCats.map((c) => c.name));
+        setCategoriesList([...new Set(storedCats.map((c) => c.name))]);
       }
     }).catch((err) => {
       console.error('Failed to initialize local SQLite storage:', err);
+      if (isMounted) setDbReady(true);
     });
     return () => { isMounted = false; };
   }, []);
 
-  // Reactive transaction loading scoped to active authenticated user session
+  // Reactive transaction loading: scoped to the signed-in user, or to local guest records when in guest mode.
+  const inGuest = !session && guestMode && !showAuth;
   useEffect(() => {
     let isMounted = true;
     if (session?.user?.id) {
       void getTransactions(session.user.id).then((storedTx) => {
-        if (isMounted) {
-          setTransactions(storedTx.map(toUiTransaction));
-        }
+        if (isMounted) { setTransactions(storedTx.map(toUiTransaction)); setTxLoading(false); }
+      });
+    } else if (inGuest && dbReady) {
+      void getGuestTransactions().then((storedTx) => {
+        if (isMounted) { setTransactions(storedTx.map(toUiTransaction)); setTxLoading(false); }
       });
     } else {
       setTransactions([]);
     }
     return () => { isMounted = false; };
-  }, [session?.user?.id]);
+  }, [session?.user?.id, inGuest, dbReady]);
+
+  const reloadData = async () => {
+    const owner = session?.user.id ?? null;
+    const stored = owner ? await getTransactions(owner) : await getGuestTransactions();
+    setTransactions(stored.map(toUiTransaction));
+    setCatViews(await listCategories(getServiceDb(), owner));
+    setDataTick((n) => n + 1);
+  };
+  useEffect(() => {
+    if (!dbReady) return;
+    let live = true;
+    listCategories(getServiceDb(), scope).then((c) => { if (live) setCatViews(c); }).catch(() => undefined);
+    return () => { live = false; };
+  }, [dbReady, scope, dataTick]);
+
+  // A session restored while offline may hold an expired access token: retry the refresh when the app is active.
+  useEffect(() => {
+    if (!session || !sessionStale) return;
+    let cancelled = false;
+    const retry = async () => {
+      try {
+        const next = await refreshSession(session);
+        if (!cancelled) { setSession(next); setSessionStale(false); }
+      } catch (err) {
+        const status = (err as { status?: number })?.status;
+        if (!cancelled && (status === 400 || status === 401 || status === 403 || status === 422)) {
+          await clearSession(); setSession(null); setSessionStale(false);
+          setAuthNotice('Your session has ended. Sign in again; your data on this device is preserved.');
+        }
+      }
+    };
+    void retry();
+    const sub = AppState.addEventListener('change', (state) => { if (state === 'active') void retry(); });
+    return () => { cancelled = true; sub.remove(); };
+  }, [session, sessionStale]);
 
   useEffect(() => {
     if (!session) return;
-    void syncPendingTransactions(session);
+    const run = () => { void syncPendingTransactions(session).then(() => reloadData()).catch(() => undefined); };
+    run();
     const subscription = AppState.addEventListener('change', (state) => {
-      if (state === 'active') void syncPendingTransactions(session);
+      if (state === 'active') run();
     });
     return () => subscription.remove();
   }, [session]);
 
+  // Durable SMS pipeline: the native receiver stages every SMS; here we drain events owned by the signed-in user.
   useEffect(() => {
     configureSupportedSenderPatterns(smsRules.map((rule) => rule.senderPattern));
-    const subscription = addSmsReceivedListener(async (event) => {
+    if (!session) return;
+    let active = true;
+    const drain = async () => {
       try {
-        const result = await processIncomingSms(event, session, smsRules);
-        if (result.success && result.transaction) {
-          const uiTx = toUiTransaction(result.transaction);
-          setTransactions((current) => {
-            if (current.some((item) => item.id === uiTx.id || (uiTx.reference_id && item.reference_id === uiTx.reference_id))) {
-              return current;
-            }
-            return [uiTx, ...current];
-          });
+        const summary = await drainNativeStagedSms(session, smsRules);
+        if (active && summary && summary.saved > 0) {
+          const stored = await getTransactions(session.user.id);
+          if (active) { setTransactions(stored.map(toUiTransaction)); setDataTick((n) => n + 1); }
         }
-      } catch (err) {
-        console.error('Failed to process incoming SMS alert:', err);
+      } catch {
+        console.warn('Staged SMS drain failed; events remain staged for retry');
+      } finally {
+        if (active) setSmsStatusTick((n) => n + 1);
       }
-    });
-    return () => subscription?.remove();
+    };
+    void recordSmsOwner(session.user.id).then(drain, drain);
+    const staged = addSmsStagedListener(() => { void drain(); });
+    const appState = AppState.addEventListener('change', (state) => { if (state === 'active') void drain(); });
+    return () => { active = false; staged?.remove(); appState.remove(); };
   }, [session]);
 
   const submitAuth = async (screen: 'signup' | 'signin') => {
@@ -133,7 +235,11 @@ export default function App() {
     const error = !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail) ? 'Enter a valid email address.' : screen === 'signup' && (!fullName.trim() || password.length < 8 || !/[A-Z]/.test(password) || !/\d/.test(password) || password !== confirmPassword || !termsAccepted) ? 'Complete the sign-up fields, password requirements, and terms.' : screen === 'signin' && !password ? 'Enter your password.' : '';
     if (error) { setAuthError(error); return; }
     setAuthBusy(true); setAuthError('');
-    try { const next = screen === 'signup' ? await register(fullName.trim(), normalizedEmail, password) : await login(normalizedEmail, password); await saveSession(next); setSession(next); setPassword(''); setConfirmPassword(''); } catch (caught) { setAuthError(caught instanceof Error ? caught.message : 'Authentication failed. Try again.'); } finally { setAuthBusy(false); }
+    try { const next = screen === 'signup' ? await register(fullName.trim(), normalizedEmail, password) : await login(normalizedEmail, password); await saveSession(next);
+      // Guest data is never attached silently: ask first, and only if there is something to import.
+      const guest = await getGuestDataSummary().catch(() => ({ transactionCount: 0, budgetCount: 0, categoryCount: 0 }));
+      setSession(next); setSessionStale(false); setShowAuth(false); setPassword(''); setConfirmPassword('');
+      if (guest.transactionCount + guest.budgetCount + guest.categoryCount > 0) setImportPrompt({ count: guest.transactionCount }); } catch (caught) { setAuthError(caught instanceof Error ? caught.message : 'Authentication failed. Try again.'); } finally { setAuthBusy(false); }
   };
   const submitForgot = async () => { setAuthBusy(true); setAuthError(''); try { await requestPasswordReset(email.trim().toLowerCase()); setAuthNotice('Password reset delivery is not configured in this environment.'); } catch (caught) { setAuthError(caught instanceof Error ? caught.message : 'Password reset is unavailable.'); } finally { setAuthBusy(false); } };
 
@@ -159,34 +265,65 @@ export default function App() {
     }
   };
 
-  if (!authReady) return <AuthLoading colors={colors} />;
-  if (!session) return <AuthScreens screen={authScreen} setScreen={setAuthScreen} fullName={fullName} setFullName={setFullName} email={email} setEmail={setEmail} password={password} setPassword={setPassword} confirmPassword={confirmPassword} setConfirmPassword={setConfirmPassword} showPassword={showPassword} setShowPassword={setShowPassword} termsAccepted={termsAccepted} setTermsAccepted={setTermsAccepted} busy={authBusy} error={authError} notice={authNotice} onSubmit={submitAuth} onForgot={submitForgot} colors={colors} />;
+  const continueAsGuest = async () => {
+    try { await setGuestModeChosen(true); } catch { /* guest mode still works for this run */ }
+    setGuestMode(true); setShowAuth(false);
+  };
+  const confirmImport = async () => {
+    if (!session) return;
+    setImportBusy(true);
+    try {
+      const result = await importGuestData(session.user.id);
+      setImportNotice(`Imported ${result.imported} transaction${result.imported === 1 ? '' : 's'}${result.skippedDuplicates ? ` (${result.skippedDuplicates} duplicate${result.skippedDuplicates === 1 ? '' : 's'} skipped)` : ''}. They will sync when online.`);
+      await reloadData();
+      void syncPendingTransactions(session);
+    } catch { setImportNotice('Import failed. Nothing was changed; your local data is intact.'); }
+    finally { setImportBusy(false); setImportPrompt(null); }
+  };
+  const openAuth = (screen: 'signin' | 'signup') => { setAuthScreen(screen); setShowAuth(true); };
+
+  if (!authReady || !dbReady) return <AuthLoading colors={colors} />;
+  if (!session && !inGuest) return <AuthScreens onGuest={continueAsGuest} screen={authScreen} setScreen={setAuthScreen} fullName={fullName} setFullName={setFullName} email={email} setEmail={setEmail} password={password} setPassword={setPassword} confirmPassword={confirmPassword} setConfirmPassword={setConfirmPassword} showPassword={showPassword} setShowPassword={setShowPassword} termsAccepted={termsAccepted} setTermsAccepted={setTermsAccepted} busy={authBusy} error={authError} notice={authNotice} onSubmit={submitAuth} onForgot={submitForgot} colors={colors} />;
 
   return <SafeAreaView style={[styles.safe, { backgroundColor: colors.canvas }]}><StatusBar style={dark ? 'light' : 'dark'} /><View style={styles.shell}>
     <ScrollView contentContainerStyle={styles.content}>
-      <View style={styles.header}><View><Text style={[styles.overline, { color: palette.emerald }]}>VELNORA</Text><Text style={[styles.title, { color: colors.text }]}>{tab === 'home' ? `Good evening, ${session.user.full_name.split(' ')[0]}` : tab.charAt(0).toUpperCase() + tab.slice(1)}</Text></View><Pressable style={[styles.iconButton, { backgroundColor: colors.card, borderColor: colors.border }]} onPress={() => setTab('profile')}><Text style={[styles.avatarText, { color: palette.navy }]}>{session.user.full_name.charAt(0).toUpperCase()}</Text></Pressable></View>
-      {tab === 'home' && <HomeScreen transactions={transactions} totals={totals} colors={colors} onAddIncome={() => { setDirection('income'); setShowForm(true); }} onAddExpense={() => { setDirection('expense'); setShowForm(true); }} onViewAll={() => setTab('transactions')} />}
-      {tab === 'transactions' && <TransactionsScreen transactions={transactions} categories={categoriesList} colors={colors} onAdd={() => setShowForm(true)} />}
-      {tab === 'analytics' && <AnalyticsScreen transactions={transactions} categories={categoriesList} totals={totals} colors={colors} />}
-      {tab === 'budgets' && <BudgetsScreen colors={colors} onAdd={() => {}} />}
+      <View style={styles.header}><View><Text style={[styles.overline, { color: palette.emerald }]}>VELNORA</Text><Text style={[styles.title, { color: colors.text }]}>{tab === 'home' ? `Good evening${session ? `, ${session.user.full_name.split(' ')[0]}` : ''}` : tab.charAt(0).toUpperCase() + tab.slice(1)}</Text></View><Pressable style={[styles.iconButton, { backgroundColor: colors.card, borderColor: colors.border }]} onPress={() => setTab('profile')}><Text style={[styles.avatarText, { color: palette.navy }]}>{session ? session.user.full_name.charAt(0).toUpperCase() : 'G'}</Text></Pressable></View>
+      {!session && <Text style={[styles.caption, { color: colors.muted, marginBottom: 12 }]}>Guest mode · data stays on this device and is not synced.</Text>}
+      {importNotice ? <Text style={styles.noticeText}>{importNotice}</Text> : null}
+      {session && sessionStale ? <Text style={[styles.caption, { color: colors.muted, marginBottom: 12 }]}>Offline · working from local data; sync resumes when you reconnect.</Text> : null}
+      {tab === 'home' && <HomeScreen onOpen={setOpenTx} transactions={transactions} totals={totals} colors={colors} onAddIncome={() => { setDirection('income'); setShowForm(true); }} onAddExpense={() => { setDirection('expense'); setShowForm(true); }} onViewAll={() => setTab('transactions')} />}
+      {tab === 'transactions' && <TransactionsView key={drillCategory ?? 'all'} transactions={transactions} categories={catViews} colors={colors} loading={txLoading} online={online} onOpen={setOpenTx} onAdd={() => setShowForm(true)} initialCategory={drillCategory} />}
+      {tab === 'analytics' && <AnalyticsView scope={scope} colors={colors} refreshKey={dataTick} onDrill={(c) => { setDrillCategory(c); setTab('transactions'); }} />}
+      {tab === 'budgets' && <BudgetsView scope={scope} categories={catViews} colors={colors} refreshKey={dataTick} />}
       {tab === 'people' && <PeopleScreen contacts={contacts} colors={colors} onAdd={() => setShowForm(true)} />}
-      {tab === 'profile' && <ProfileScreen session={session} colors={colors} mode={mode} setMode={setMode} onLogout={async () => { await logout(session); setSession(null); setTransactions([]); setAuthScreen('welcome'); }} />}
+      {tab === 'profile' && !session && <GuestProfile onOpenCategories={() => setShowCats(true)} onOpenAliases={() => setShowAliases(true)} colors={colors} mode={mode} setMode={setMode} onSignIn={() => openAuth('signin')} onCreate={() => openAuth('signup')} />}
+      {tab === 'profile' && session && <ProfileScreen onOpenCategories={() => setShowCats(true)} onOpenAliases={() => setShowAliases(true)} session={session} colors={colors} mode={mode} setMode={setMode} smsStatusTick={smsStatusTick} onDataDeleted={() => { setTransactions([]); setSmsStatusTick((n) => n + 1); }} onLogout={async () => { await logout(session); setSession(null); setSessionStale(false); setTransactions([]); setAuthScreen('welcome'); setShowAuth(true); }} />}
     </ScrollView>
     <Pressable style={styles.fab} onPress={() => setShowForm(true)}><Plus color="#FFFFFF" size={20} /><Text style={styles.fabText}>Add transaction</Text></Pressable>
-    <BottomNav tab={tab} setTab={setTab} colors={colors} />
+    <BottomNav tab={tab} setTab={(t) => { if (t !== 'transactions') setDrillCategory(null); setTab(t); }} colors={colors} />
   </View>
-  <Modal visible={showForm} transparent animationType="slide" onRequestClose={() => setShowForm(false)}><View style={styles.modalBackdrop}><View style={[styles.modal, { backgroundColor: colors.card }]}><View style={styles.modalHeader}><Text style={[styles.modalTitle, { color: colors.text }]}>Record transaction</Text><Pressable onPress={() => setShowForm(false)}><X color={colors.muted} /></Pressable></View><Text style={[styles.label, { color: colors.muted }]}>TYPE</Text><View style={styles.segment}><Pressable onPress={() => setDirection('expense')} style={[styles.segmentItem, direction === 'expense' && styles.segmentActive]}><ArrowUpRight color={direction === 'expense' ? palette.danger : colors.muted} size={17} /><Text style={[styles.segmentText, { color: colors.text }]}>Expense</Text></Pressable><Pressable onPress={() => setDirection('income')} style={[styles.segmentItem, direction === 'income' && styles.segmentActive]}><ArrowDownLeft color={direction === 'income' ? palette.emerald : colors.muted} size={17} /><Text style={[styles.segmentText, { color: colors.text }]}>Income</Text></Pressable></View><Text style={[styles.label, { color: colors.muted }]}>AMOUNT</Text><TextInput value={amount} onChangeText={setAmount} keyboardType="decimal-pad" placeholder="0.00" placeholderTextColor={colors.muted} style={[styles.input, { color: colors.text, borderColor: colors.border }]} /><Text style={[styles.label, { color: colors.muted }]}>MERCHANT OR COUNTERPARTY</Text><TextInput value={counterparty} onChangeText={setCounterparty} placeholder="e.g. Grocery store" placeholderTextColor={colors.muted} style={[styles.input, { color: colors.text, borderColor: colors.border }]} /><Text style={[styles.label, { color: colors.muted }]}>CATEGORY</Text><ScrollView horizontal showsHorizontalScrollIndicator={false}>{categoriesList.map((item) => <Pressable key={item} onPress={() => setCategory(item)} style={[styles.chip, category === item && styles.chipActive]}><Text style={[styles.chipText, { color: category === item ? palette.navy : colors.muted }]}>{item}</Text></Pressable>)}</ScrollView><Pressable style={styles.primaryButton} onPress={addTransaction}><Text style={styles.primaryButtonText}>Save transaction</Text></Pressable></View></View></Modal>
+  <Modal visible={importPrompt !== null} transparent animationType="fade" onRequestClose={() => setImportPrompt(null)}><View style={styles.modalBackdrop}><View style={[styles.modal, { backgroundColor: colors.card }]}>
+    <Text style={[styles.modalTitle, { color: colors.text }]}>Import local data?</Text>
+    <Text style={[styles.caption, { color: colors.muted, marginVertical: 12 }]}>{importPrompt?.count ?? 0} transaction{importPrompt?.count === 1 ? '' : 's'} recorded without an account exist on this device. Importing associates them with {session?.user.email ?? 'this account'} and uploads them to sync. If you cancel, they stay on this device, separate from your account, and nothing is uploaded.</Text>
+    <Pressable disabled={importBusy} style={styles.primaryButton} onPress={() => void confirmImport()}><Text style={styles.primaryButtonText}>{importBusy ? 'Importing...' : 'Import and sync'}</Text></Pressable>
+    <Pressable disabled={importBusy} onPress={() => setImportPrompt(null)}><Text style={[styles.link, { textAlign: 'center', marginTop: 16 }]}>Not now</Text></Pressable>
+  </View></View></Modal>
+  <Modal visible={showForm} transparent animationType="slide" onRequestClose={() => setShowForm(false)}><View style={styles.modalBackdrop}><View style={[styles.modal, { backgroundColor: colors.card }]}><View style={styles.modalHeader}><Text style={[styles.modalTitle, { color: colors.text }]}>Record transaction</Text><Pressable onPress={() => setShowForm(false)}><X color={colors.muted} /></Pressable></View><Text style={[styles.label, { color: colors.muted }]}>TYPE</Text><View style={styles.segment}><Pressable onPress={() => setDirection('expense')} style={[styles.segmentItem, direction === 'expense' && styles.segmentActive]}><ArrowUpRight color={direction === 'expense' ? palette.danger : colors.muted} size={17} /><Text style={[styles.segmentText, { color: colors.text }]}>Expense</Text></Pressable><Pressable onPress={() => setDirection('income')} style={[styles.segmentItem, direction === 'income' && styles.segmentActive]}><ArrowDownLeft color={direction === 'income' ? palette.emerald : colors.muted} size={17} /><Text style={[styles.segmentText, { color: colors.text }]}>Income</Text></Pressable></View><Text style={[styles.label, { color: colors.muted }]}>AMOUNT</Text><TextInput value={amount} onChangeText={setAmount} keyboardType="decimal-pad" placeholder="0.00" placeholderTextColor={colors.muted} style={[styles.input, { color: colors.text, borderColor: colors.border }]} /><Text style={[styles.label, { color: colors.muted }]}>MERCHANT OR COUNTERPARTY</Text><TextInput value={counterparty} onChangeText={setCounterparty} placeholder="e.g. Grocery store" placeholderTextColor={colors.muted} style={[styles.input, { color: colors.text, borderColor: colors.border }]} /><Text style={[styles.label, { color: colors.muted }]}>CATEGORY</Text><ScrollView horizontal showsHorizontalScrollIndicator={false}>{(catViews.length ? catViews.filter((c) => c.type === direction).map((c) => c.name) : categoriesList).map((item) => <Pressable key={item} onPress={() => setCategory(item)} style={[styles.chip, category === item && styles.chipActive]}><Text style={[styles.chipText, { color: category === item ? palette.navy : colors.muted }]}>{item}</Text></Pressable>)}</ScrollView><Pressable style={styles.primaryButton} onPress={addTransaction}><Text style={styles.primaryButtonText}>Save transaction</Text></Pressable><Pressable onPress={() => { setShowForm(false); setShowScan(true); }} accessibilityRole="button"><Text style={[styles.link, { textAlign: 'center', marginTop: 16 }]}>Scan a receipt instead</Text></Pressable></View></View></Modal>
+  <TransactionSheet tx={openTx} session={session} categories={catViews} colors={colors} onClose={() => setOpenTx(null)} onChanged={() => void reloadData()} />
+  <ReceiptScan visible={showScan} session={session} categories={catViews} colors={colors} onClose={() => setShowScan(false)} onSaved={() => void reloadData()} />
+  <CategoryManager visible={showCats} scope={scope} colors={colors} onClose={() => setShowCats(false)} onChanged={() => void reloadData()} />
+  <MerchantNamesManager visible={showAliases} userId={scope} colors={colors} onClose={() => setShowAliases(false)} />
   </SafeAreaView>;
 }
 
-function HomeScreen({ transactions, totals, colors, onAddIncome, onAddExpense, onViewAll }: { transactions: Transaction[]; totals: { income: number; expense: number }; colors: Colors; onAddIncome: () => void; onAddExpense: () => void; onViewAll: () => void }) {
-  return <><View style={[styles.heroCard, { backgroundColor: palette.navy }]}><Text style={styles.heroLabel}>RECORDED BALANCE</Text><Text style={styles.heroValue}>{money(totals.income - totals.expense)}</Text><Text style={styles.heroHint}>Based on transactions recorded in Velnora. Not a verified bank balance.</Text><View style={styles.metricRow}><Metric label="Income this month" value={money(totals.income)} positive /><Metric label="Expenses this month" value={money(totals.expense)} /></View></View><SectionHeader title="Quick actions" colors={colors} /><View style={styles.actionRow}><ActionButton icon={<ArrowDownLeft color={palette.emerald} />} label="Add income" onPress={onAddIncome} colors={colors} /><ActionButton icon={<ArrowUpRight color={palette.danger} />} label="Add expense" onPress={onAddExpense} colors={colors} /></View><SectionHeader title="Spending overview" action="Analytics" onPress={onViewAll} colors={colors} /><View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}><Text style={[styles.cardTitle, { color: colors.text }]}>Net monthly cash flow</Text><Text style={[styles.flowValue, { color: (totals.income - totals.expense >= 0) ? palette.emerald : palette.danger }]}>{money(totals.income - totals.expense)}</Text><View style={styles.progressTrack}><View style={[styles.progressFill, { width: `${Math.min(100, totals.income ? totals.expense / totals.income * 100 : 0)}%`, backgroundColor: palette.emerald }]} /></View><Text style={[styles.caption, { color: colors.muted }]}>Expenses represent {totals.income ? Math.round(totals.expense / totals.income * 100) : 0}% of recorded income</Text></View><SectionHeader title="Recent transactions" action="See all" onPress={onViewAll} colors={colors} />{transactions.length ? transactions.slice(0, 5).map((item) => <TransactionRow key={item.id} item={item} colors={colors} />) : <EmptyState colors={colors} onAdd={onAddExpense} />}</>;
+function HomeScreen({ onOpen, transactions, totals, colors, onAddIncome, onAddExpense, onViewAll }: { onOpen: (tx: TransactionEntity) => void; transactions: Transaction[]; totals: { income: number; expense: number }; colors: Colors; onAddIncome: () => void; onAddExpense: () => void; onViewAll: () => void }) {
+  return <><View style={[styles.heroCard, { backgroundColor: palette.navy }]}><Text style={styles.heroLabel}>RECORDED BALANCE</Text><Text style={styles.heroValue}>{money(totals.income - totals.expense)}</Text><Text style={styles.heroHint}>Based on transactions recorded in Velnora. Not a verified bank balance.</Text><View style={styles.metricRow}><Metric label="Income this month" value={money(totals.income)} positive /><Metric label="Expenses this month" value={money(totals.expense)} /></View></View><SectionHeader title="Quick actions" colors={colors} /><View style={styles.actionRow}><ActionButton icon={<ArrowDownLeft color={palette.emerald} />} label="Add income" onPress={onAddIncome} colors={colors} /><ActionButton icon={<ArrowUpRight color={palette.danger} />} label="Add expense" onPress={onAddExpense} colors={colors} /></View><SectionHeader title="Spending overview" action="Analytics" onPress={onViewAll} colors={colors} /><View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}><Text style={[styles.cardTitle, { color: colors.text }]}>Net monthly cash flow</Text><Text style={[styles.flowValue, { color: (totals.income - totals.expense >= 0) ? palette.emerald : palette.danger }]}>{money(totals.income - totals.expense)}</Text><View style={styles.progressTrack}><View style={[styles.progressFill, { width: `${Math.min(100, totals.income ? totals.expense / totals.income * 100 : 0)}%`, backgroundColor: palette.emerald }]} /></View><Text style={[styles.caption, { color: colors.muted }]}>Expenses represent {totals.income ? Math.round(totals.expense / totals.income * 100) : 0}% of recorded income</Text></View><SectionHeader title="Recent transactions" action="See all" onPress={onViewAll} colors={colors} />{transactions.length ? transactions.slice(0, 5).map((item) => <Pressable key={item.id} onPress={() => onOpen(item)} accessibilityRole="button"><TransactionRow item={item} colors={colors} /></Pressable>) : <EmptyState colors={colors} onAdd={onAddExpense} />}</>;
 }
 
 function TransactionsScreen({ transactions, categories = DEFAULT_CATEGORIES, colors, onAdd }: { transactions: Transaction[]; categories?: string[]; colors: Colors; onAdd: () => void }) {
   const [query, setQuery] = useState(''); const [filter, setFilter] = useState<'all' | Direction>('all'); const [categoryFilter, setCategoryFilter] = useState('All categories');
   const filtered = transactions.filter((item) => (filter === 'all' || item.direction === filter) && (categoryFilter === 'All categories' || item.category === categoryFilter) && `${item.counterparty} ${item.category}`.toLowerCase().includes(query.toLowerCase()));
-  return <><View style={[styles.searchBox, { backgroundColor: colors.card, borderColor: colors.border }]}><Search color={colors.muted} size={18} /><TextInput value={query} onChangeText={setQuery} placeholder="Search transactions" placeholderTextColor={colors.muted} style={[styles.searchInput, { color: colors.text }]} /></View><View style={styles.filterRow}>{(['all', 'income', 'expense'] as const).map((item) => <Pressable key={item} onPress={() => setFilter(item)} style={[styles.filterChip, filter === item && styles.filterChipActive]}><Text style={[styles.filterChipText, { color: filter === item ? palette.navy : colors.muted }]}>{item === 'all' ? 'All' : item === 'income' ? 'Income' : 'Expenses'}</Text></Pressable>)}</View><ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.categoryScroll}>{['All categories', ...categories].map((item) => <Pressable key={item} onPress={() => setCategoryFilter(item)} style={[styles.chip, categoryFilter === item && styles.chipActive]}><Text style={[styles.chipText, { color: categoryFilter === item ? palette.navy : colors.muted }]}>{item}</Text></Pressable>)}</ScrollView><SectionHeader title={`${filtered.length} transactions`} action="Add" onPress={onAdd} colors={colors} />{filtered.length ? filtered.map((item) => <TransactionRow key={item.id} item={item} colors={colors} />) : <EmptyState colors={colors} onAdd={onAdd} />}</>;
+  return <><View style={[styles.searchBox, { backgroundColor: colors.card, borderColor: colors.border }]}><Search color={colors.muted} size={18} /><TextInput value={query} onChangeText={setQuery} placeholder="Search transactions" placeholderTextColor={colors.muted} style={[styles.searchInput, { color: colors.text }]} /></View><View style={styles.filterRow}>{(['all', 'income', 'expense'] as const).map((item) => <Pressable key={item} onPress={() => setFilter(item)} style={[styles.filterChip, filter === item && styles.filterChipActive]}><Text style={[styles.filterChipText, { color: filter === item ? palette.navy : colors.muted }]}>{item === 'all' ? 'All' : item === 'income' ? 'Income' : 'Expenses'}</Text></Pressable>)}</View><ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.categoryScroll}>{['All categories', ...new Set(categories)].map((item) => <Pressable key={item} onPress={() => setCategoryFilter(item)} style={[styles.chip, categoryFilter === item && styles.chipActive]}><Text style={[styles.chipText, { color: categoryFilter === item ? palette.navy : colors.muted }]}>{item}</Text></Pressable>)}</ScrollView><SectionHeader title={`${filtered.length} transactions`} action="Add" onPress={onAdd} colors={colors} />{filtered.length ? filtered.map((item) => <TransactionRow key={item.id} item={item} colors={colors} />) : <EmptyState colors={colors} onAdd={onAdd} />}</>;
 }
 
 function AnalyticsScreen({ transactions, categories = DEFAULT_CATEGORIES, totals, colors }: { transactions: Transaction[]; categories?: string[]; totals: { income: number; expense: number }; colors: Colors }) {
@@ -199,10 +336,11 @@ function BudgetsScreen({ colors, onAdd }: { colors: Colors; onAdd: () => void })
 
 function PeopleScreen({ contacts, colors, onAdd }: { contacts: Contact[]; colors: Colors; onAdd: () => void }) { return <><Text style={[styles.subtitle, { color: colors.muted }]}>Track money received, money paid, and your recorded history with each person.</Text>{contacts.length ? contacts.map((contact) => <View key={contact.name} style={[styles.personRow, { borderBottomColor: colors.border }]}><View style={styles.personAvatar}><Text style={styles.personInitial}>{contact.name.charAt(0).toUpperCase()}</Text></View><View style={styles.rowBody}><Text style={[styles.rowTitle, { color: colors.text }]}>{contact.name}</Text><Text style={[styles.caption, { color: colors.muted }]}>{contact.count} transaction{contact.count === 1 ? '' : 's'} · Received {money(contact.received)}</Text></View><Text style={[styles.rowAmount, { color: palette.danger }]}>{money(contact.paid)}</Text></View>) : <EmptyState colors={colors} onAdd={onAdd} />}</>; }
 
-function ProfileScreen({ session, colors, mode, setMode, onLogout }: { session: Session; colors: Colors; mode: ThemeMode; setMode: (mode: ThemeMode) => void; onLogout: () => void }) { return <><View style={[styles.profileCard, { backgroundColor: colors.card, borderColor: colors.border }]}><View style={styles.profileAvatar}><Text style={styles.profileInitial}>{session.user.full_name.charAt(0).toUpperCase()}</Text></View><Text style={[styles.profileName, { color: colors.text }]}>{session.user.full_name}</Text><Text style={[styles.caption, { color: colors.muted }]}>{session.user.email}</Text></View><SectionHeader title="Preferences" colors={colors} /><SettingRow icon={<Sliders color={palette.navy} />} title="Currency" value="INR (₹)" colors={colors} /><SettingRow icon={<Bell color={palette.navy} />} title="Notifications" value="Available when configured" colors={colors} /><View style={[styles.settingRow, { borderBottomColor: colors.border }]}><View style={styles.settingIcon}><Settings color={palette.navy} size={18} /></View><View style={styles.rowBody}><Text style={[styles.rowTitle, { color: colors.text }]}>Theme</Text><Text style={[styles.caption, { color: colors.muted }]}>Choose your preferred appearance</Text></View><Pressable onPress={() => setMode(mode === 'light' ? 'dark' : 'light')}><Text style={styles.link}>{mode === 'light' ? 'Light' : 'Dark'}</Text></Pressable></View><SectionHeader title="Account" colors={colors} /><SettingRow icon={<LockKeyhole color={palette.navy} />} title="Data and privacy" value="Review controls" colors={colors} /><Pressable style={styles.logoutButton} onPress={onLogout}><LogOut color={palette.danger} size={18} /><Text style={{ color: palette.danger, fontWeight: '700' }}>Sign out</Text></Pressable><Text style={[styles.caption, { color: colors.muted, textAlign: 'center', marginTop: 24 }]}>Velnora · Personal Finance & Expense Tracker</Text></>; }
+function ProfileScreen({ onOpenCategories, onOpenAliases, session, colors, mode, setMode, onLogout, onDataDeleted, smsStatusTick }: { onOpenCategories: () => void; onOpenAliases: () => void; smsStatusTick: number; onDataDeleted: () => void; session: Session; colors: Colors; mode: ThemeMode; setMode: (mode: ThemeMode) => void; onLogout: () => void }) { return <><View style={[styles.profileCard, { backgroundColor: colors.card, borderColor: colors.border }]}><View style={styles.profileAvatar}><Text style={styles.profileInitial}>{session.user.full_name.charAt(0).toUpperCase()}</Text></View><Text style={[styles.profileName, { color: colors.text }]}>{session.user.full_name}</Text><Text style={[styles.caption, { color: colors.muted }]}>{session.user.email}</Text></View><SectionHeader title="Preferences" colors={colors} /><SettingRow icon={<Sliders color={palette.navy} />} title="Currency" value="INR (₹)" colors={colors} /><SettingRow icon={<Bell color={palette.navy} />} title="Notifications" value="Available when configured" colors={colors} /><View style={[styles.settingRow, { borderBottomColor: colors.border }]}><View style={styles.settingIcon}><Settings color={palette.navy} size={18} /></View><View style={styles.rowBody}><Text style={[styles.rowTitle, { color: colors.text }]}>Theme</Text><Text style={[styles.caption, { color: colors.muted }]}>Choose your preferred appearance</Text></View><Pressable onPress={() => setMode(mode === 'light' ? 'dark' : 'light')}><Text style={styles.link}>{mode === 'light' ? 'Light' : 'Dark'}</Text></Pressable></View><SectionHeader title="Your data" colors={colors} /><SettingRow icon={<Sliders color={palette.navy} />} title="Categories" value="Create, edit and organise" colors={colors} onPress={onOpenCategories} /><SettingRow icon={<Sliders color={palette.navy} />} title="Merchant names" value="Corrections Velnora remembers" colors={colors} onPress={onOpenAliases} /><SectionHeader title="Account" colors={colors} /><SettingRow icon={<LockKeyhole color={palette.navy} />} title="Data and privacy" value="Review controls" colors={colors} /><LocalDataSection userId={session.user.id} colors={colors} onDeleted={onDataDeleted} /><SmsStagingStatusSection userId={session.user.id} colors={colors} refreshKey={smsStatusTick} /><Pressable style={styles.logoutButton} onPress={onLogout}><LogOut color={palette.danger} size={18} /><Text style={{ color: palette.danger, fontWeight: '700' }}>Sign out</Text></Pressable><Text style={[styles.caption, { color: colors.muted, textAlign: 'center', marginTop: 24 }]}>Velnora · Personal Finance & Expense Tracker</Text></>; }
 
 type Colors = { canvas: string; card: string; border: string; text: string; muted: string };
-function SettingRow({ icon, title, value, colors }: { icon: React.ReactNode; title: string; value: string; colors: Colors }) { return <View style={[styles.settingRow, { borderBottomColor: colors.border }]}><View style={styles.settingIcon}>{icon}</View><View style={styles.rowBody}><Text style={[styles.rowTitle, { color: colors.text }]}>{title}</Text><Text style={[styles.caption, { color: colors.muted }]}>{value}</Text></View><ChevronRight color={colors.muted} size={18} /></View>; }
+function GuestProfile({ onOpenCategories, onOpenAliases, colors, mode, setMode, onSignIn, onCreate }: { onOpenCategories: () => void; onOpenAliases: () => void; colors: Colors; mode: ThemeMode; setMode: (mode: ThemeMode) => void; onSignIn: () => void; onCreate: () => void }) { return <><View style={[styles.profileCard, { backgroundColor: colors.card, borderColor: colors.border }]}><View style={styles.profileAvatar}><UserRound color="#FFFFFF" size={26} /></View><Text style={[styles.profileName, { color: colors.text }]}>Guest</Text><Text style={[styles.caption, { color: colors.muted, textAlign: 'center' }]}>Your data is stored only on this device. Create an account to sync across devices.</Text></View><Pressable style={styles.primaryButton} onPress={onCreate}><Text style={styles.primaryButtonText}>Create an account</Text></Pressable><Pressable onPress={onSignIn}><Text style={[styles.link, { textAlign: 'center', marginTop: 16 }]}>Sign in</Text></Pressable><SectionHeader title="Your data" colors={colors} /><SettingRow icon={<Sliders color={palette.navy} />} title="Categories" value="Create, edit and organise" colors={colors} onPress={onOpenCategories} /><SettingRow icon={<Sliders color={palette.navy} />} title="Merchant names" value="Sign in to use" colors={colors} onPress={onOpenAliases} /><SectionHeader title="Preferences" colors={colors} /><View style={[styles.settingRow, { borderBottomColor: colors.border }]}><View style={styles.settingIcon}><Settings color={palette.navy} size={18} /></View><View style={styles.rowBody}><Text style={[styles.rowTitle, { color: colors.text }]}>Theme</Text></View><Pressable onPress={() => setMode(mode === 'light' ? 'dark' : 'light')}><Text style={styles.link}>{mode === 'light' ? 'Light' : 'Dark'}</Text></Pressable></View></>; }
+function SettingRow({ icon, title, value, colors, onPress }: { icon: React.ReactNode; title: string; value: string; colors: Colors; onPress?: () => void }) { return <Pressable disabled={!onPress} onPress={onPress} accessibilityRole={onPress ? 'button' : undefined} style={[styles.settingRow, { borderBottomColor: colors.border }]}><View style={styles.settingIcon}>{icon}</View><View style={styles.rowBody}><Text style={[styles.rowTitle, { color: colors.text }]}>{title}</Text><Text style={[styles.caption, { color: colors.muted }]}>{value}</Text></View><ChevronRight color={colors.muted} size={18} /></Pressable>; }
 function Metric({ label, value, positive }: { label: string; value: string; positive?: boolean }) { return <View style={styles.metric}><Text style={styles.heroLabel}>{label}</Text><Text style={[styles.metricValue, { color: positive ? palette.emerald : '#FFFFFF' }]}>{value}</Text></View>; }
 function ActionButton({ icon, label, onPress, colors }: { icon: React.ReactNode; label: string; onPress: () => void; colors: Colors }) { return <Pressable style={[styles.actionButton, { backgroundColor: colors.card, borderColor: colors.border }]} onPress={onPress}>{icon}<Text style={[styles.actionLabel, { color: colors.text }]}>{label}</Text></Pressable>; }
 function SectionHeader({ title, action, onPress, colors }: { title: string; action?: string; onPress?: () => void; colors: Colors }) { return <View style={styles.sectionHeader}><Text style={[styles.sectionTitle, { color: colors.text }]}>{title}</Text>{action && <Pressable onPress={onPress}><Text style={styles.link}>{action}</Text></Pressable>}</View>; }
@@ -211,8 +349,8 @@ function EmptyState({ colors, onAdd }: { colors: Colors; onAdd: () => void }) { 
 function BottomNav({ tab, setTab, colors }: { tab: Tab; setTab: (tab: Tab) => void; colors: Colors }) { const items: [Tab, typeof Home, string][] = [['home', Home, 'Home'], ['transactions', LayoutGrid, 'Transactions'], ['analytics', Chart, 'Analytics'], ['budgets', WalletCards, 'Budgets'], ['people', Users, 'People']]; return <View style={[styles.nav, { backgroundColor: colors.card, borderTopColor: colors.border }]}>{items.map(([key, Icon, label]) => <Pressable key={key} style={styles.navItem} onPress={() => setTab(key)}><Icon size={19} color={tab === key ? palette.emerald : colors.muted} /><Text style={[styles.navLabel, { color: tab === key ? palette.emerald : colors.muted }]}>{label}</Text></Pressable>)}</View>; }
 
 function AuthLoading({ colors }: { colors: Colors }) { return <SafeAreaView style={[styles.safe, { backgroundColor: colors.canvas }]}><View style={styles.loading}><Text style={[styles.brand, { color: palette.emerald }]}>VELNORA</Text></View></SafeAreaView>; }
-type AuthProps = { screen: 'welcome' | 'signup' | 'signin' | 'forgot'; setScreen: (screen: 'welcome' | 'signup' | 'signin' | 'forgot') => void; fullName: string; setFullName: (value: string) => void; email: string; setEmail: (value: string) => void; password: string; setPassword: (value: string) => void; confirmPassword: string; setConfirmPassword: (value: string) => void; showPassword: boolean; setShowPassword: (value: boolean) => void; termsAccepted: boolean; setTermsAccepted: (value: boolean) => void; busy: boolean; error: string; notice: string; onSubmit: (screen: 'signup' | 'signin') => Promise<void>; onForgot: () => Promise<void>; colors: Colors };
-function AuthScreens(props: AuthProps) { const signup = props.screen === 'signup'; const forgot = props.screen === 'forgot'; if (props.screen === 'welcome') return <SafeAreaView style={[styles.safe, { backgroundColor: palette.navy }]}><ScrollView contentContainerStyle={styles.welcome}><View style={styles.logoMark}><WalletCards color={palette.emerald} size={28} /></View><Text style={styles.brand}>VELNORA</Text><Text style={styles.welcomeTitle}>Take control of your money.</Text><Text style={styles.welcomeDescription}>Track better. Budget smarter. Manage money confidently.</Text><Text style={styles.productDescriptor}>Personal Finance & Expense Tracker</Text><Pressable style={styles.primaryButton} onPress={() => props.setScreen('signup')}><Text style={styles.primaryButtonText}>Get started</Text></Pressable><Pressable style={styles.secondaryButton} onPress={() => props.setScreen('signin')}><Text style={styles.secondaryButtonText}>I already have an account</Text></Pressable></ScrollView></SafeAreaView>; return <SafeAreaView style={[styles.safe, { backgroundColor: props.colors.canvas }]}><ScrollView contentContainerStyle={styles.formScreen}><Pressable onPress={() => props.setScreen(forgot ? 'signin' : 'welcome')}><Text style={styles.link}>‹ Back</Text></Pressable><Text style={[styles.brand, { marginTop: 34 }]}>VELNORA</Text><Text style={[styles.authTitle, { color: props.colors.text }]}>{signup ? 'Create your account' : forgot ? 'Reset your password' : 'Welcome back'}</Text><Text style={[styles.subtitle, { color: props.colors.muted }]}>{signup ? 'Start building a clearer view of your finances.' : 'Sign in to continue managing your money.'}</Text>{signup && <AuthField label="FULL NAME" value={props.fullName} onChangeText={props.setFullName} placeholder="Your name" colors={props.colors} icon={<UserRound color={props.colors.muted} size={17} />} />}{<AuthField label="EMAIL" value={props.email} onChangeText={props.setEmail} placeholder="you@example.com" colors={props.colors} icon={<KeyRound color={props.colors.muted} size={17} />} />}{!forgot && <PasswordField label="PASSWORD" value={props.password} onChangeText={props.setPassword} visible={props.showPassword} toggle={() => props.setShowPassword(!props.showPassword)} colors={props.colors} />}{signup && <PasswordField label="CONFIRM PASSWORD" value={props.confirmPassword} onChangeText={props.setConfirmPassword} visible={props.showPassword} toggle={() => props.setShowPassword(!props.showPassword)} colors={props.colors} />}{signup && <Pressable style={styles.termsRow} onPress={() => props.setTermsAccepted(!props.termsAccepted)}><View style={[styles.checkbox, props.termsAccepted && styles.checkboxActive]}>{props.termsAccepted && <Text>✓</Text>}</View><Text style={[styles.caption, { color: props.colors.muted }]}>I accept the terms and privacy policy.</Text></Pressable>}{props.error ? <Text style={styles.errorText}>{props.error}</Text> : null}{props.notice ? <Text style={styles.noticeText}>{props.notice}</Text> : null}<Pressable disabled={props.busy} style={styles.primaryButton} onPress={() => forgot ? props.onForgot() : props.onSubmit(signup ? 'signup' : 'signin')}><Text style={styles.primaryButtonText}>{props.busy ? 'Please wait...' : signup ? 'Create account' : forgot ? 'Check reset options' : 'Sign in'}</Text></Pressable>{!signup && !forgot && <Pressable onPress={() => props.setScreen('forgot')}><Text style={[styles.link, { textAlign: 'center', marginTop: 18 }]}>Forgot password?</Text></Pressable>}{!forgot && <Pressable onPress={() => props.setScreen(signup ? 'signin' : 'signup')}><Text style={[styles.caption, { color: props.colors.muted, textAlign: 'center', marginTop: 22 }]}>{signup ? 'Already have an account? ' : 'New to Velnora? '}<Text style={styles.link}>{signup ? 'Sign in' : 'Create account'}</Text></Text></Pressable>}</ScrollView></SafeAreaView>; }
+type AuthProps = { onGuest: () => void; screen: 'welcome' | 'signup' | 'signin' | 'forgot'; setScreen: (screen: 'welcome' | 'signup' | 'signin' | 'forgot') => void; fullName: string; setFullName: (value: string) => void; email: string; setEmail: (value: string) => void; password: string; setPassword: (value: string) => void; confirmPassword: string; setConfirmPassword: (value: string) => void; showPassword: boolean; setShowPassword: (value: boolean) => void; termsAccepted: boolean; setTermsAccepted: (value: boolean) => void; busy: boolean; error: string; notice: string; onSubmit: (screen: 'signup' | 'signin') => Promise<void>; onForgot: () => Promise<void>; colors: Colors };
+function AuthScreens(props: AuthProps) { const signup = props.screen === 'signup'; const forgot = props.screen === 'forgot'; if (props.screen === 'welcome') return <SafeAreaView style={[styles.safe, { backgroundColor: palette.navy }]}><ScrollView contentContainerStyle={styles.welcome}><View style={styles.logoMark}><WalletCards color={palette.emerald} size={28} /></View><Text style={styles.brand}>VELNORA</Text><Text style={styles.welcomeTitle}>Take control of your money.</Text><Text style={styles.welcomeDescription}>Track better. Budget smarter. Manage money confidently.</Text><Text style={styles.productDescriptor}>Personal Finance & Expense Tracker</Text><Pressable style={styles.primaryButton} onPress={() => props.setScreen('signup')}><Text style={styles.primaryButtonText}>Get started</Text></Pressable><Pressable style={styles.secondaryButton} onPress={() => props.setScreen('signin')}><Text style={styles.secondaryButtonText}>I already have an account</Text></Pressable><Pressable onPress={props.onGuest}><Text style={[styles.link, { textAlign: 'center', marginTop: 20 }]}>Continue without an account</Text></Pressable></ScrollView></SafeAreaView>; return <SafeAreaView style={[styles.safe, { backgroundColor: props.colors.canvas }]}><KeyboardAvoidingView style={styles.safe} behavior="padding"><ScrollView contentContainerStyle={[styles.formScreen, { paddingBottom: 160 }]} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag"><Pressable onPress={() => props.setScreen(forgot ? 'signin' : 'welcome')}><Text style={styles.link}>‹ Back</Text></Pressable><Text style={[styles.brand, { marginTop: 34 }]}>VELNORA</Text><Text style={[styles.authTitle, { color: props.colors.text }]}>{signup ? 'Create your account' : forgot ? 'Reset your password' : 'Welcome back'}</Text><Text style={[styles.subtitle, { color: props.colors.muted }]}>{signup ? 'Start building a clearer view of your finances.' : 'Sign in to continue managing your money.'}</Text>{signup && <AuthField label="FULL NAME" value={props.fullName} onChangeText={props.setFullName} placeholder="Your name" colors={props.colors} icon={<UserRound color={props.colors.muted} size={17} />} />}{<AuthField label="EMAIL" value={props.email} onChangeText={props.setEmail} placeholder="you@example.com" colors={props.colors} icon={<KeyRound color={props.colors.muted} size={17} />} />}{!forgot && <PasswordField label="PASSWORD" value={props.password} onChangeText={props.setPassword} visible={props.showPassword} toggle={() => props.setShowPassword(!props.showPassword)} colors={props.colors} />}{signup && <PasswordField label="CONFIRM PASSWORD" value={props.confirmPassword} onChangeText={props.setConfirmPassword} visible={props.showPassword} toggle={() => props.setShowPassword(!props.showPassword)} colors={props.colors} />}{signup && <Pressable style={styles.termsRow} onPress={() => props.setTermsAccepted(!props.termsAccepted)}><View style={[styles.checkbox, props.termsAccepted && styles.checkboxActive]}>{props.termsAccepted && <Text>✓</Text>}</View><Text style={[styles.caption, { color: props.colors.muted }]}>I accept the terms and privacy policy.</Text></Pressable>}{props.error ? <Text style={styles.errorText}>{props.error}</Text> : null}{props.notice ? <Text style={styles.noticeText}>{props.notice}</Text> : null}<Pressable disabled={props.busy} style={styles.primaryButton} onPress={() => forgot ? props.onForgot() : props.onSubmit(signup ? 'signup' : 'signin')}><Text style={styles.primaryButtonText}>{props.busy ? 'Please wait...' : signup ? 'Create account' : forgot ? 'Check reset options' : 'Sign in'}</Text></Pressable>{!signup && !forgot && <Pressable onPress={() => props.setScreen('forgot')}><Text style={[styles.link, { textAlign: 'center', marginTop: 18 }]}>Forgot password?</Text></Pressable>}{!forgot && <Pressable onPress={() => props.setScreen(signup ? 'signin' : 'signup')}><Text style={[styles.caption, { color: props.colors.muted, textAlign: 'center', marginTop: 22 }]}>{signup ? 'Already have an account? ' : 'New to Velnora? '}<Text style={styles.link}>{signup ? 'Sign in' : 'Create account'}</Text></Text></Pressable>}</ScrollView></KeyboardAvoidingView></SafeAreaView>; }
 function AuthField({ label, value, onChangeText, placeholder, icon, colors }: { label: string; value: string; onChangeText: (value: string) => void; placeholder: string; icon: React.ReactNode; colors: Colors }) { return <View style={styles.authField}><Text style={[styles.label, { color: colors.muted }]}>{label}</Text><View style={[styles.authInputWrap, { backgroundColor: colors.card, borderColor: colors.border }]}>{icon}<TextInput value={value} onChangeText={onChangeText} placeholder={placeholder} placeholderTextColor={colors.muted} style={[styles.inputBare, { color: colors.text }]} autoCapitalize="none" /></View></View>; }
 function PasswordField({ label, value, onChangeText, visible, toggle, colors }: { label: string; value: string; onChangeText: (value: string) => void; visible: boolean; toggle: () => void; colors: Colors }) { return <View style={styles.authField}><Text style={[styles.label, { color: colors.muted }]}>{label}</Text><View style={[styles.authInputWrap, { backgroundColor: colors.card, borderColor: colors.border }]}><LockKeyhole color={colors.muted} size={17} /><TextInput value={value} onChangeText={onChangeText} placeholder="8+ characters" placeholderTextColor={colors.muted} secureTextEntry={!visible} style={[styles.inputBare, { color: colors.text }]} /><Pressable onPress={toggle}>{visible ? <EyeOff color={colors.muted} size={18} /> : <Eye color={colors.muted} size={18} />}</Pressable></View></View>; }
 

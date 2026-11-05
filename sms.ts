@@ -1,14 +1,12 @@
 import { PermissionsAndroid, Platform } from 'react-native';
 import { requireOptionalNativeModule, type EventSubscription } from 'expo-modules-core';
-import type { SmsReceivedPayload } from './transactionParser';
-
-export type SmsReceivedEvent = SmsReceivedPayload;
+import type { SmsStagingStore } from './src/services/smsStagingTypes';
 
 type VelnoraSmsNativeModule = {
-  addListener: (eventName: 'onSmsReceived', listener: (event: SmsReceivedEvent) => void) => EventSubscription;
+  addListener: (eventName: 'onSmsStaged', listener: () => void) => EventSubscription;
   isReceiveSmsPermissionGranted: () => boolean;
   setSupportedSenderPatterns: (patterns: string[]) => void;
-};
+} & SmsStagingStore;
 
 const nativeModule = requireOptionalNativeModule<VelnoraSmsNativeModule>('VelnoraSms');
 
@@ -38,6 +36,11 @@ export function isSmsPermissionGranted(): boolean {
   return nativeModule?.isReceiveSmsPermissionGranted() ?? false;
 }
 
-export function addSmsReceivedListener(listener: (event: SmsReceivedEvent) => void): EventSubscription | null {
-  return nativeModule?.addListener('onSmsReceived', listener) ?? null;
+/** Lightweight "something was staged" signal (carries no SMS content). Drain via the staging service. */
+export function addSmsStagedListener(listener: () => void): EventSubscription | null {
+  return nativeModule?.addListener('onSmsStaged', listener) ?? null;
+}
+
+export function getNativeStagingStore(): SmsStagingStore | null {
+  return Platform.OS === 'android' ? nativeModule : null;
 }

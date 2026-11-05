@@ -28,7 +28,20 @@
           ]
         }
       ],
-      "expo-sqlite"
+      "expo-sqlite",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Velnora uses your photos only when you choose a receipt image to attach to a transaction.",
+          "cameraPermission": "Velnora uses the camera only when you capture a receipt or bill photo for a transaction."
+        }
+      ],
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Velnora uses your location only when you tap 'Use my location' to place a pin for a transaction. It never tracks you in the background."
+        }
+      ]
     ],
     "web": {
       "favicon": "./assets/favicon.png"

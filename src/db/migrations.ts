@@ -21,7 +21,15 @@ export async function runMigrations(db: IDatabase): Promise<number> {
   // 3. Apply pending migrations sequentially
   for (const migration of MIGRATIONS) {
     if (!appliedVersions.has(migration.version)) {
-      await db.execAsync(migration.up);
+      // Atomic: a failed migration must never leave a half-migrated schema or lose queued sync items.
+      await db.execAsync('BEGIN TRANSACTION');
+      try {
+        await db.execAsync(migration.up);
+        await db.execAsync('COMMIT');
+      } catch (err) {
+        await db.execAsync('ROLLBACK');
+        throw err;
+      }
 
       // Seed initial data if version 1
       if (migration.version === 1) {

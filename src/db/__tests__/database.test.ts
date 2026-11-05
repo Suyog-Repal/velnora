@@ -14,10 +14,10 @@ async function runAllDatabaseTests() {
     console.log('Test 1: Running schema migrations...');
     const adapter = new NodeSqliteAdapter();
     const appliedCount = await runMigrations(adapter);
-    assert.equal(appliedCount, 2, 'Initial migration should apply 2 versions');
+    assert.equal(appliedCount, 4, 'Initial migration should apply 4 versions');
 
     const version = await getCurrentSchemaVersion(adapter);
-    assert.equal(version, 2, 'Current schema version should be 2');
+    assert.equal(version, 4, 'Current schema version should be 4');
 
     // Run again, should be idempotent
     const rerunCount = await runMigrations(adapter);
@@ -39,17 +39,17 @@ async function runAllDatabaseTests() {
 
     const created = await catRepo.create({
       id: 'custom-cat-1',
-      name: 'Freelance',
+      name: 'Pet Care',
       transaction_type: 'income',
       icon: 'Laptop',
     });
-    assert.equal(created.name, 'Freelance');
+    assert.equal(created.name, 'Pet Care');
 
     const fetched = await catRepo.getById('custom-cat-1');
     assert.equal(fetched?.id, 'custom-cat-1');
-    assert.equal(fetched?.name, 'Freelance');
+    assert.equal(fetched?.name, 'Pet Care');
 
-    const foundByName = await catRepo.findByName('freelance');
+    const foundByName = await catRepo.findByName('pet care');
     assert.equal(foundByName?.id, 'custom-cat-1');
     console.log('✓ Category repository passed');
   }
@@ -367,7 +367,7 @@ async function runAllDatabaseTests() {
 
     // Run migration 2
     const newlyApplied = await runMigrations(adapter);
-    assert.equal(newlyApplied, 1, 'Migration 2 should be applied');
+    assert.equal(newlyApplied, 3, 'Migrations 2-4 should be applied');
 
     // Verify amount_paise was populated correctly by backfill
     const row = await adapter.getFirstAsync<{ amount: number; amount_paise: number }>(

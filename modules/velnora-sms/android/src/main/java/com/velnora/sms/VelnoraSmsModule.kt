@@ -8,7 +8,7 @@ import expo.modules.kotlin.modules.ModuleDefinition
 class VelnoraSmsModule : Module() {
   override fun definition() = ModuleDefinition {
     Name("VelnoraSms")
-    Events("onSmsReceived")
+    Events("onSmsStaged")
 
     Function("setSupportedSenderPatterns") { patterns: List<String> ->
       VelnoraSmsReceiverState.configurePatterns(patterns)
@@ -19,6 +19,24 @@ class VelnoraSmsModule : Module() {
       return@Function context.checkSelfPermission(android.Manifest.permission.RECEIVE_SMS) ==
         PackageManager.PERMISSION_GRANTED
     }
+
+    AsyncFunction("setOwnerHint") { userId: String -> store().setOwnerHint(userId) }
+
+    AsyncFunction("claim") { owner: String, limit: Int, nowMs: Double, leaseMs: Double, maxAttempts: Int ->
+      store().claim(owner, limit, nowMs.toLong(), leaseMs.toLong(), maxAttempts)
+    }
+
+    AsyncFunction("complete") { id: Double -> store().complete(id.toLong()) }
+
+    AsyncFunction("scheduleRetry") { id: Double, errorCode: String, nextRetryAtMs: Double ->
+      store().scheduleRetry(id.toLong(), errorCode, nextRetryAtMs.toLong())
+    }
+
+    AsyncFunction("markDead") { id: Double, errorCode: String -> store().markDead(id.toLong(), errorCode) }
+
+    AsyncFunction("counts") { owner: String? -> store().counts(owner) }
+
+    AsyncFunction("purgeOwner") { owner: String -> store().purgeOwner(owner) }
 
     OnCreate {
       current = this@VelnoraSmsModule
@@ -32,16 +50,14 @@ class VelnoraSmsModule : Module() {
     }
   }
 
-  internal fun emitSmsReceived(sender: String, receivedAt: Long, partCount: Int, body: String) {
-    sendEvent(
-      "onSmsReceived",
-      mapOf(
-        "sender" to sender,
-        "receivedAt" to receivedAt,
-        "partCount" to partCount,
-        "body" to body,
-      ),
-    )
+  private fun store(): VelnoraSmsStagingStore {
+    val context = appContext.reactContext ?: throw IllegalStateException("React context unavailable")
+    return VelnoraSmsStagingStore.get(context)
+  }
+
+  /** Content-free signal: JS then drains the durable staging store. */
+  internal fun emitSmsStaged() {
+    sendEvent("onSmsStaged", emptyMap<String, Any>())
   }
 
   companion object {

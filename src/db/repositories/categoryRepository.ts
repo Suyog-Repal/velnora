@@ -69,22 +69,27 @@ export class CategoryRepository {
     name: string;
     transaction_type: 'income' | 'expense' | 'both';
     icon?: string | null;
+    color?: string | null;
   }): Promise<CategoryEntity> {
     const now = new Date().toISOString();
     await this.db.runAsync(
-      `INSERT INTO categories (id, user_id, name, transaction_type, icon, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO categories (id, user_id, name, transaction_type, icon, color, is_custom, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
          user_id = excluded.user_id,
          name = excluded.name,
          transaction_type = excluded.transaction_type,
          icon = excluded.icon,
+         color = COALESCE(excluded.color, categories.color),
+         is_custom = excluded.is_custom,
          updated_at = excluded.updated_at`,
       category.id,
       category.user_id ?? null,
       category.name.trim(),
       category.transaction_type,
       category.icon ?? null,
+      category.color ?? null,
+      category.user_id ? 1 : 0,
       now,
       now,
     );

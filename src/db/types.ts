@@ -3,7 +3,7 @@ export type TransactionSource = 'manual' | 'sms';
 export type SyncStatus = 'synced' | 'pending_create' | 'pending_update' | 'pending_delete' | 'failed';
 export type CategoryType = 'income' | 'expense' | 'both';
 export type SyncOperation = 'create' | 'update' | 'delete';
-export type SyncEntityType = 'transaction' | 'category' | 'device';
+export type SyncEntityType = 'transaction' | 'category' | 'device' | 'budget' | 'merchant_alias';
 
 export interface TransactionEntity {
   id: string; // Stable UUID v4
@@ -24,6 +24,16 @@ export interface TransactionEntity {
   deleted_at: string | null;
   created_at: string;
   updated_at: string;
+  merchant_phone?: string | null; // E.164, optional, user-entered only
+  payment_method?: string | null;
+  receipt_local_path?: string | null; // app-private file; never synced as a path
+  receipt_remote_id?: string | null;
+  receipt_upload_pending?: number;
+  location_lat?: number | null;
+  location_lng?: number | null;
+  location_name?: string | null;
+  location_address?: string | null;
+  location_confirmed?: number;
 }
 
 export interface CreateTransactionInput {
@@ -41,6 +51,13 @@ export interface CreateTransactionInput {
   reference_id?: string | null;
   fingerprint?: string | null;
   sync_status?: SyncStatus;
+  merchant_phone?: string | null;
+  payment_method?: string | null;
+  location_lat?: number | null;
+  location_lng?: number | null;
+  location_name?: string | null;
+  location_address?: string | null;
+  location_confirmed?: number;
 }
 
 export interface UpdateTransactionInput {
@@ -51,6 +68,16 @@ export interface UpdateTransactionInput {
   category?: string;
   description?: string;
   transaction_date?: string;
+  merchant_phone?: string | null;
+  payment_method?: string | null;
+  location_lat?: number | null;
+  location_lng?: number | null;
+  location_name?: string | null;
+  location_address?: string | null;
+  location_confirmed?: number;
+  receipt_local_path?: string | null;
+  receipt_remote_id?: string | null;
+  receipt_upload_pending?: number;
 }
 
 export interface CategoryEntity {
@@ -59,6 +86,8 @@ export interface CategoryEntity {
   name: string;
   transaction_type: CategoryType;
   icon: string | null;
+  color?: string | null;
+  archived_at?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -102,6 +131,14 @@ export interface RemoteTransaction {
   deleted_at?: string | null;
   created_at: string;
   updated_at: string;
+  merchant_phone?: string | null;
+  payment_method?: string | null;
+  receipt_remote_id?: string | null;
+  location_lat?: number | null;
+  location_lng?: number | null;
+  location_name?: string | null;
+  location_address?: string | null;
+  location_confirmed?: boolean | number;
 }
 
 export interface IDatabase {

@@ -10,7 +10,7 @@ import type { Session, TransactionEntity } from '../db/types.ts';
 
 export interface SmsProcessResult {
   success: boolean;
-  action: 'saved' | 'duplicate_ignored' | 'unsupported_or_invalid' | 'error';
+  action: 'saved' | 'duplicate_ignored' | 'unsupported_or_invalid' | 'held' | 'error';
   transaction?: TransactionEntity;
   reason?: string;
 }
@@ -31,6 +31,13 @@ export async function processIncomingSms(
   session: Session | null,
   rules: SmsParsingRule[] = [DEFAULT_SMS_RULE],
 ): Promise<SmsProcessResult> {
+  // 0. Ownership: a financial record is never saved without an authenticated owner.
+  // The event is reported as 'held' so callers keep it staged instead of discarding it.
+  const ownerId = session?.user?.id?.trim();
+  if (!ownerId) {
+    return { success: false, action: 'held', reason: 'No authenticated owner for SMS event' };
+  }
+
   // 1. Basic event structure validation
   if (!event || typeof event.body !== 'string' || !event.body.trim()) {
     return {
@@ -98,7 +105,7 @@ export async function processIncomingSms(
 
     // 4. Duplicate prevention check
     if (parsed.referenceId?.trim()) {
-      const existingRef = await transactionRepository.findByReferenceId(parsed.referenceId.trim());
+      const existingRef = await transactionRepository.findByReferenceId(parsed.referenceId.trim(), ownerId);
       if (existingRef) {
         return {
           success: true,
@@ -110,7 +117,7 @@ export async function processIncomingSms(
     }
 
     if (parsed.fingerprint?.trim()) {
-      const existingFp = await transactionRepository.findByFingerprint(parsed.fingerprint.trim());
+      const existingFp = await transactionRepository.findByFingerprint(parsed.fingerprint.trim(), ownerId);
       if (existingFp) {
         // Only treat as duplicate if incoming has no reference_id, or existing has matching/empty reference_id
         if (!parsed.referenceId?.trim() || !existingFp.reference_id || parsed.referenceId.trim() === existingFp.reference_id) {
@@ -134,7 +141,7 @@ export async function processIncomingSms(
     };
   } catch (err) {
     const errorMsg = err instanceof Error ? err.message : String(err);
-    console.error('Failed to process and record incoming SMS:', errorMsg);
+    console.warn('Failed to process incoming SMS (event retained for retry)');
     return {
       success: false,
       action: 'error',
