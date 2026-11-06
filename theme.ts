@@ -16,6 +16,7 @@ export const palette = {
   card: '#FFFFFF',
   border: '#E4EAF0',
   danger: '#D95C67',
+  dangerDeep: '#B83A47', // filled expense surfaces (white text 5.6:1)
   warning: '#C9892B',
   darkCanvas: '#081827',
   darkCard: '#10243E',

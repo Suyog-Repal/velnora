@@ -1,4 +1,4 @@
-import type { Session, TransactionEntity, UpdateTransactionInput } from '../db/types.ts';
+import type { Direction, Session, TransactionEntity, UpdateTransactionInput } from '../db/types.ts';
 
 export type PhoneResult = { ok: true; value: string | null } | { ok: false; error: string };
 
@@ -59,6 +59,8 @@ export function canEditTransaction(tx: Pick<TransactionEntity, 'user_id'>, sessi
 
 export type DetailsPatch = {
   amount?: number;
+  /** Income/expense. Changing it moves the amount between the income and expense totals. */
+  direction?: Direction;
   counterparty?: string;
   category?: string;
   category_id?: string | null;
@@ -76,6 +78,10 @@ export function toUpdateInput(patch: DetailsPatch): UpdateTransactionInput {
   if (patch.amount !== undefined) {
     if (!Number.isFinite(patch.amount) || patch.amount <= 0) throw new Error('Enter an amount greater than zero.');
     out.amount = patch.amount;
+  }
+  if (patch.direction !== undefined) {
+    if (patch.direction !== 'income' && patch.direction !== 'expense') throw new Error('Choose income or expense.');
+    out.direction = patch.direction;
   }
   if (patch.counterparty !== undefined) {
     if (!patch.counterparty.trim()) throw new Error('Merchant cannot be empty.');

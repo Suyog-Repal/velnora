@@ -3,7 +3,7 @@ import { Alert, Image, ScrollView, Text, View } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { palette } from '../../theme';
 import { Camera, ImageIcon, MapPin, Phone, Trash } from '../../icons';
-import { Button, Chip, Input, Labeled, Sheet, currencySymbol, formatPaise, type Colors } from '../ui/common';
+import { Button, Chip, Input, Labeled, Sheet, TypeToggle, currencySymbol, formatPaise, type Colors } from '../ui/common';
 import { LocationPicker } from './LocationPicker';
 import { buildMerchantPhone, formatDateInput, formatTimeInput, parseLocalDateTime } from '../services/transactionDetails';
 import { deleteTransaction, getServiceDb, updateTransactionDetails } from '../services/transactionService';
@@ -12,7 +12,7 @@ import { attachReceipt, removeReceipt } from '../services/receiptService';
 import { downloadReceipt, expoReceiptFs } from '../services/receiptFiles';
 import { API_URL } from '../../auth';
 import type { CategoryView } from '../services/categoryService';
-import type { Session, TransactionEntity } from '../db/types';
+import type { Direction, Session, TransactionEntity } from '../db/types';
 
 const PAYMENT_METHODS = ['UPI', 'Card', 'Cash', 'Net banking', 'Other'];
 const DIAL_CODES = ['+91', '+1', '+44', '+971', '+65', '+61'];
@@ -25,6 +25,7 @@ export function TransactionSheet({ tx, session, categories, colors, onClose, onC
   const [date, setDate] = useState('');
   const [time, setTime] = useState('');
   const [category, setCategory] = useState('');
+  const [direction, setDirection] = useState<Direction>('expense');
   const [payment, setPayment] = useState<string | null>(null);
   const [dial, setDial] = useState('+91');
   const [phone, setPhone] = useState('');
@@ -38,7 +39,7 @@ export function TransactionSheet({ tx, session, categories, colors, onClose, onC
   useEffect(() => {
     if (!tx) return;
     setMerchant(tx.counterparty); setAmount(String(tx.amount_paise / 100)); setDate(formatDateInput(tx.transaction_date)); setTime(formatTimeInput(tx.transaction_date));
-    setCategory(tx.category); setPayment(tx.payment_method ?? null); setError(''); setNote('');
+    setDirection(tx.direction); setCategory(tx.category); setPayment(tx.payment_method ?? null); setError(''); setNote('');
     const p = tx.merchant_phone ?? '';
     const known = [...DIAL_CODES].sort((x, y) => y.length - x.length).find((c) => p.startsWith(c));
     if (!p) { setDial('+91'); setPhone(''); } else if (known) { setDial(known); setPhone(p.slice(known.length)); } else { setDial('+91'); setPhone(p); }
@@ -53,9 +54,16 @@ export function TransactionSheet({ tx, session, categories, colors, onClose, onC
     }
   }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const typeCats = useMemo(() => categories.filter((c) => c.type === (tx?.direction ?? 'expense')).sort((a, b) => Number(b.name.toLowerCase() === category.toLowerCase()) - Number(a.name.toLowerCase() === category.toLowerCase())), [categories, tx?.direction, category]);
+  const typeCats = useMemo(() => categories.filter((c) => c.type === direction).sort((a, b) => Number(b.name.toLowerCase() === category.toLowerCase()) - Number(a.name.toLowerCase() === category.toLowerCase())), [categories, direction, category]);
   const phoneCheck = buildMerchantPhone(phone, dial);
   if (!tx) return null;
+
+  // Switching type moves the amount between income and expense totals; keep the category valid for the new type.
+  const chooseDirection = (d: Direction) => {
+    setDirection(d); setError('');
+    const valid = categories.filter((c) => c.type === d);
+    if (!valid.some((c) => c.name.toLowerCase() === category.toLowerCase())) setCategory(valid[0]?.name ?? (d === 'income' ? 'Other Income' : 'Other Expenses'));
+  };
 
   const save = async () => {
     setError('');
@@ -66,14 +74,15 @@ export function TransactionSheet({ tx, session, categories, colors, onClose, onC
     if (!phoneCheck.ok) { setError(phoneCheck.error); return; }
     setBusy(true);
     try {
-      const cat = categories.find((c) => c.name.toLowerCase() === category.toLowerCase());
+      const cat = categories.find((c) => c.type === direction && c.name.toLowerCase() === category.toLowerCase()) ?? categories.find((c) => c.name.toLowerCase() === category.toLowerCase());
       await updateTransactionDetails(tx.id, {
+        direction,
         counterparty: merchant, amount: value, transaction_date: iso, category, category_id: cat && !cat.isCustom ? null : cat?.id ?? null,
         payment_method: payment, merchantPhone: { number: phone, dialCode: dial },
       }, session);
       onChanged();
       const merchantChanged = merchant.trim() !== tx.counterparty;
-      const categoryChanged = category !== tx.category;
+      const categoryChanged = category !== tx.category && direction === tx.direction;
       if (session && (merchantChanged || categoryChanged)) {
         Alert.alert(
           'Remember this merchant?',
@@ -109,10 +118,15 @@ export function TransactionSheet({ tx, session, categories, colors, onClose, onC
   ]);
 
   const hasLoc = tx.location_lat != null && tx.location_lng != null;
-  return <Sheet visible onClose={onClose} title={tx.counterparty} colors={colors}>
-    <Text style={{ fontSize: 30, fontWeight: '800', color: tx.direction === 'income' ? palette.emerald : palette.danger, marginBottom: 4 }}>{tx.direction === 'income' ? '+' : '-'}{formatPaise(tx.amount_paise)}</Text>
+  const footer = <>
+    {error ? <Text style={{ color: palette.danger, marginBottom: 8 }}>{error}</Text> : null}
+    <Button title="Save changes" onPress={() => void save()} busy={busy} />
+  </>;
+  return <Sheet visible onClose={onClose} title={tx.counterparty} colors={colors} footer={footer}>
+    <Text style={{ fontSize: 30, fontWeight: '800', color: direction === 'income' ? palette.emerald : palette.danger, marginBottom: 4 }}>{direction === 'income' ? '+' : '-'}{formatPaise(tx.amount_paise)}</Text>
     <Text style={{ color: colors.muted, marginBottom: 16 }}>{tx.source === 'sms' ? 'Detected from SMS' : 'Added manually'} · {tx.user_id ? (tx.sync_status === 'synced' ? 'Synced' : 'Waiting to sync') : 'Stored on this device only'}</Text>
 
+    <Labeled label="TYPE" colors={colors} hint={direction !== tx.direction ? `Will be saved as ${direction === 'income' ? 'income' : 'an expense'}.` : undefined}><TypeToggle value={direction} onChange={chooseDirection} colors={colors} /></Labeled>
     <Labeled label="MERCHANT" colors={colors}><Input colors={colors} value={merchant} onChangeText={setMerchant} accessibilityLabel="Merchant" /></Labeled>
     <Labeled label={`AMOUNT (${currencySymbol()})`} colors={colors}><Input colors={colors} value={amount} onChangeText={setAmount} keyboardType="decimal-pad" accessibilityLabel="Amount" /></Labeled>
     <View style={{ flexDirection: 'row', gap: 10 }}>
@@ -160,8 +174,6 @@ export function TransactionSheet({ tx, session, categories, colors, onClose, onC
       <Text style={{ color: colors.muted, fontSize: 12 }}>Created {new Date(tx.created_at).toLocaleString('en-IN')}{tx.reference_id ? `\nReference ${tx.reference_id}` : ''}{tx.description ? `\n${tx.description}` : ''}</Text>
     </Labeled>
 
-    {error ? <Text style={{ color: palette.danger, marginBottom: 8 }}>{error}</Text> : null}
-    <Button title="Save changes" onPress={() => void save()} busy={busy} />
     <Button title="Delete transaction" kind="danger" onPress={confirmDelete} />
 
     <LocationPicker visible={showMap} colors={colors} initial={hasLoc ? { lat: tx.location_lat!, lng: tx.location_lng!, name: tx.location_name, address: tx.location_address } : null}

@@ -3,7 +3,7 @@ import { Image, ScrollView, Text, View } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import * as DocumentPicker from 'expo-document-picker';
 import { palette } from '../../theme';
-import { Button, Chip, Input, Labeled, Sheet, formatPaise, currencySymbol, type Colors } from '../ui/common';
+import { TypeToggle, Button, Chip, Input, Labeled, Sheet, formatPaise, currencySymbol, type Colors } from '../ui/common';
 import { parseReceiptText, type ReceiptSuggestion } from '../services/receiptParser';
 import { recognizeReceiptText } from '../services/receiptOcr';
 import { attachReceipt, findPossibleDuplicate } from '../services/receiptService';
@@ -118,10 +118,9 @@ export function ReceiptScan({ visible, session, categories, colors, onClose, onS
       {sugg?.paymentStatus === 'failed' ? <Text style={{ color: palette.danger, marginBottom: 10 }}>This payment looks like it FAILED. Only save it if money really moved.</Text> : null}
       {sugg?.paymentStatus === 'pending' ? <Text style={{ color: palette.warning, marginBottom: 10 }}>This payment looks pending.</Text> : null}
 
-      <Labeled label="TYPE" colors={colors}><View style={{ flexDirection: 'row' }}>
-        <Chip label="Expense (I paid)" active={direction === 'expense'} onPress={() => { setDirection('expense'); setCategory(''); }} colors={colors} />
-        <Chip label="Income (I received)" active={direction === 'income'} onPress={() => { setDirection('income'); setCategory(''); }} colors={colors} />
-      </View></Labeled>
+      <Labeled label="TYPE" colors={colors} hint={sugg?.direction ? 'Suggested from the image. Please verify.' : undefined}>
+        <TypeToggle value={direction} onChange={(d) => { if (d !== direction) { setDirection(d); setCategory(''); } }} colors={colors} expenseLabel="Expense (I paid)" incomeLabel="Income (received)" />
+      </Labeled>
       <Labeled label={direction === 'income' ? 'RECEIVED FROM' : 'PAID TO'} colors={colors} hint={sugg?.merchant ? 'Read from the image. Please verify.' : undefined}>
         <Input colors={colors} value={merchant} onChangeText={setMerchant} placeholder={direction === 'income' ? 'Who paid you' : 'Who you paid'} />
         {sugg && sugg.merchantCandidates.length > 1 ? <ScrollView horizontal style={{ marginTop: 8 }}>{sugg.merchantCandidates.map((m) => <Chip key={m} label={m} active={merchant === m} onPress={() => setMerchant(m)} colors={colors} />)}</ScrollView> : null}

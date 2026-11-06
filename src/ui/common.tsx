@@ -1,8 +1,10 @@
-import { useEffect, useState, type ReactNode } from 'react';
-import { KeyboardAvoidingView, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View, type TextInputProps } from 'react-native';
+import { useEffect, useRef, useState, type ComponentRef, type ReactNode } from 'react';
+import { Animated, Easing, Keyboard, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View, type TextInputProps } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import NetInfo from '@react-native-community/netinfo';
 import { palette } from '../../theme';
-import { CATEGORY_ICON_MAP, X } from '../../icons';
+import { ArrowDownLeft, ArrowUpRight, CATEGORY_ICON_MAP, X } from '../../icons';
+import type { Direction } from '../db/types';
 import { formatMinor } from './currency';
 
 export type Colors = { canvas: string; card: string; border: string; text: string; muted: string };
@@ -28,10 +30,45 @@ export function CategoryIcon({ icon, color, label, size = 40 }: { icon?: string 
   return <View style={{ width: size, height: size, borderRadius: size / 2, backgroundColor: `${color}26`, alignItems: 'center', justifyContent: 'center' }}><Icon size={size * 0.5} color={color} /></View>;
 }
 
+/** Relative luminance of a #RRGGBB colour (WCAG). */
+function luminance(hex: string): number {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex.trim());
+  if (!m) return 0;
+  const n = parseInt(m[1], 16);
+  const ch = [(n >> 16) & 255, (n >> 8) & 255, n & 255].map((v) => { const c = v / 255; return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; });
+  return 0.2126 * ch[0] + 0.7152 * ch[1] + 0.0722 * ch[2];
+}
+const DARK_INK = '#0B1726';
+/** White or dark ink, whichever has the higher contrast on `bg` (works for every accent and category colour). */
+export function readableOn(bg: string): string {
+  const l = luminance(bg);
+  return (1.05 / (l + 0.05)) >= ((l + 0.05) / (luminance(DARK_INK) + 0.05)) ? '#FFFFFF' : DARK_INK;
+}
+
 export function Chip({ label, active, onPress, colors, color }: { label: string; active: boolean; onPress: () => void; colors: Colors; color?: string }) {
-  return <Pressable accessibilityRole="button" accessibilityState={{ selected: active }} onPress={onPress} style={[ui.chip, { borderColor: active ? (color ?? palette.emerald) : colors.border, backgroundColor: active ? `${color ?? palette.emerald}22` : colors.card }]}>
-    <Text style={{ color: active ? (color ?? palette.emerald) : colors.muted, fontWeight: '700', fontSize: 13 }}>{label}</Text>
+  const tint = color ?? palette.emerald;
+  return <Pressable accessibilityRole="button" accessibilityState={{ selected: active }} onPress={onPress} style={({ pressed }) => [ui.chip, { borderColor: active ? tint : colors.border, backgroundColor: active ? tint : colors.card, opacity: pressed ? 0.75 : 1 }]}>
+    <Text style={{ color: active ? readableOn(tint) : colors.text, fontWeight: active ? '800' : '600', fontSize: 13 }}>{label}</Text>
   </Pressable>;
+}
+
+/**
+ * Income / Expense selector. The selected side is a solid fill with contrast-checked text and icon;
+ * the other side is an outline with muted content, so the choice is clear in light and dark themes.
+ * It only reports the choice: the caller's `value` is the single source of truth for the saved type.
+ */
+export function TypeToggle({ value, onChange, colors, expenseLabel = 'Expense', incomeLabel = 'Income' }: { value: Direction; onChange: (d: Direction) => void; colors: Colors; expenseLabel?: string; incomeLabel?: string }) {
+  const option = (d: Direction, label: string, Icon: typeof ArrowUpRight) => {
+    const active = value === d;
+    const fill = d === 'expense' ? palette.dangerDeep : palette.emerald;
+    const fg = active ? readableOn(fill) : colors.muted;
+    return <Pressable key={d} onPress={() => onChange(d)} accessibilityRole="radio" accessibilityState={{ selected: active, checked: active }} accessibilityLabel={label}
+      style={({ pressed }) => [ui.typeOption, { backgroundColor: active ? fill : colors.card, borderColor: active ? fill : colors.border, opacity: pressed ? 0.85 : 1 }]}>
+      <View style={[ui.typeIcon, { backgroundColor: active ? (fg === '#FFFFFF' ? 'rgba(255,255,255,0.18)' : 'rgba(11,23,38,0.12)') : 'transparent' }]}><Icon color={active ? fg : (d === 'expense' ? palette.danger : palette.emerald)} size={16} strokeWidth={2.5} /></View>
+      <Text style={{ color: active ? fg : colors.text, fontWeight: '800', fontSize: 14 }}>{label}</Text>
+    </Pressable>;
+  };
+  return <View accessibilityRole="radiogroup" style={ui.typeRow}>{option('expense', expenseLabel, ArrowUpRight)}{option('income', incomeLabel, ArrowDownLeft)}</View>;
 }
 
 export function Button({ title, onPress, kind = 'primary', disabled, busy }: { title: string; onPress: () => void; kind?: 'primary' | 'danger' | 'ghost'; disabled?: boolean; busy?: boolean }) {
@@ -46,21 +83,67 @@ export function Labeled({ label, colors, children, hint }: { label: string; colo
 }
 
 export function Input({ colors, ...props }: TextInputProps & { colors: Colors }) {
-  return <TextInput placeholderTextColor={colors.muted} {...props} style={[ui.input, { borderColor: colors.border, backgroundColor: colors.card, color: colors.text }, props.style]} />;
+  const [focused, setFocused] = useState(false);
+  return <TextInput placeholderTextColor={colors.muted} {...props}
+    onFocus={(e) => { setFocused(true); props.onFocus?.(e); }} onBlur={(e) => { setFocused(false); props.onBlur?.(e); }}
+    style={[ui.input, { borderColor: focused ? palette.emerald : colors.border, borderWidth: focused ? 1.5 : 1, backgroundColor: colors.card, color: colors.text }, props.style]} />;
 }
 
-/** Bottom sheet: slides up, dims the backdrop, scrolls, and stays above the keyboard. */
-export function Sheet({ visible, onClose, title, colors, children }: { visible: boolean; onClose: () => void; title: string; colors: Colors; children: ReactNode }) {
-  return <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
-    <View style={ui.backdrop}>
-      <Pressable style={{ flex: 1 }} onPress={onClose} accessibilityLabel="Close" />
-      <KeyboardAvoidingView behavior="padding">
-        <View style={[ui.sheet, { backgroundColor: colors.canvas }]}>
-          <View style={ui.sheetHeader}><Text style={[ui.sheetTitle, { color: colors.text }]} numberOfLines={1}>{title}</Text><Pressable onPress={onClose} hitSlop={12} accessibilityLabel="Close"><X color={colors.muted} /></Pressable></View>
-          <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={{ padding: 20, paddingBottom: 40 }}>{children}</ScrollView>
-        </View>
-      </KeyboardAvoidingView>
-    </View>
+/** True while the software keyboard is on screen. */
+export function useKeyboardVisible(): boolean {
+  const [shown, setShown] = useState(false);
+  useEffect(() => {
+    const showEvt = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const hideEvt = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+    const a = Keyboard.addListener(showEvt, () => setShown(true));
+    const b = Keyboard.addListener(hideEvt, () => setShown(false));
+    return () => { a.remove(); b.remove(); };
+  }, []);
+  return shown;
+}
+
+/**
+ * Bottom sheet used for every form in the app.
+ *
+ * Keyboard handling (one mechanism only): the modal is drawn edge-to-edge, so Android does not resize it for the
+ * keyboard; the full-screen KeyboardAvoidingView measures how much of it the keyboard covers and pads exactly that
+ * much (0 if the window did resize). The sheet is capped at 92% of the remaining height, its body scrolls, and the
+ * optional `footer` (primary action) sits outside the scroll area so it always stays above the keyboard.
+ */
+export function Sheet({ visible, onClose, title, colors, children, footer }: { visible: boolean; onClose: () => void; title: string; colors: Colors; children: ReactNode; footer?: ReactNode }) {
+  const keyboard = useKeyboardVisible();
+  const scrollRef = useRef<ComponentRef<typeof ScrollView>>(null);
+  const contentRef = useRef<ComponentRef<typeof View>>(null);
+  const rise = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    if (!visible) return;
+    rise.setValue(0);
+    Animated.timing(rise, { toValue: 1, duration: 260, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start();
+  }, [visible, rise]);
+  // After the keyboard opens (and the sheet shrinks), bring the focused field back into view.
+  useEffect(() => {
+    if (!keyboard) return;
+    const t = setTimeout(() => {
+      const focused = TextInput.State.currentlyFocusedInput?.() as unknown as { measureLayout?: (rel: unknown, ok: (x: number, y: number) => void, fail?: () => void) => void } | null;
+      if (!focused?.measureLayout || !contentRef.current) return;
+      try { focused.measureLayout(contentRef.current, (_x, y) => scrollRef.current?.scrollTo({ y: Math.max(0, y - 72), animated: true }), () => undefined); } catch { /* best effort */ }
+    }, 80);
+    return () => clearTimeout(t);
+  }, [keyboard]);
+  return <Modal visible={visible} transparent animationType="fade" statusBarTranslucent navigationBarTranslucent onRequestClose={onClose}>
+    <KeyboardAvoidingView behavior="padding" style={ui.backdrop}>
+      <Pressable style={StyleSheet.absoluteFill} onPress={onClose} accessibilityLabel="Close" />
+      <Animated.View style={[ui.sheet, { backgroundColor: colors.canvas, borderColor: colors.border, opacity: rise, transform: [{ translateY: rise.interpolate({ inputRange: [0, 1], outputRange: [48, 0] }) }] }]}>
+        <View style={[ui.grabber, { backgroundColor: colors.border }]} />
+        <View style={ui.sheetHeader}><Text style={[ui.sheetTitle, { color: colors.text }]} numberOfLines={1}>{title}</Text><Pressable onPress={onClose} hitSlop={12} accessibilityRole="button" accessibilityLabel="Close" style={[ui.closeButton, { backgroundColor: colors.card, borderColor: colors.border }]}><X color={colors.muted} size={18} /></Pressable></View>
+        <ScrollView ref={scrollRef} style={ui.sheetScroll} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" contentContainerStyle={{ paddingHorizontal: 20, paddingTop: 14, paddingBottom: footer ? 12 : 28 }}>
+          <View ref={contentRef} collapsable={false}>{children}</View>
+        </ScrollView>
+        {footer ? <View style={[ui.sheetFooter, { borderTopColor: colors.border, backgroundColor: colors.canvas }]}>{footer}</View> : null}
+        {/* Navigation-bar inset only while the keyboard is closed (the keyboard already covers that strip). */}
+        <SafeAreaView edges={keyboard ? [] : ['bottom']} />
+      </Animated.View>
+    </KeyboardAvoidingView>
   </Modal>;
 }
 
@@ -75,8 +158,15 @@ export const ui = StyleSheet.create({
   hint: { fontSize: 12, marginTop: 4 },
   input: { minHeight: 48, borderWidth: 1, borderRadius: 12, paddingHorizontal: 14, fontSize: 15 },
   backdrop: { flex: 1, backgroundColor: 'rgba(8,24,39,0.55)', justifyContent: 'flex-end' },
-  sheet: { borderTopLeftRadius: 24, borderTopRightRadius: 24, maxHeight: '92%' },
-  sheetHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, paddingTop: 18 },
-  sheetTitle: { fontSize: 18, fontWeight: '800', flex: 1, marginRight: 12 },
+  sheet: { borderTopLeftRadius: 26, borderTopRightRadius: 26, maxHeight: '92%', flexShrink: 1, overflow: 'hidden', borderWidth: StyleSheet.hairlineWidth, borderBottomWidth: 0 },
+  sheetScroll: { flexGrow: 0, flexShrink: 1 },
+  grabber: { alignSelf: 'center', width: 40, height: 4, borderRadius: 2, marginTop: 10 },
+  sheetHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, paddingTop: 12 },
+  sheetTitle: { fontSize: 20, fontWeight: '800', flex: 1, marginRight: 12 },
+  closeButton: { width: 34, height: 34, borderRadius: 17, borderWidth: 1, alignItems: 'center', justifyContent: 'center' },
+  sheetFooter: { paddingHorizontal: 20, paddingTop: 10, paddingBottom: 12, borderTopWidth: StyleSheet.hairlineWidth },
+  typeRow: { flexDirection: 'row', gap: 10 },
+  typeOption: { flex: 1, minHeight: 50, borderRadius: 14, borderWidth: 1.5, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, paddingHorizontal: 10 },
+  typeIcon: { width: 26, height: 26, borderRadius: 13, alignItems: 'center', justifyContent: 'center' },
   empty: { borderWidth: 1, borderRadius: 18, padding: 24, alignItems: 'center', marginVertical: 8 },
 });
