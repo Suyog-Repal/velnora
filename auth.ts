@@ -3,6 +3,7 @@ import Constants from 'expo-constants';
 import { deleteUserLocalData, getLocalDataSummary } from './src/services/localDataService.ts';
 import { purgeStagedSmsForUser } from './src/services/smsStagingService.ts';
 import type { AuthUser, Session } from './src/db/types.ts';
+import { resolveApiUrl } from './src/services/apiConfig.ts';
 
 export type { AuthUser, Session };
 export type SyncTransaction = {
@@ -28,15 +29,22 @@ export class AuthRequestError extends Error {
 }
 
 const SESSION_KEY = 'velnora.session.v1';
-const DEFAULT_API_PORT = 8000;
 
-function getDefaultApiUrl(): string {
-  const hostUri = Constants.expoConfig?.hostUri;
-  const host = hostUri?.split(':')[0];
-  return host ? `http://${host}:${DEFAULT_API_PORT}` : `http://localhost:${DEFAULT_API_PORT}`;
-}
-
-export const API_URL = (process.env.EXPO_PUBLIC_API_URL?.trim() || getDefaultApiUrl()).replace(/\/+$/, '');
+/**
+ * The single place the backend URL is decided (rules in src/services/apiConfig.ts):
+ * `EXPO_PUBLIC_API_URL` (inlined at build time) → Expo dev-server host in development → cloud sync disabled in a
+ * release build that has no URL. Auth, sync, receipts and every other caller share this value.
+ */
+const apiResolution = resolveApiUrl({
+  envUrl: process.env.EXPO_PUBLIC_API_URL,
+  hostUri: Constants.expoConfig?.hostUri,
+  isDev: typeof __DEV__ !== 'undefined' && __DEV__,
+});
+export const API_URL = apiResolution.url;
+/** Non-null when the API URL is missing/invalid for this build (also logged once at start-up). */
+export const API_CONFIG_PROBLEM = apiResolution.problem;
+if (apiResolution.problem) console.warn(`[Velnora] ${apiResolution.problem}`);
+configureApiBaseUrl(API_URL); // sync requests that pass no explicit URL now use this same value
 
 export async function saveSession(session: Session): Promise<void> {
   await SecureStore.setItemAsync(SESSION_KEY, JSON.stringify(session));
@@ -140,7 +148,7 @@ export function createTransaction(session: Session, transaction: SyncTransaction
   });
 }
 
-import { pushSync, pullSync, getSyncStatus } from './src/services/syncApi.ts';
+import { pushSync, pullSync, getSyncStatus, configureApiBaseUrl } from './src/services/syncApi.ts';
 
 export function apiPushSync<T = unknown>(session: Session, body: unknown): Promise<T> {
   return pushSync<T>(session.access_token, body, API_URL);

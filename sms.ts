@@ -14,8 +14,11 @@ export function isSmsDetectionAvailable(): boolean {
   return Platform.OS === 'android' && nativeModule !== null;
 }
 
-export async function requestSmsPermission(): Promise<boolean> {
-  if (Platform.OS !== 'android' || nativeModule === null) return false;
+/** 'blocked' = Android will no longer show the dialog ("don't ask again"); the person must use system Settings. */
+export type SmsPermissionResult = 'granted' | 'denied' | 'blocked' | 'unavailable';
+
+export async function requestSmsPermissionDetailed(): Promise<SmsPermissionResult> {
+  if (Platform.OS !== 'android' || nativeModule === null) return 'unavailable';
   const result = await PermissionsAndroid.request(
     PermissionsAndroid.PERMISSIONS.RECEIVE_SMS,
     {
@@ -25,7 +28,13 @@ export async function requestSmsPermission(): Promise<boolean> {
       buttonNegative: 'Deny',
     },
   );
-  return result === PermissionsAndroid.RESULTS.GRANTED;
+  // Trust the real permission state over the dialog's return value (it can report "never ask again" even though the grant landed).
+  if (result === PermissionsAndroid.RESULTS.GRANTED || nativeModule.isReceiveSmsPermissionGranted()) return 'granted';
+  return result === PermissionsAndroid.RESULTS.NEVER_ASK_AGAIN ? 'blocked' : 'denied';
+}
+
+export async function requestSmsPermission(): Promise<boolean> {
+  return (await requestSmsPermissionDetailed()) === 'granted';
 }
 
 export function configureSupportedSenderPatterns(patterns: string[]): void {

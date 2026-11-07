@@ -22,7 +22,9 @@ class VelnoraSmsModule : Module() {
 
     AsyncFunction("setOwnerHint") { userId: String -> store().setOwnerHint(userId) }
 
-    AsyncFunction("claim") { owner: String, limit: Int, nowMs: Double, leaseMs: Double, maxAttempts: Int ->
+    AsyncFunction("clearOwnerHint") { store().clearOwnerHint() }
+
+    AsyncFunction("claim") { owner: String?, limit: Int, nowMs: Double, leaseMs: Double, maxAttempts: Int ->
       store().claim(owner, limit, nowMs.toLong(), leaseMs.toLong(), maxAttempts)
     }
 

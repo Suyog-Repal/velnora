@@ -8,16 +8,18 @@ from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from enum import Enum
 import hashlib
-from os import getenv
+import logging
 from typing import Optional
 from uuid import UUID, uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select, and_, or_, text
 from sqlalchemy.orm import Session
 
+from backend.app.config import configure_logging, get_settings
 from backend.app.db.session import get_db
 from backend.app.db.models import (
     User as UserModel,
@@ -55,14 +57,20 @@ def to_paise(amount: Decimal) -> int:
 from backend.app.sync import router as sync_router
 from backend.app.receipts import router as receipts_router
 
+settings = get_settings()
+configure_logging(settings)
+logger = logging.getLogger("velnora")
+
 app = FastAPI(title="Velnora API", version="0.2.0", docs_url="/api/docs")
 app.include_router(sync_router)
 app.include_router(receipts_router)
+# CORS: explicit origins from VELNORA_CORS_ORIGINS. Credentials are never combined with the "*" wildcard (and "*" is
+# rejected outright in production by config.py). Native mobile requests are not subject to CORS; this protects web clients.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[origin.strip() for origin in getenv("VELNORA_CORS_ORIGINS", "http://localhost:8081").split(",") if origin.strip()],
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PATCH", "DELETE"],
+    allow_origins=list(settings.cors_origins),
+    allow_credentials=settings.cors_allows_credentials,
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
 )
 
@@ -167,7 +175,19 @@ DEFAULT_SYSTEM_CATEGORIES = [
 # ==============================================================================
 @app.get("/api/v1/health")
 def health() -> dict[str, str]:
+    """Liveness only (use this as the Render health-check path): the process is up. Touches no database or secrets."""
     return {"status": "ok", "service": "velnora-api"}
+
+
+@app.get("/api/v1/health/ready")
+def health_ready(db: Session = Depends(get_db)):
+    """Readiness: can the API reach PostgreSQL? Reports only ok/unavailable — never connection details or errors."""
+    try:
+        db.execute(text("SELECT 1"))
+    except Exception:  # noqa: BLE001 - deliberately generic; the cause is logged without the connection string
+        logger.warning("Database readiness check failed")
+        return JSONResponse(status_code=503, content={"status": "unavailable", "database": "unavailable"})
+    return {"status": "ok", "database": "ok"}
 
 
 # ==============================================================================

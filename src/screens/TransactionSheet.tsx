@@ -5,6 +5,9 @@ import { palette } from '../../theme';
 import { Camera, ImageIcon, MapPin, Phone, Trash } from '../../icons';
 import { Button, Chip, Input, Labeled, Sheet, TypeToggle, currencySymbol, formatPaise, type Colors } from '../ui/common';
 import { LocationPicker } from './LocationPicker';
+import { DateField } from '../ui/CalendarDatePicker';
+import { TimeField } from '../ui/TimePicker';
+import { notices } from '../ui/Toast';
 import { buildMerchantPhone, formatDateInput, formatTimeInput, parseLocalDateTime } from '../services/transactionDetails';
 import { deleteTransaction, getServiceDb, updateTransactionDetails } from '../services/transactionService';
 import { rememberAlias } from '../services/merchantAliasService';
@@ -68,19 +71,23 @@ export function TransactionSheet({ tx, session, categories, colors, onClose, onC
   const save = async () => {
     setError('');
     const value = Number(amount);
-    const iso = parseLocalDateTime(date, time);
+    // Only rewrite the stored timestamp when the person actually changed the date or time; otherwise the original
+    // instant (including seconds) is left exactly as it was.
+    const whenChanged = date !== formatDateInput(tx.transaction_date) || time !== formatTimeInput(tx.transaction_date);
+    const iso = whenChanged ? parseLocalDateTime(date, time) : null;
     if (!Number.isFinite(value) || value <= 0) { setError('Enter an amount greater than zero.'); return; }
-    if (!iso) { setError('Enter a valid date (YYYY-MM-DD) and time (HH:MM).'); return; }
+    if (whenChanged && !iso) { setError('Select a valid date and time.'); return; }
     if (!phoneCheck.ok) { setError(phoneCheck.error); return; }
     setBusy(true);
     try {
       const cat = categories.find((c) => c.type === direction && c.name.toLowerCase() === category.toLowerCase()) ?? categories.find((c) => c.name.toLowerCase() === category.toLowerCase());
       await updateTransactionDetails(tx.id, {
         direction,
-        counterparty: merchant, amount: value, transaction_date: iso, category, category_id: cat && !cat.isCustom ? null : cat?.id ?? null,
+        counterparty: merchant, amount: value, ...(iso ? { transaction_date: iso } : {}), category, category_id: cat && !cat.isCustom ? null : cat?.id ?? null,
         payment_method: payment, merchantPhone: { number: phone, dialCode: dial },
       }, session);
       onChanged();
+      notices.localSave('edit', !!session);
       const merchantChanged = merchant.trim() !== tx.counterparty;
       const categoryChanged = category !== tx.category && direction === tx.direction;
       if (session && (merchantChanged || categoryChanged)) {
@@ -130,8 +137,8 @@ export function TransactionSheet({ tx, session, categories, colors, onClose, onC
     <Labeled label="MERCHANT" colors={colors}><Input colors={colors} value={merchant} onChangeText={setMerchant} accessibilityLabel="Merchant" /></Labeled>
     <Labeled label={`AMOUNT (${currencySymbol()})`} colors={colors}><Input colors={colors} value={amount} onChangeText={setAmount} keyboardType="decimal-pad" accessibilityLabel="Amount" /></Labeled>
     <View style={{ flexDirection: 'row', gap: 10 }}>
-      <View style={{ flex: 3 }}><Labeled label="DATE" colors={colors}><Input colors={colors} value={date} onChangeText={setDate} placeholder="YYYY-MM-DD" autoCapitalize="none" /></Labeled></View>
-      <View style={{ flex: 2 }}><Labeled label="TIME" colors={colors}><Input colors={colors} value={time} onChangeText={setTime} placeholder="HH:MM" /></Labeled></View>
+      <View style={{ flex: 1 }}><Labeled label="DATE" colors={colors}><DateField value={date} colors={colors} title="Transaction date" accessibilityLabel="Transaction date" onChange={(v) => { setDate(v); setError(''); }} /></Labeled></View>
+      <View style={{ flex: 1 }}><Labeled label="TIME" colors={colors}><TimeField value={time} colors={colors} title="Transaction time" accessibilityLabel="Transaction time" onChange={setTime} /></Labeled></View>
     </View>
 
     <Labeled label="CATEGORY" colors={colors}>

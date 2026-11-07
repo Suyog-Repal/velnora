@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { NodeSqliteAdapter } from '../../db/__tests__/testAdapter.ts';
 import { runMigrations } from '../../db/migrations.ts';
 import { TransactionRepository } from '../../db/repositories/transactionRepository.ts';
@@ -300,7 +302,7 @@ async function runAllSyncEngineTests() {
   // Scenario F: Cold app restart with pending operations
   {
     console.log('Scenario F: App restart with pending operations...');
-    const dbPath = `/tmp/velnora_restart_${Date.now()}.db`;
+    const dbPath = join(tmpdir(), `velnora_restart_${Date.now()}.db`); // portable (was a hardcoded /tmp, which fails on Windows)
     
     // Process 1: write pending item and close
     {

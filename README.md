@@ -48,6 +48,8 @@ With a physical Samsung Galaxy A36, enable Developer options and USB debugging, 
 7. Deliver the same broadcast twice; verify the in-memory sender/timestamp/part-count dedupe emits one event.
 8. Force-stop/restart the app and document that events received before the module initializes are not queued; the current receiver does not implement a background queue.
 
+> Production setup (PostgreSQL + Render backend + the mobile `EXPO_PUBLIC_API_URL`): see [`docs/RENDER_DEPLOYMENT.md`](docs/RENDER_DEPLOYMENT.md).
+
 ## Run the API
 
 From PowerShell at the repository root:

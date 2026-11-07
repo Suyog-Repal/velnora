@@ -15,6 +15,7 @@ if __name__ == "__main__":
     uvicorn.run(
         app_module,
         host=getenv("VELNORA_HOST", "0.0.0.0"),
-        port=int(getenv("VELNORA_PORT", "8000")),
+        # Render (and most hosts) inject PORT; VELNORA_PORT is the local override; 8000 is the local default.
+        port=int(getenv("PORT") or getenv("VELNORA_PORT") or "8000"),
         reload=_env_flag("VELNORA_RELOAD"),
     )

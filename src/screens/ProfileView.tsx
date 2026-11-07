@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Alert, Animated, Easing, Pressable, Text, View } from 'react-native';
 import { ACCENTS, palette, type AccentId, type ThemeMode } from '../../theme';
-import { Check, ChevronRight, LogOut, Settings, Sliders, TagIcon as Tag, UserRound, WifiOff } from '../../icons';
+import { Check, ChevronRight, LogOut, MessageSquare, Settings, Sliders, TagIcon as Tag, UserRound, WifiOff } from '../../icons';
 import { currencySymbol, formatPaise, type Colors } from '../ui/common';
+import { useSmsPermission } from '../ui/useSmsPermission';
+import { smsPermissionLabel } from '../services/smsPermissionPolicy';
 import type { Session, TransactionEntity } from '../db/types';
 
 /** Fades + lifts a block in; blocks are staggered by `index` so the page assembles instead of popping in. */
@@ -109,6 +111,13 @@ export function ProfileView({ session, colors, mode, accent, transactions, onlin
   const avatarPulse = useRef(new Animated.Value(0)).current;
   useEffect(() => { Animated.timing(avatarPulse, { toValue: 1, duration: 700, delay: 120, easing: Easing.out(Easing.back(1.6)), useNativeDriver: true }).start(); }, [avatarPulse]);
   let i = 0;
+  const sms = useSmsPermission();
+  // Granted → open Android's permission page to manage it. Not granted → ask; if that does not work, explain and offer Settings.
+  const onSmsPress = () => {
+    if (!sms.available) return;
+    if (sms.granted) { sms.openSettings(); return; }
+    void sms.requestWithGuidance(true);
+  };
 
   return <View>
     <Reveal index={i++}>
@@ -153,6 +162,7 @@ export function ProfileView({ session, colors, mode, accent, transactions, onlin
     <Reveal index={i++}>
       <Group title="Preferences" colors={colors}>
         <Row icon={<Settings size={18} color={palette.emerald} />} title="Settings" value={`Theme · ${mode === 'system' ? 'System' : mode === 'dark' ? 'Dark' : 'Light'}, ${ACCENTS.find((x) => x.id === accent)?.label ?? ''} accent`} colors={colors} onPress={onOpenSettings} />
+        <Row icon={<MessageSquare size={18} color={palette.emerald} />} title="Bank SMS detection" value={smsPermissionLabel(sms)} colors={colors} onPress={sms.available ? onSmsPress : undefined} />
         <Row icon={<Text style={{ color: palette.emerald, fontWeight: '800', fontSize: 16 }}>{currencySymbol()}</Text>} title="Currency" value={currencyLabel} colors={colors} onPress={onOpenCurrency} last />
       </Group>
     </Reveal>

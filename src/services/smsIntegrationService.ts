@@ -25,18 +25,18 @@ export interface SmsProcessResult {
  * 3. Does NOT discard legitimate separate transactions with same amount & merchant on different dates/reference IDs.
  * 4. Atomically inserts the transaction and its sync_queue operation in SQLite.
  * 5. Works completely offline; triggers cloud sync only if an authenticated session exists.
+ * 6. Guest mode (no session) saves into the local guest scope and is never uploaded.
  */
 export async function processIncomingSms(
   event: SmsReceivedPayload,
   session: Session | null,
   rules: SmsParsingRule[] = [DEFAULT_SMS_RULE],
 ): Promise<SmsProcessResult> {
-  // 0. Ownership: a financial record is never saved without an authenticated owner.
-  // The event is reported as 'held' so callers keep it staged instead of discarding it.
-  const ownerId = session?.user?.id?.trim();
-  if (!ownerId) {
-    return { success: false, action: 'held', reason: 'No authenticated owner for SMS event' };
-  }
+  // 0. Scope: a signed-in user's SMS become that account's transactions (synced). With no session the SMS belongs to
+  // the device's guest scope (user_id NULL): saved locally only, never uploaded, and only imported into an account
+  // through the explicit guest-import consent flow. Account isolation is unchanged: an account's own events are
+  // only ever claimed for that account (see the staging store), so guest and account data never mix.
+  const ownerId: string | null = session?.user?.id?.trim() || null;
 
   // 1. Basic event structure validation
   if (!event || typeof event.body !== 'string' || !event.body.trim()) {

@@ -77,22 +77,31 @@ class VelnoraSmsStagingStore private constructor(context: Context) :
       if (c.moveToFirst()) c.getString(0) else null
     }
 
+  /** Forget the owner hint (guest mode / signed out): new events are then stamped with no owner (the guest scope). */
   @Synchronized
-  fun claim(owner: String, limit: Int, now: Long, leaseMs: Long, maxAttempts: Int): List<Map<String, Any?>> {
+  fun clearOwnerHint() {
+    writableDatabase.execSQL("DELETE FROM staging_meta WHERE k = 'owner_hint'")
+  }
+
+  /** `owner == null` claims the guest scope (events stamped with no owner); otherwise exactly that user's events. */
+  @Synchronized
+  fun claim(owner: String?, limit: Int, now: Long, leaseMs: Long, maxAttempts: Int): List<Map<String, Any?>> {
     val db = writableDatabase
     val out = ArrayList<Map<String, Any?>>()
     db.beginTransaction()
     try {
+      val ownerClause = if (owner == null) "owner_user_id IS NULL" else "owner_user_id = ?"
+      val ownerArgs: Array<String> = if (owner == null) emptyArray() else arrayOf(owner)
       val dueClause =
-        "owner_user_id = ? AND ((state IN ('STAGED','RETRY') AND next_retry_at <= ?) OR (state = 'PROCESSING' AND lease_until < ?))"
+        "$ownerClause AND ((state IN ('STAGED','RETRY') AND next_retry_at <= ?) OR (state = 'PROCESSING' AND lease_until < ?))"
       // Crash-looping events (lease expired repeatedly) stop at maxAttempts instead of retrying forever.
       db.execSQL(
         "UPDATE sms_staging SET state = 'DEAD', last_error = 'max_attempts', updated_at = ? WHERE $dueClause AND attempts >= ?",
-        arrayOf(now, owner, now, now, maxAttempts),
+        arrayOf<Any?>(now, *ownerArgs, now, now, maxAttempts),
       )
       db.rawQuery(
         "SELECT id, sender, body, received_at, part_count, attempts FROM sms_staging WHERE $dueClause ORDER BY received_at ASC LIMIT ?",
-        arrayOf(owner, now.toString(), now.toString(), limit.toString()),
+        arrayOf(*ownerArgs, now.toString(), now.toString(), limit.toString()),
       ).use { c ->
         while (c.moveToNext()) {
           out.add(

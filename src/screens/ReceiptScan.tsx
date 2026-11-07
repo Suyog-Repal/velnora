@@ -9,6 +9,9 @@ import { recognizeReceiptText } from '../services/receiptOcr';
 import { attachReceipt, findPossibleDuplicate } from '../services/receiptService';
 import { expoReceiptFs } from '../services/receiptFiles';
 import { addTransaction, getServiceDb } from '../services/transactionService';
+import { DateField } from '../ui/CalendarDatePicker';
+import { TimeField } from '../ui/TimePicker';
+import { notices } from '../ui/Toast';
 import { TransactionRepository } from '../db/repositories/transactionRepository';
 import { formatDateInput, formatTimeInput, parseLocalDateTime } from '../services/transactionDetails';
 import type { CategoryView } from '../services/categoryService';
@@ -78,7 +81,7 @@ export function ReceiptScan({ visible, session, categories, colors, onClose, onS
     const value = Number(amount); const iso = parseLocalDateTime(date, time || '00:00');
     if (!merchant.trim()) { setError(direction === 'income' ? 'Enter who paid you.' : 'Enter who you paid.'); return; }
     if (!Number.isFinite(value) || value <= 0) { setError('Enter the amount.'); return; }
-    if (!iso) { setError('Enter a valid date (YYYY-MM-DD) and time (HH:MM).'); return; }
+    if (!iso) { setError('Select a valid date and time.'); return; }
     if (!category) { setError('Choose a category.'); return; }
     setWorking(true);
     try {
@@ -96,6 +99,7 @@ export function ReceiptScan({ visible, session, categories, colors, onClose, onS
         source: 'manual', transaction_date: iso, reference_id: force ? null : (reference.trim() || null),
       }, session);
       if (uri) await attachReceipt(db, expoReceiptFs, session, tx.id, uri);
+      notices.localSave(direction, !!session);
       onSaved(); close();
     } catch (e) { setError(e instanceof Error ? e.message : 'Could not save.'); }
     finally { setWorking(false); }
@@ -131,8 +135,8 @@ export function ReceiptScan({ visible, session, categories, colors, onClose, onS
         {sugg?.currency && sugg.currency !== 'INR' ? <Text style={{ color: palette.warning, marginTop: 6 }}>This looks like it is in {sugg.currency}. Velnora does not convert; enter the amount you want recorded.</Text> : null}
       </Labeled>
       <View style={{ flexDirection: 'row', gap: 10 }}>
-        <View style={{ flex: 3 }}><Labeled label="DATE" colors={colors} hint={sugg && !sugg.date ? 'No date found on the image; today is used.' : sugg?.date ? 'Read from the image.' : undefined}><Input colors={colors} value={date} onChangeText={setDate} placeholder="YYYY-MM-DD" autoCapitalize="none" /></Labeled></View>
-        <View style={{ flex: 2 }}><Labeled label="TIME" colors={colors}><Input colors={colors} value={time} onChangeText={setTime} placeholder="HH:MM" /></Labeled></View>
+        <View style={{ flex: 1 }}><Labeled label="DATE" colors={colors} hint={sugg && !sugg.date ? 'No date found on the image; today is used.' : sugg?.date ? 'Read from the image.' : undefined}><DateField value={date || null} colors={colors} title="Transaction date" accessibilityLabel="Transaction date" onChange={setDate} /></Labeled></View>
+        <View style={{ flex: 1 }}><Labeled label="TIME" colors={colors}><TimeField value={time || '00:00'} colors={colors} title="Transaction time" accessibilityLabel="Transaction time" onChange={setTime} /></Labeled></View>
       </View>
       <Labeled label="CATEGORY" colors={colors}><ScrollView horizontal>{cats.map((c) => <Chip key={c.id} label={c.name} active={category === c.name} color={c.color} onPress={() => setCategory(c.name)} colors={colors} />)}</ScrollView></Labeled>
       <Labeled label="TRANSACTION / REFERENCE ID (OPTIONAL)" colors={colors}><Input colors={colors} value={reference} onChangeText={setReference} placeholder="UPI ref / UTR / bill no." autoCapitalize="characters" /></Labeled>

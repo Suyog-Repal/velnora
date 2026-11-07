@@ -6,7 +6,6 @@ JWT token issuance, and refresh token rotation/revocation.
 
 from datetime import datetime, timedelta, timezone
 import hashlib
-from os import getenv
 from secrets import token_urlsafe
 from typing import Optional
 from uuid import UUID, uuid4
@@ -20,6 +19,7 @@ from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import select, and_
 from sqlalchemy.orm import Session
 
+from backend.app.config import get_settings
 from backend.app.db.session import get_db, get_session_factory
 from backend.app.db.models import User, UserProfile, RefreshToken
 
@@ -27,13 +27,13 @@ password_hasher = PasswordHasher()
 bearer_scheme = HTTPBearer(auto_error=False)
 
 JWT_ALGORITHM = "HS256"
-# Support both JWT_SECRET_KEY and legacy VELNORA_JWT_SECRET
-JWT_SECRET = getenv("JWT_SECRET_KEY", getenv("VELNORA_JWT_SECRET", "development-only-change-me"))
-if getenv("ENVIRONMENT", getenv("VELNORA_ENV", "development")) == "production" and JWT_SECRET == "development-only-change-me":
-    raise RuntimeError("JWT_SECRET_KEY must be configured in production")
-
-ACCESS_TOKEN_MINUTES = 15
-REFRESH_TOKEN_DAYS = 30
+# Secret and lifetimes come from the environment via config.py (JWT_SECRET_KEY, legacy alias VELNORA_JWT_SECRET,
+# JWT_ACCESS_TOKEN_EXPIRE_MINUTES, JWT_REFRESH_TOKEN_EXPIRE_DAYS). In production a missing/weak secret raises a
+# ConfigError at start-up. Token format and the 15-minute / 30-day defaults are unchanged.
+_settings = get_settings()
+JWT_SECRET = _settings.jwt_secret_key
+ACCESS_TOKEN_MINUTES = _settings.jwt_access_token_expire_minutes
+REFRESH_TOKEN_DAYS = _settings.jwt_refresh_token_expire_days
 
 
 def hash_token(token: str) -> str:

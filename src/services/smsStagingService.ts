@@ -16,7 +16,6 @@ export interface DrainSummary {
   rejected: number;
   retried: number;
   dead: number;
-  skippedNoSession: boolean;
 }
 
 type Processor = (event: Parameters<typeof processIncomingSms>[0], session: Session | null, rules: SmsParsingRule[]) => Promise<SmsProcessResult>;
@@ -28,7 +27,8 @@ export function retryDelayMs(attempts: number): number {
 let drainTail: Promise<unknown> = Promise.resolve();
 
 /**
- * Drains staged SMS events owned by the signed-in user. Calls are serialized so overlapping triggers
+ * Drains staged SMS events for the current scope: the signed-in user's own events, or — in guest mode (no session) —
+ * events with no owner, which become local-only guest transactions. Calls are serialized so overlapping triggers
  * (foreground event, AppState change, session change) never process the same event concurrently.
  *
  * An event is completed ONLY after processIncomingSms reports that the transaction and its sync-queue item
@@ -53,12 +53,9 @@ async function drainOnce(
 ): Promise<DrainSummary> {
   const processor = options.processor ?? processIncomingSms;
   const now = options.now ?? Date.now;
-  const summary: DrainSummary = { processed: 0, saved: 0, duplicates: 0, rejected: 0, retried: 0, dead: 0, skippedNoSession: false };
-  const ownerId = session?.user?.id?.trim();
-  if (!session || !ownerId) {
-    summary.skippedNoSession = true; // events stay staged; nothing is claimed
-    return summary;
-  }
+  const summary: DrainSummary = { processed: 0, saved: 0, duplicates: 0, rejected: 0, retried: 0, dead: 0 };
+  // null = guest scope. A signed-in user only ever claims their own events (the store matches the owner exactly).
+  const ownerId: string | null = session?.user?.id?.trim() || null;
 
   for (;;) {
     const batch = await store.claim(ownerId, BATCH_SIZE, now(), LEASE_MS, MAX_ATTEMPTS);
@@ -110,6 +107,12 @@ export async function drainNativeStagedSms(session: Session | null, rules?: SmsP
 export async function recordSmsOwner(userId: string): Promise<void> {
   const store = await getNativeStore();
   await store?.setOwnerHint(userId);
+}
+
+/** Guest mode / signed out: new SMS are stamped with no owner so they are processed as local guest transactions. */
+export async function clearSmsOwner(): Promise<void> {
+  const store = await getNativeStore();
+  await store?.clearOwnerHint?.();
 }
 
 export async function getStagingCounts(userId: string | null): Promise<StagingCounts | null> {

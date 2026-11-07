@@ -25,8 +25,9 @@ object VelnoraSmsReceiverState {
   }
 
   fun configurePatterns(patterns: List<String>) {
+    // Case-insensitive, like the JS rule (`new RegExp(senderPattern, 'i')`): some banks send mixed-case sender ids.
     val compiled = patterns.mapNotNull { pattern ->
-      runCatching { Regex(pattern) }.getOrNull()
+      runCatching { Regex(pattern, RegexOption.IGNORE_CASE) }.getOrNull()
     }
     synchronized(lock) {
       senderPatterns = compiled

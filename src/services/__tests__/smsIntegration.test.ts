@@ -802,7 +802,11 @@ async function runAllSmsIntegrationTests() {
     assert.equal(classifySmsStatus('Unknown message about INR 500.'), 'ambiguous');
     assert.equal(parseSmsTransaction({ sender: 'BANK-TEST', receivedAt, partCount: 1, body: 'Transaction of INR 500 failed. Ref: FAIL1234.' }), null);
     assert.equal(parseSmsTransaction({ sender: 'BANK-TEST', receivedAt, partCount: 1, body: 'INR 500 pending at Fictional Shop. Ref: PEND1234.' }), null);
-    assert.equal(parseSmsTransaction({ sender: 'BANK-TEST', receivedAt, partCount: 1, body: 'Your account was debited INR 100 at Fictional Shop.' }), null);
+    // Many real bank alerts carry no reference: they are still captured (deduped by fingerprint), with an empty reference.
+    const noRef = parseSmsTransaction({ sender: 'BANK-TEST', receivedAt, partCount: 1, body: 'Your account was debited INR 100 at Fictional Shop.' });
+    assert.equal(noRef?.merchant, 'Fictional Shop');
+    assert.equal(noRef?.amount, 100);
+    assert.equal(noRef?.referenceId, '');
 
     const creditRule = { ...DEFAULT_SMS_RULE, successPatterns: ['received'], creditPatterns: ['received'] };
     const credit = parseSmsTransaction({

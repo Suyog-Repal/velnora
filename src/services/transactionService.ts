@@ -121,11 +121,17 @@ export async function addSmsTransaction(
     direction: parsed.direction,
     counterparty: aliased.matched ? aliased.merchant : parsed.merchant,
     category: aliased.category ?? (parsed.direction === 'income' ? 'Other Income' : 'Other Expenses'),
-    description: aliased.matched ? `Detected from ${parsed.bankSender} (${parsed.merchant})` : `Detected from ${parsed.bankSender}`,
+    description: [
+      aliased.matched ? `Detected from ${parsed.bankSender} (${parsed.merchant})` : `Detected from ${parsed.bankSender}`,
+      parsed.accountLast4 ? `A/c XX${parsed.accountLast4}` : null,
+      parsed.balance !== undefined ? `Avl bal INR ${parsed.balance.toFixed(2)}` : null,
+    ].filter(Boolean).join(' · '),
     transaction_date: parsed.transactionDate,
     source: 'sms',
-    reference_id: parsed.referenceId,
+    // Many bank alerts carry no reference; store NULL rather than '' (dedupe then relies on the fingerprint).
+    reference_id: parsed.referenceId?.trim() || null,
     fingerprint: parsed.fingerprint,
+    payment_method: parsed.paymentMethod ?? null,
     user_id: session?.user.id ?? null,
     sync_status: 'pending_create',
   });
@@ -181,8 +187,16 @@ export function setPostSyncHook(hook: ((session: Session) => Promise<void>) | nu
   postSyncHook = hook;
 }
 
+const syncListeners = new Set<(summary: SyncSummary) => void>();
+/** Observe the outcome of every sync attempt (used for the "synced" / "saved offline" notices). Returns an unsubscribe. */
+export function onSyncResult(listener: (summary: SyncSummary) => void): () => void {
+  syncListeners.add(listener);
+  return () => { syncListeners.delete(listener); };
+}
+
 export async function syncPendingTransactions(session: Session): Promise<SyncSummary> {
   const summary = await triggerSync(session);
+  for (const l of syncListeners) { try { l(summary); } catch { /* a UI listener must never break syncing */ } }
   if (postSyncHook) await postSyncHook(session).catch(() => undefined);
   return summary;
 }

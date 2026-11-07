@@ -20,7 +20,13 @@ assert.equal(classifySmsStatus('INR 500 pending at Fictional Shop. Ref: PEND1234
 assert.equal(classifySmsStatus('Unknown message about INR 500.'), 'ambiguous');
 assert.equal(parseSmsTransaction({ sender: 'BANK-TEST', receivedAt, partCount: 1, body: 'Transaction of INR 500 failed. Ref: FAIL1234.' }), null);
 assert.equal(parseSmsTransaction({ sender: 'BANK-TEST', receivedAt, partCount: 1, body: 'INR 500 pending at Fictional Shop. Ref: PEND1234.' }), null);
-assert.equal(parseSmsTransaction({ sender: 'BANK-TEST', receivedAt, partCount: 1, body: 'Your account was debited INR 100 at Fictional Shop.' }), null);
+// A debit alert with no reference id is still a real payment: it is captured (deduplicated by fingerprint), not dropped.
+const noReference = parseSmsTransaction({ sender: 'BANK-TEST', receivedAt, partCount: 1, body: 'Your account was debited INR 100 at Fictional Shop.' });
+assert.equal(noReference?.amount, 100);
+assert.equal(noReference?.merchant, 'Fictional Shop');
+assert.equal(noReference?.referenceId, '');
+// ...but a message with no amount at all is still rejected
+assert.equal(parseSmsTransaction({ sender: 'BANK-TEST', receivedAt, partCount: 1, body: 'Your account was debited at Fictional Shop. Ref: ABC12345.' }), null);
 
 const creditRule = { ...DEFAULT_SMS_RULE, successPatterns: ['received'], creditPatterns: ['received'] };
 const credit = parseSmsTransaction({

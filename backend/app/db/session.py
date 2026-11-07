@@ -4,54 +4,27 @@ Provides pooled connection engine for application runtime and direct engine for 
 Configured for Neon serverless architecture with pool pre-ping and connection recycling.
 """
 
-import os
 from collections.abc import Generator
-from pathlib import Path
 from typing import Optional
-from dotenv import load_dotenv
 from sqlalchemy import create_engine, Engine
 from sqlalchemy.orm import sessionmaker, Session, declarative_base
 
-# Load environment configuration from backend/.env if not already loaded
-BASE_DIR = Path(__file__).resolve().parent.parent.parent
-env_path = BASE_DIR / "backend" / ".env" if (BASE_DIR / "backend" / ".env").exists() else BASE_DIR / ".env"
-load_dotenv(dotenv_path=env_path)
+# All environment handling (including loading backend/.env for local development) lives in config.py.
+from backend.app.config import get_settings, normalize_database_url  # noqa: F401  (normalize re-exported for backend.app.db)
 
-def normalize_database_url(url: Optional[str]) -> str:
-    """Normalize postgres URL to postgresql+psycopg:// and ensure sslmode."""
-    if not url:
-        return "postgresql+psycopg://user:password@localhost:5432/velnora"
-    
-    # Strip quotes if present
-    clean_url = url.strip().strip("'\"")
-    
-    # Replace generic postgresql:// or postgres:// with postgresql+psycopg://
-    if clean_url.startswith("postgresql://"):
-        clean_url = clean_url.replace("postgresql://", "postgresql+psycopg://", 1)
-    elif clean_url.startswith("postgres://"):
-        clean_url = clean_url.replace("postgres://", "postgresql+psycopg://", 1)
-        
-    return clean_url
 
 def get_pooled_database_url() -> str:
-    """Get the pooled database URL for application runtime operations."""
-    return normalize_database_url(os.getenv("DATABASE_URL"))
+    """Get the pooled database URL (``DATABASE_URL``) for application runtime operations."""
+    return get_settings().database_url
+
 
 def get_direct_database_url() -> str:
     """
     Get the direct database URL for Alembic migrations and DDL operations.
-    If DIRECT_DATABASE_URL is not explicitly configured, gracefully derives
-    the direct connection from DATABASE_URL by removing the Neon -pooler suffix.
+    ``DIRECT_DATABASE_URL`` when configured; otherwise derived from ``DATABASE_URL`` (Neon: drops the ``-pooler``
+    host suffix; other providers such as Render Postgres use the same URL).
     """
-    raw_direct = os.getenv("DIRECT_DATABASE_URL", "").strip().strip("'\"")
-    if raw_direct and "<" not in raw_direct and "@" in raw_direct:
-        return normalize_database_url(raw_direct)
-    
-    # Graceful fallback: derive direct hostname from pooled URL by removing -pooler
-    pooled = get_pooled_database_url()
-    if "-pooler." in pooled:
-        return pooled.replace("-pooler.", ".")
-    return pooled
+    return get_settings().direct_database_url
 
 # Base class for SQLAlchemy ORM models
 Base = declarative_base()

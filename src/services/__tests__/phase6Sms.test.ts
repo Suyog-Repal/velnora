@@ -34,7 +34,8 @@ class FakeStagingStore implements SmsStagingStore {
     return this.seq;
   }
   async setOwnerHint(u: string) { this.hint = u; }
-  async claim(owner: string, limit: number, now: number, leaseMs: number, max: number): Promise<StagedSms[]> {
+  async clearOwnerHint() { this.hint = null; }
+  async claim(owner: string | null, limit: number, now: number, leaseMs: number, max: number): Promise<StagedSms[]> {
     const due = (r: Row) => r.owner === owner && ((['STAGED', 'RETRY'].includes(r.state) && r.next <= now) || (r.state === 'PROCESSING' && r.lease < now));
     this.rows.filter((r) => due(r) && r.attempts >= max).forEach((r) => { r.state = 'DEAD'; });
     const out = this.rows.filter(due).sort((a, b) => a.receivedAt - b.receivedAt).slice(0, limit);
@@ -204,20 +205,34 @@ async function main() {
     console.log('✓ legit repeated purchases kept, duplicate ref ignored');
   }
 
-  // 8. No session → nothing claimed, nothing lost; processIncomingSms refuses ownerless save
+  // 8. Guest scope: events with no owner are processed in guest mode as LOCAL guest transactions; an account never adopts them.
   {
     const db = await freshDb();
     const store = new FakeStagingStore();
-    store.receive('HDFC-BANK', SMS('R20'), T);                  // no owner hint ever set
-    let s = await drainStagedSms(store, null, undefined, { now: () => T });
-    assert.ok(s.skippedNoSession);
-    s = await drainStagedSms(store, A, undefined, { now: () => T });
+    store.receive('HDFC-BANK', SMS('R20'), T);                  // no owner hint ever set (guest / fresh install)
+    let s = await drainStagedSms(store, A, undefined, { now: () => T });
     assert.equal(s.processed, 0, 'ownerless event is not adopted by whoever logs in');
     assert.equal(store.rows[0].state, 'STAGED');
-    const r = await processIncomingSms({ sender: 'HDFC-BANK', receivedAt: T, partCount: 1, body: SMS('R21') }, null);
-    assert.equal(r.action, 'held');
     assert.equal(await count(db, 'SELECT COUNT(*) c FROM transactions'), 0);
-    console.log('✓ ownerless events held, never saved under user_id NULL');
+    s = await drainStagedSms(store, null, undefined, { now: () => T });   // guest mode drains the guest scope
+    assert.equal(s.saved, 1);
+    assert.equal(store.rows[0].state, 'COMPLETED');
+    assert.equal(store.rows[0].body, '', 'body wiped after processing');
+    const r = await processIncomingSms({ sender: 'HDFC-BANK', receivedAt: T, partCount: 1, body: SMS('R21') }, null);
+    assert.equal(r.action, 'saved');
+    assert.equal(await count(db, 'SELECT COUNT(*) c FROM transactions WHERE user_id IS NULL'), 2, 'guest rows have no owner');
+    assert.equal(await count(db, 'SELECT COUNT(*) c FROM transactions WHERE user_id IS NOT NULL'), 0, 'nothing leaks into an account');
+    // the guest SMS is idempotent too
+    const dup = await processIncomingSms({ sender: 'HDFC-BANK', receivedAt: T, partCount: 1, body: SMS('R21') }, null);
+    assert.equal(dup.action, 'duplicate_ignored');
+    // guest scope never claims an account's events, and clearing the hint makes new events guest-owned
+    await store.setOwnerHint(A.user.id);
+    store.receive('HDFC-BANK', SMS('R22', '10.00', 'Tea'), T + 1000);
+    assert.equal((await drainStagedSms(store, null, undefined, { now: () => T + 2000 })).processed, 0, 'guest does not claim account A events');
+    await store.clearOwnerHint();
+    store.receive('HDFC-BANK', SMS('R23', '11.00', 'Tea'), T + 3000);
+    assert.equal((await drainStagedSms(store, null, undefined, { now: () => T + 4000 })).saved, 1);
+    console.log('✓ guest-scope SMS saved locally (user_id NULL), idempotent, isolated from accounts');
   }
 
   // 9. Account switching: A's SMS (received while B is signed in/after logout) stays A's
@@ -239,12 +254,12 @@ async function main() {
     assert.equal(await count(db, 'SELECT COUNT(*) c FROM transactions WHERE user_id = ?', A.user.id), 1);
     // same bank ref under different users is NOT cross-user deduped
     await store.setOwnerHint(A.user.id);
-    store.receive('HDFC-BANK', SMS('SHARED'), T + 9000);
+    store.receive('HDFC-BANK', SMS('SHARE1'), T + 9000);        // bank references always contain digits
     await drainStagedSms(store, A, undefined, { now: () => T + 10000 });
     await store.setOwnerHint(B.user.id);
-    store.receive('ICICI-BANK', SMS('SHARED'), T + 11000);
+    store.receive('ICICI-BANK', SMS('SHARE1'), T + 11000);
     await drainStagedSms(store, B, undefined, { now: () => T + 12000 });
-    assert.equal(await count(db, "SELECT COUNT(*) c FROM transactions WHERE reference_id='SHARED'"), 2);
+    assert.equal(await count(db, "SELECT COUNT(*) c FROM transactions WHERE reference_id='SHARE1'"), 2);
     console.log('✓ per-user ownership of staged SMS; no cross-user dedupe');
   }
 

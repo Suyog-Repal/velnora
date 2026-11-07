@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ComponentRef, type ReactNode } from 'react';
 import { Animated, Easing, Keyboard, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View, type TextInputProps } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import NetInfo from '@react-native-community/netinfo';
 import { palette } from '../../theme';
 import { ArrowDownLeft, ArrowUpRight, CATEGORY_ICON_MAP, X } from '../../icons';
@@ -130,7 +130,10 @@ export function Sheet({ visible, onClose, title, colors, children, footer }: { v
     }, 80);
     return () => clearTimeout(t);
   }, [keyboard]);
+  // A Modal is its own Android window, so it needs its own SafeAreaProvider; without it the bottom inset reads 0 and the
+  // footer buttons slide under the system navigation bar.
   return <Modal visible={visible} transparent animationType="fade" statusBarTranslucent navigationBarTranslucent onRequestClose={onClose}>
+    <SafeAreaProvider style={{ flex: 1 }}>
     <KeyboardAvoidingView behavior="padding" style={ui.backdrop}>
       <Pressable style={StyleSheet.absoluteFill} onPress={onClose} accessibilityLabel="Close" />
       <Animated.View style={[ui.sheet, { backgroundColor: colors.canvas, borderColor: colors.border, opacity: rise, transform: [{ translateY: rise.interpolate({ inputRange: [0, 1], outputRange: [48, 0] }) }] }]}>
@@ -144,6 +147,7 @@ export function Sheet({ visible, onClose, title, colors, children, footer }: { v
         <SafeAreaView edges={keyboard ? [] : ['bottom']} />
       </Animated.View>
     </KeyboardAvoidingView>
+    </SafeAreaProvider>
   </Modal>;
 }
 

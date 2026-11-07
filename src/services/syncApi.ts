@@ -22,11 +22,18 @@ export class SyncApiError extends Error {
 
 const DEFAULT_API_PORT = 8000;
 
+let configuredBaseUrl: string | null = null;
+
+/** Called once by auth.ts with the app-wide resolved API URL ('' = not configured) so sync never uses a divergent default. */
+export function configureApiBaseUrl(url: string): void {
+  configuredBaseUrl = url.trim().replace(/\/+$/, '');
+}
+
 export function getBaseApiUrl(): string {
-  if (typeof process !== 'undefined' && process.env?.EXPO_PUBLIC_API_URL) {
-    return process.env.EXPO_PUBLIC_API_URL.replace(/\/+$/, '');
-  }
-  return `http://localhost:${DEFAULT_API_PORT}`;
+  if (configuredBaseUrl !== null) return configuredBaseUrl;
+  // Fallback only when auth.ts has not configured the URL (e.g. Node unit tests).
+  const env = typeof process !== 'undefined' ? process.env.EXPO_PUBLIC_API_URL : undefined;
+  return env?.trim() ? env.trim().replace(/\/+$/, '') : `http://localhost:${DEFAULT_API_PORT}`;
 }
 
 async function syncRequest<T>(
