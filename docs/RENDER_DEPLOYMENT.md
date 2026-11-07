@@ -154,6 +154,12 @@ $env:EXPO_PUBLIC_API_URL = "https://<service>.onrender.com"
 
 (or put `EXPO_PUBLIC_API_URL=https://<service>.onrender.com` in a git-ignored `.env.production` file in the repository root).
 
+- **An APK only knows the URL that existed when it was built.** Creating or editing `.env` afterwards changes nothing in an
+  APK that is already installed: rebuild and reinstall. (Symptom of a build without it: the app log shows
+  `EXPO_PUBLIC_API_URL is not set for this build`, and sign-up says the build has no server address configured.)
+- **GitHub Actions builds:** `.env` is git-ignored and never reaches CI. The workflow reads the repository **variable**
+  `EXPO_PUBLIC_API_URL` (Settings → Secrets and variables → Actions → Variables) and falls back to the Render URL. It fails
+  the build if the URL is not a bare `https://` origin, or if the finished APK does not contain it.
 - Use **`https://`** for release builds. Android blocks plain `http://` in release builds, and the app logs a warning if you try.
 - If a release build has **no** URL, cloud sync is disabled (the app logs `EXPO_PUBLIC_API_URL is not set...`) and everything
   else works offline. It never falls back to `localhost` in a release build.
@@ -190,7 +196,13 @@ $env:EXPO_PUBLIC_API_URL = "https://<service>.onrender.com"
 | `/api/v1/health/ready` returns 503 | `DATABASE_URL` wrong, database not reachable, or SSL required (`?sslmode=require`). |
 | `relation "users" does not exist` | Migrations not applied (Step 4). |
 | First request takes ~1 minute | Free instance waking up. |
-| App says "Unable to reach Velnora" | Wrong/missing `EXPO_PUBLIC_API_URL` at build time, or the service is asleep. |
+| App says "This build of Velnora has no server address configured" | The APK was built without `EXPO_PUBLIC_API_URL`. Set it (Step 6) and rebuild/reinstall. |
+| App says "Unable to reach Velnora. Check your internet connection" | The request got no response (offline, DNS, TLS). The log line shows the real cause. |
+| App says the server "did not respond in time" / "is starting up" | A free Render instance sleeps when idle; the first request can take ~35 s. Wait and retry. |
+| Any other message | The server answered; the message is the server's own (for example "An account with that email already exists"). |
+
+To see exactly what the app sent and what came back (no passwords, tokens or bodies are ever logged):
+`adb logcat -s ReactNativeJS` and look for the `[Velnora API]` lines.
 
 ## Known limitations to plan for (not changed by this phase)
 

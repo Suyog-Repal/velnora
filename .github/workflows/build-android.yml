@@ -19,10 +19,29 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       CI: true
+      # Backend address baked into the app at build time (Expo inlines EXPO_PUBLIC_* into the JS bundle).
+      # Set the repository VARIABLE EXPO_PUBLIC_API_URL (Settings > Secrets and variables > Actions > Variables) to change it.
+      # It is public by design (it ships inside the APK), so it is a variable, NOT a secret. Never put DATABASE_URL or
+      # JWT_SECRET_KEY here: those belong only to the Render service.
+      EXPO_PUBLIC_API_URL: ${{ vars.EXPO_PUBLIC_API_URL || 'https://velnora-backend-pq17.onrender.com' }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+
+      - name: Validate mobile API URL
+        shell: bash
+        run: |
+          url="$EXPO_PUBLIC_API_URL"
+          if [[ ! "$url" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?$ ]]; then
+            echo "::error::EXPO_PUBLIC_API_URL must be an https:// origin with no path and no trailing slash (got: '$url')"
+            exit 1
+          fi
+          if [[ "$url" == *neon.tech* || "$url" == *postgres* ]]; then
+            echo "::error::EXPO_PUBLIC_API_URL looks like a database address. It must be the Render backend URL."
+            exit 1
+          fi
+          echo "Mobile API origin for this build: $url"
 
       - name: Setup Node.js
         uses: actions/setup-node@v7
@@ -159,6 +178,20 @@ jobs:
             exit 1
           fi
           stat --printf='APK: %n (%s bytes)\n' "$apk_path"
+
+      - name: Verify the API URL is embedded in the APK
+        shell: bash
+        run: |
+          # An APK built without the URL cannot sign in or register ("Unable to reach Velnora"). Fail the build instead of shipping it.
+          apk_path="android/app/build/outputs/apk/release/app-release.apk"
+          host="${EXPO_PUBLIC_API_URL#https://}"
+          bundle="$RUNNER_TEMP/index.android.bundle"
+          unzip -p "$apk_path" assets/index.android.bundle > "$bundle"
+          if ! grep -a -F -q "$host" "$bundle"; then
+            echo "::error::The APK was built without the API host ($host). Registration and sign-in would fail on devices."
+            exit 1
+          fi
+          echo "API host $host is embedded in the APK."
 
       - name: Upload APK
         uses: actions/upload-artifact@v7

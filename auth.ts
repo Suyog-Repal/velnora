@@ -4,6 +4,7 @@ import { deleteUserLocalData, getLocalDataSummary } from './src/services/localDa
 import { purgeStagedSmsForUser } from './src/services/smsStagingService.ts';
 import type { AuthUser, Session } from './src/db/types.ts';
 import { resolveApiUrl } from './src/services/apiConfig.ts';
+import { AUTH_PATHS, AuthRequestError, apiRequest, expectSession, registerBody, type RequestErrorKind } from './src/services/apiClient.ts';
 
 export type { AuthUser, Session };
 export type SyncTransaction = {
@@ -14,19 +15,7 @@ export type SyncTransaction = {
   description: string;
   reference_id?: string;
 };
-export type RequestErrorKind = 'connection' | 'client' | 'server';
-
-export class AuthRequestError extends Error {
-  readonly kind: RequestErrorKind;
-  readonly status?: number;
-
-  constructor(message: string, kind: RequestErrorKind, status?: number) {
-    super(message);
-    this.name = 'AuthRequestError';
-    this.kind = kind;
-    this.status = status;
-  }
-}
+export { AuthRequestError, type RequestErrorKind };
 
 const SESSION_KEY = 'velnora.session.v1';
 
@@ -65,38 +54,24 @@ export async function clearSession(): Promise<void> {
   await SecureStore.deleteItemAsync(SESSION_KEY);
 }
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
-  let response: Response;
-  try {
-    response = await fetch(`${API_URL}${path}`, {
-      ...init,
-      headers: { 'Content-Type': 'application/json', ...(init.headers ?? {}) },
-    });
-  } catch {
-    throw new AuthRequestError('Unable to reach Velnora. Check that the API is running and reachable from this device.', 'connection');
-  }
-  const body: unknown = await response.json().catch(() => null);
-  if (!response.ok) {
-    const detail = typeof body === 'object' && body !== null && 'detail' in body && typeof body.detail === 'string'
-      ? body.detail
-      : response.status >= 500
-        ? 'Velnora is temporarily unavailable. Try again.'
-        : 'Please check the submitted information and try again.';
-    throw new AuthRequestError(detail, response.status >= 500 ? 'server' : 'client', response.status);
-  }
-  return body as T;
+// One log line at start-up says where this build will send requests (the host is not a secret; no credentials are involved).
+console.log(`[Velnora API] base URL: ${API_URL || '(not configured)'} (source: ${apiResolution.source})`);
+
+/** All auth calls go through the shared client: failures are classified (config / connection / timeout / 4xx / 5xx) and logged safely. */
+function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  return apiRequest<T>({ baseUrl: API_URL }, path, init);
 }
 
-export function register(fullName: string, email: string, password: string): Promise<Session> {
-  return request<Session>('/api/v1/auth/register', { method: 'POST', body: JSON.stringify({ full_name: fullName, email, password, terms_accepted: true }) });
+export async function register(fullName: string, email: string, password: string): Promise<Session> {
+  return expectSession<Session>(await request<unknown>(AUTH_PATHS.register, { method: 'POST', body: JSON.stringify(registerBody(fullName, email, password)) }));
 }
 
-export function login(email: string, password: string): Promise<Session> {
-  return request<Session>('/api/v1/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) });
+export async function login(email: string, password: string): Promise<Session> {
+  return expectSession<Session>(await request<unknown>(AUTH_PATHS.login, { method: 'POST', body: JSON.stringify({ email, password }) }));
 }
 
 export async function refreshSession(session: Session): Promise<Session> {
-  const next = await request<Session>('/api/v1/auth/refresh', { method: 'POST', body: JSON.stringify({ refresh_token: session.refresh_token }) });
+  const next = expectSession<Session>(await request<unknown>(AUTH_PATHS.refresh, { method: 'POST', body: JSON.stringify({ refresh_token: session.refresh_token }) }));
   await saveSession(next);
   return next;
 }
@@ -124,7 +99,7 @@ export async function clearLocalUserData(): Promise<void> {
 
 export async function logout(session: Session): Promise<void> {
   try {
-    await request('/api/v1/auth/logout', {
+    await request(AUTH_PATHS.logout, {
       method: 'POST',
       headers: { Authorization: `Bearer ${session.access_token}` },
       body: JSON.stringify({ refresh_token: session.refresh_token }),
@@ -137,7 +112,7 @@ export async function logout(session: Session): Promise<void> {
 }
 
 export function requestPasswordReset(email: string): Promise<{ detail: string }> {
-  return request<{ detail: string }>('/api/v1/auth/forgot-password', { method: 'POST', body: JSON.stringify({ email }) });
+  return request<{ detail: string }>(AUTH_PATHS.forgotPassword, { method: 'POST', body: JSON.stringify({ email }) });
 }
 
 export function createTransaction(session: Session, transaction: SyncTransaction): Promise<unknown> {

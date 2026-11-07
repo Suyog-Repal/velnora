@@ -178,6 +178,36 @@ def test_existing_api_routes_are_still_registered(client):
     assert any(p.startswith("/api/v1/receipts") for p in paths)
 
 
+def test_register_contract_matches_the_mobile_client(client):
+    """The mobile app (src/services/apiClient.ts) sends POST /api/v1/auth/register with exactly these fields and
+    expects a session back. If either side changes, this fails instead of breaking sign-up on devices."""
+    schema = client.app.openapi()
+    operation = schema["paths"]["/api/v1/auth/register"]
+    assert list(operation) == ["post"], "register is POST-only (GET must be 405)"
+    post = operation["post"]
+    assert "201" in post["responses"] and "422" in post["responses"]
+    schemas = schema["components"]["schemas"]
+    request = schemas["RegisterRequest"]
+    assert set(request["properties"]) == {"full_name", "email", "password", "terms_accepted"}
+    assert set(request["required"]) == {"full_name", "email", "password", "terms_accepted"}
+    response = schemas["AuthResponse"]
+    assert {"user", "access_token", "refresh_token"} <= set(response["properties"])
+    assert {"id", "full_name", "email"} <= set(schemas["UserResponse"]["properties"])
+    for route in ("/api/v1/auth/login", "/api/v1/auth/refresh", "/api/v1/auth/logout", "/api/v1/auth/forgot-password"):
+        assert route in schema["paths"], route
+
+
+def test_register_validation_errors_are_json_with_a_detail(client):
+    """These are rejected before any database access, so they run without a database."""
+    bad_email = client.post("/api/v1/auth/register", json={"full_name": "T", "email": "nope", "password": "Passw0rdx", "terms_accepted": True})
+    assert bad_email.status_code == 422 and isinstance(bad_email.json()["detail"], list)
+    no_terms = client.post("/api/v1/auth/register", json={"full_name": "T", "email": "t@example.com", "password": "Passw0rdx", "terms_accepted": False})
+    assert no_terms.status_code == 400 and no_terms.json() == {"detail": "Terms acceptance is required"}
+    weak = client.post("/api/v1/auth/register", json={"full_name": "T", "email": "t@example.com", "password": "alllowercase", "terms_accepted": True})
+    assert weak.status_code == 400 and "uppercase" in weak.json()["detail"]
+    assert client.get("/api/v1/auth/register").status_code == 405
+
+
 def test_jwt_uses_the_configured_secret_and_lifetimes():
     from uuid import uuid4
     from datetime import timedelta

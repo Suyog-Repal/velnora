@@ -23,6 +23,7 @@ await test('development can point at a custom LAN address via the env var (nothi
 await test('a release build with no URL disables cloud sync instead of silently using localhost', () => {
   const r = resolveApiUrl({ envUrl: '', hostUri: '192.168.1.5:8081', isDev: false });
   assert.equal(r.url, ''); assert.equal(r.source, 'unset'); assert.match(r.problem ?? '', /EXPO_PUBLIC_API_URL is not set/);
+  assert.match(r.problem ?? '', /sign-in, account creation/);
 });
 
 await test('malformed and cleartext production URLs are flagged', () => {

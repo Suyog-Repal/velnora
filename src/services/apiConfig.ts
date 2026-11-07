@@ -39,5 +39,5 @@ export function resolveApiUrl(input: { envUrl?: string | null; hostUri?: string 
       ? { url: `http://${host}:${port}`, source: 'dev-server', problem: null }
       : { url: `http://localhost:${port}`, source: 'localhost', problem: null };
   }
-  return { url: '', source: 'unset', problem: 'EXPO_PUBLIC_API_URL is not set for this build, so cloud sync is disabled. Set it to your deployed backend URL and rebuild.' };
+  return { url: '', source: 'unset', problem: 'EXPO_PUBLIC_API_URL is not set for this build, so sign-in, account creation and cloud sync are unavailable. Set it to your deployed backend URL and rebuild.' };
 }
