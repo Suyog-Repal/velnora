@@ -108,6 +108,7 @@ export class SyncEngine {
   private listeners: Set<StateListener> = new Set();
   private unsubscribeNetInfo: (() => void) | null = null;
   private sessionProvider: (() => Promise<SyncSession | null>) | null = null;
+  private sessionRefresher: ((stale: SyncSession) => Promise<SyncSession | null>) | null = null;
 
   private customDb: IDatabase | null = null;
   private txRepo: TransactionRepository | null = null;
@@ -193,6 +194,11 @@ export class SyncEngine {
     }
   }
 
+  /** Registers the callback used to obtain a fresh session after an HTTP 401 (see sessionRefresh.ts). */
+  public setSessionRefresher(fn: ((stale: SyncSession) => Promise<SyncSession | null>) | null): void {
+    this.sessionRefresher = fn;
+  }
+
   public stop(): void {
     if (this.unsubscribeNetInfo) {
       this.unsubscribeNetInfo();
@@ -237,7 +243,7 @@ export class SyncEngine {
       return { pushed: 0, pulled: 0, conflicts: 0, errors: ['Sync already in progress'] };
     }
 
-    const session = explicitSession || (this.sessionProvider ? await this.sessionProvider() : null);
+    let session = explicitSession || (this.sessionProvider ? await this.sessionProvider() : null);
     if (!session) {
       return { pushed: 0, pulled: 0, conflicts: 0, errors: ['No active session'] };
     }
@@ -254,17 +260,32 @@ export class SyncEngine {
     };
 
     try {
-      // 1. Push local changes
-      const pushResult = await this.pushPendingChanges(session, apiBaseUrl);
-      summary.pushed = pushResult.pushed;
-      summary.conflicts += pushResult.conflicts;
-      summary.errors.push(...pushResult.errors);
+      const runCycle = async (s: SyncSession) => {
+        // 1. Push local changes
+        const pushResult = await this.pushPendingChanges(s, apiBaseUrl);
+        summary.pushed += pushResult.pushed;
+        summary.conflicts += pushResult.conflicts;
+        summary.errors.push(...pushResult.errors);
 
-      // 2. Pull remote changes (transactions + categories)
-      const pullResult = await this.pullRemoteChanges(session, apiBaseUrl);
-      summary.pulled = pullResult.pulled;
-      summary.conflicts += pullResult.conflicts;
-      summary.errors.push(...pullResult.errors);
+        // 2. Pull remote changes (transactions + categories)
+        const pullResult = await this.pullRemoteChanges(s, apiBaseUrl);
+        summary.pulled += pullResult.pulled;
+        summary.conflicts += pullResult.conflicts;
+        summary.errors.push(...pullResult.errors);
+      };
+
+      try {
+        await runCycle(session);
+      } catch (err) {
+        // Expired access token: refresh once and retry the whole cycle once. The queue was not modified by the 401,
+        // so nothing is lost; a failed refresh or a second 401 ends the cycle (no retry loop).
+        if (!(err instanceof SyncApiError && err.status === 401 && this.sessionRefresher)) throw err;
+        const refreshed = await this.sessionRefresher(session);
+        if (!refreshed || refreshed.user?.id !== session.user?.id) throw err;
+        session = refreshed;
+        this.lastError = null;
+        await runCycle(session);
+      }
 
       this.lastSyncAt = new Date().toISOString();
       const { metadataRepo } = await this.getRepos();
@@ -714,6 +735,10 @@ export const syncEngine = new SyncEngine();
 
 export function startSyncEngine(sessionProvider: () => Promise<SyncSession | null>): Promise<void> {
   return syncEngine.start(sessionProvider);
+}
+
+export function setSyncSessionRefresher(fn: ((stale: SyncSession) => Promise<SyncSession | null>) | null): void {
+  syncEngine.setSessionRefresher(fn);
 }
 
 export function stopSyncEngine(): void {

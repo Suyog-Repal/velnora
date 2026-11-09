@@ -34,7 +34,8 @@ import { getServiceDb, onSyncResult, setPostSyncHook } from './src/services/tran
 import { listCategories, type CategoryView } from './src/services/categoryService';
 import { uploadPendingReceipts } from './src/services/receiptService';
 import { expoReceiptFs, expoReceiptUploader } from './src/services/receiptFiles';
-import { triggerSync } from './src/services/syncEngine';
+import { setSyncSessionRefresher, triggerSync } from './src/services/syncEngine';
+import { createSessionRefresher } from './src/services/sessionRefresh';
 import { API_URL } from './auth';
 import { Chip, Input, Sheet, TypeToggle, currencySymbol, readableOn, useOnline } from './src/ui/common';
 import { EMPTY_CASH_FLOW, EMPTY_LEDGER_HEALTH, getCashFlowSummary, getLedgerHealth, type CashFlowSummary, type LedgerHealth } from './src/services/cashFlowService';
@@ -177,6 +178,22 @@ function AppInner() {
       if (r.uploaded > 0) await triggerSync(s);
     });
     return () => setPostSyncHook(null);
+  }, []);
+
+  // A sync rejected with 401 (15-minute access token expired) refreshes the session once, then retries; see sessionRefresh.ts.
+  useEffect(() => {
+    const refresher = createSessionRefresher<Session>({
+      loadStored: loadSession,
+      refresh: refreshSession,
+      onRefreshed: (next) => setSession((current) => (current && current.user.id === next.user.id ? next : current)),
+      onRejected: (rejected) => {
+        void clearSession();
+        setSession((current) => (current?.user.id === rejected.user.id ? null : current));
+        setAuthNotice('Your session has ended. Sign in again; your data on this device is preserved.');
+      },
+    });
+    setSyncSessionRefresher((stale) => refresher(stale as Session)); // the app only ever passes full Sessions to triggerSync
+    return () => setSyncSessionRefresher(null);
   }, []);
 
   // Restore the stored session without destroying it on a transient failure (offline, 5xx).
