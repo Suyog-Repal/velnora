@@ -113,7 +113,8 @@ function AppInner() {
   const [showReview, setShowReview] = useState(false);
   const [reviewTxId, setReviewTxId] = useState<string | null>(null);
   const [showAccounts, setShowAccounts] = useState(false);
-  const [showImport, setShowImport] = useState(false);
+  const [showImport, setShowImport] = useState<'csv' | 'pdf' | null>(null);
+  const sessionRefresher = useRef<((stale: Session) => Promise<Session | null>) | null>(null);
   const [smsStatusTick, setSmsStatusTick] = useState(0);
   const [guestMode, setGuestMode] = useState(false);
   const [showAuth, setShowAuth] = useState(false);
@@ -192,8 +193,9 @@ function AppInner() {
         setAuthNotice('Your session has ended. Sign in again; your data on this device is preserved.');
       },
     });
+    sessionRefresher.current = refresher;
     setSyncSessionRefresher((stale) => refresher(stale as Session)); // the app only ever passes full Sessions to triggerSync
-    return () => setSyncSessionRefresher(null);
+    return () => { sessionRefresher.current = null; setSyncSessionRefresher(null); };
   }, []);
 
   // Restore the stored session without destroying it on a transient failure (offline, 5xx).
@@ -480,7 +482,7 @@ function AppInner() {
       {tab === 'budgets' && <BudgetsView scope={scope} categories={catViews} colors={colors} refreshKey={dataTick} />}
             {tab === 'people' && <PeopleView transactions={transactions} categories={catViews} session={session} colors={colors} refreshKey={dataTick} onOpenTx={setOpenTx} onChanged={() => void reloadData()} onAddTransaction={() => openForm('expense')} />}
       {tab === 'profile' && <ProfileView session={session} colors={colors} mode={mode} accent={accent} transactions={transactions} online={online} onOpenSettings={() => setShowSettings(true)} onOpenCurrency={() => setShowCurrency(true)} currencyLabel={(() => { const c = CURRENCIES.find((x) => x.code === currency); return c ? `${c.name} (${c.symbol.trim()})` : currency; })()}
-        onOpenCategories={() => setShowCats(true)} onOpenAliases={() => setShowAliases(true)} reviewCount={ledgerHealth.needsReviewCount} onOpenReview={() => setShowReview(true)} onOpenAccounts={() => setShowAccounts(true)} onOpenImport={() => setShowImport(true)} onSignIn={() => openAuth('signin')} onCreate={() => openAuth('signup')}
+        onOpenCategories={() => setShowCats(true)} onOpenAliases={() => setShowAliases(true)} reviewCount={ledgerHealth.needsReviewCount} onOpenReview={() => setShowReview(true)} onOpenAccounts={() => setShowAccounts(true)} onOpenImport={() => setShowImport('csv')} onOpenImportPdf={() => setShowImport('pdf')} onSignIn={() => openAuth('signin')} onCreate={() => openAuth('signup')}
         onLogout={async () => { if (!session) return; await clearReviewNotifications(getServiceDb(), session.user.id).catch(() => undefined); await logout(session); setSession(null); setSessionStale(false); setTransactions([]); setAuthScreen('welcome'); setShowAuth(true); }}
         accountSections={session ? <><LocalDataSection userId={session.user.id} colors={colors} onDeleted={() => { setTransactions([]); setSmsStatusTick((n) => n + 1); }} /><SmsStagingStatusSection userId={session.user.id} colors={colors} refreshKey={smsStatusTick} /></> : null} />}
       </Animated.View>
@@ -498,7 +500,7 @@ function AppInner() {
   <ReviewSheet visible={showReview} session={session} colors={colors} onClose={() => setShowReview(false)} onComplete={setReviewTxId} />
   <CompleteTransactionSheet transactionId={reviewTxId} session={session} categories={catViews} colors={colors} onClose={() => setReviewTxId(null)} onChanged={() => void reloadData()} onEdit={setOpenTx} />
   <AccountsSheet visible={showAccounts} scope={scope} colors={colors} onClose={() => setShowAccounts(false)} onChanged={() => void reloadData()} />
-  <StatementImportSheet visible={showImport} scope={scope} colors={colors} onClose={() => setShowImport(false)} onImported={() => { void reloadData(); if (session) void syncPendingTransactions(session); }} />
+  <StatementImportSheet visible={showImport !== null} mode={showImport ?? 'csv'} scope={scope} session={session} categories={catViews} refreshSession={(stale) => sessionRefresher.current?.(stale) ?? Promise.resolve(null)} colors={colors} onClose={() => setShowImport(null)} onImported={() => { void reloadData(); if (session) void syncPendingTransactions(session); }} />
   <Sheet visible={showForm} onClose={closeForm} title="Record transaction" colors={colors} footer={<>
     {formError ? <Text style={[styles.errorText, { marginTop: 0, marginBottom: 8 }]} accessibilityLiveRegion="polite">{formError}</Text> : null}
     <Pressable disabled={saving} onPress={() => void addTransaction()} accessibilityRole="button" accessibilityState={{ disabled: saving, busy: saving }}

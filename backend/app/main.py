@@ -56,6 +56,7 @@ def to_paise(amount: Decimal) -> int:
 
 from app.sync import router as sync_router
 from app.receipts import router as receipts_router
+from app.statements import router as statements_router
 
 settings = get_settings()
 configure_logging(settings)
@@ -64,6 +65,7 @@ logger = logging.getLogger("velnora")
 app = FastAPI(title="Velnora API", version="0.2.0", docs_url="/api/docs")
 app.include_router(sync_router)
 app.include_router(receipts_router)
+app.include_router(statements_router)
 # CORS: explicit origins from VELNORA_CORS_ORIGINS. Credentials are never combined with the "*" wildcard (and "*" is
 # rejected outright in production by config.py). Native mobile requests are not subject to CORS; this protects web clients.
 app.add_middleware(

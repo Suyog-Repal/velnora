@@ -9,7 +9,13 @@ import { REVIEW_FIELD_LABELS } from '../services/transactionCompleteness';
 import { VERIFICATION_LABELS, sourceLabel } from '../services/ledgerRules';
 import type { CategoryView } from '../services/categoryService';
 import { confirmAccount, createAccount, listAccounts, mergeAccounts, type AccountView } from '../services/accountService';
-import { MAX_STATEMENT_BYTES, applyStatement, parseStatementCsv, previewStatement, type ImportSummary, type PreviewRow, type PreviewStatus } from '../services/statementImport';
+import { MAX_STATEMENT_BYTES, applyStatement, defaultExcludedLines, displayName, flagStatementOverlaps, parseStatementCsv, previewStatement, type ImportSummary, type PreviewRow, type PreviewStatus } from '../services/statementImport';
+import { categorizeRows } from '../services/statementCategorizer';
+import { readPdfStatement } from '../services/pdfStatementImport';
+import type { PdfStatementMeta } from '../services/pdfStatementParser';
+import { expoPdfExtractPort, removeTempFile } from '../services/pdfStatementFiles';
+import { rememberAlias } from '../services/merchantAliasService';
+import { getBaseApiUrl } from '../services/syncApi';
 import type { Direction, Session, TransactionEntity } from '../db/types';
 
 const when = (iso: string) => new Date(iso).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
@@ -172,38 +178,95 @@ export function AccountsSheet({ visible, scope, colors, onClose, onChanged }: { 
 
 const STATUS_TEXT: Record<PreviewStatus, string> = { new: 'New', matched: 'Already recorded', possible: 'Possible duplicate', already_imported: 'Imported before' };
 
-export function StatementImportSheet({ visible, scope, colors, onClose, onImported }: { visible: boolean; scope: string | null; colors: Colors; onClose: () => void; onImported: () => void }) {
+const dayLabel = (iso: string | null) => (iso ? new Date(iso).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }) : '');
+
+/**
+ * Statement import, one sheet for both file types. CSV is read on the phone. A PDF is sent to the person's own Velnora
+ * server to read its text (they are told first; nothing is stored there) and is then parsed here. Either way the person
+ * reviews every line, can leave lines out and change categories, and nothing touches the ledger until they confirm.
+ */
+export function StatementImportSheet({ visible, mode, scope, session, categories, refreshSession, colors, onClose, onImported }: {
+  visible: boolean; mode: 'csv' | 'pdf'; scope: string | null; session: Session | null; categories: CategoryView[]; refreshSession?: (stale: Session) => Promise<Session | null>;
+  colors: Colors; onClose: () => void; onImported: () => void;
+}) {
+  const pdf = mode === 'pdf';
   const [preview, setPreview] = useState<PreviewRow[] | null>(null);
   const [skipped, setSkipped] = useState<Set<number>>(new Set());
+  const [edited, setEdited] = useState<Map<number, string>>(new Map());
+  const [editing, setEditing] = useState<number | null>(null);
+  const [remember, setRemember] = useState(true);
   const [parseErrors, setParseErrors] = useState(0);
-  const [summary, setSummary] = useState<ImportSummary | null>(null);
+  const [fileName, setFileName] = useState('');
+  const [meta, setMeta] = useState<PdfStatementMeta | null>(null);
+  const [summary, setSummary] = useState<(ImportSummary & { needsCategory: number }) | null>(null);
   const [error, setError] = useState('');
+  const [stage, setStage] = useState('');
   const [busy, setBusy] = useState(false);
 
-  useEffect(() => { if (visible) { setPreview(null); setSummary(null); setError(''); setSkipped(new Set()); } }, [visible]);
+  useEffect(() => { if (visible) { setPreview(null); setSummary(null); setError(''); setSkipped(new Set()); setEdited(new Map()); setEditing(null); setMeta(null); setStage(''); } }, [visible]);
 
-  const pick = async () => {
-    setError(''); setBusy(true);
-    try {
-      const res = await DocumentPicker.getDocumentAsync({ type: ['text/csv', 'text/comma-separated-values', 'application/csv', 'application/vnd.ms-excel', 'text/plain'], copyToCacheDirectory: true, multiple: false });
-      if (res.canceled || !res.assets[0]) return;
-      const asset = res.assets[0];
-      if ((asset.size ?? 0) > MAX_STATEMENT_BYTES) { setError('This file is too large. Export a shorter date range.'); return; }
-      const text = await FileSystem.readAsStringAsync(asset.uri);
-      await FileSystem.deleteAsync(asset.uri, { idempotent: true }).catch(() => undefined); // the cached copy is not kept
-      const parsed = parseStatementCsv(text);
-      if (!parsed.headerFound) { setError('Could not find date, description and amount columns. Excel and PDF statements are not supported yet: please export as CSV.'); return; }
-      if (parsed.rows.length === 0) { setError('No transactions were found in this file.'); return; }
-      setParseErrors(parsed.errors.length);
-      setPreview(await previewStatement(getServiceDb(), scope, parsed.rows));
-    } catch { setError('Could not read that file.'); } finally { setBusy(false); }
+  const pickCsv = async () => {
+    const res = await DocumentPicker.getDocumentAsync({ type: ['text/csv', 'text/comma-separated-values', 'application/csv', 'application/vnd.ms-excel', 'text/plain'], copyToCacheDirectory: true, multiple: false });
+    if (res.canceled || !res.assets[0]) return;
+    const asset = res.assets[0];
+    if ((asset.size ?? 0) > MAX_STATEMENT_BYTES) { setError('This file is too large. Export a shorter date range.'); return; }
+    const text = await FileSystem.readAsStringAsync(asset.uri);
+    await FileSystem.deleteAsync(asset.uri, { idempotent: true }).catch(() => undefined); // the cached copy is not kept
+    const parsed = parseStatementCsv(text);
+    if (!parsed.headerFound) { setError('Could not find date, description and amount columns. Please export the statement as CSV, or use Import PDF Statement.'); return; }
+    if (parsed.rows.length === 0) { setError('No transactions were found in this file.'); return; }
+    setParseErrors(parsed.errors.length);
+    setFileName(asset.name ?? '');
+    setPreview(await previewStatement(getServiceDb(), scope, parsed.rows));
   };
 
+  const pickPdf = async () => {
+    const res = await DocumentPicker.getDocumentAsync({ type: 'application/pdf', copyToCacheDirectory: true, multiple: false });
+    if (res.canceled || !res.assets[0]) return; // cancelling is not an error
+    const asset = res.assets[0];
+    try {
+      setStage('Reading your statement…');
+      const read = await readPdfStatement({ uri: asset.uri, name: asset.name ?? '', mimeType: asset.mimeType, size: asset.size }, session, expoPdfExtractPort(getBaseApiUrl()), refreshSession);
+      if (!read.ok) { setError(read.message); return; }
+      setStage('Checking for duplicates…');
+      const db = getServiceDb();
+      const rows = await categorizeRows(db, scope, read.rows);
+      const checked = await flagStatementOverlaps(db, scope, await previewStatement(db, scope, rows));
+      setParseErrors(read.errors.length);
+      setFileName(asset.name ?? '');
+      setMeta(read.meta);
+      setSkipped(defaultExcludedLines(checked)); // a possible duplicate is added only if the person says so
+      setPreview(checked);
+    } finally { await removeTempFile(asset.uri); }
+  };
+
+  const pick = async () => {
+    if (busy) return;
+    setError(''); setBusy(true);
+    try { await (pdf ? pickPdf() : pickCsv()); } catch { setError(pdf ? 'Could not read that file. Nothing was imported.' : 'Could not read that file.'); } finally { setBusy(false); setStage(''); }
+  };
+
+  const withEdits = (rows: PreviewRow[]): PreviewRow[] => rows.map((p) => {
+    const category = edited.get(p.row.line);
+    return category ? { ...p, row: { ...p.row, category, categoryConfidence: 'user' as const, needsReview: false } } : p;
+  });
+
   const confirm = async () => {
-    if (!preview) return;
+    if (!preview || busy) return;
     setBusy(true); setError('');
     try {
-      setSummary(await applyStatement(getServiceDb(), scope, preview, (p) => !skipped.has(p.row.line), parseErrors));
+      const final = withEdits(preview);
+      const included = (p: PreviewRow) => !skipped.has(p.row.line);
+      const done = await applyStatement(getServiceDb(), scope, final, included, parseErrors);
+      const needsCategory = final.filter((p) => p.status === 'new' && included(p) && p.row.needsReview).length;
+      if (remember && session && edited.size) {
+        // Only what the person chose, and only because they left the box ticked.
+        for (const p of final) {
+          const category = edited.get(p.row.line);
+          if (category && included(p)) await rememberAlias(getServiceDb(), session.user.id, displayName(p.row.narration), displayName(p.row.narration), category).catch(() => undefined);
+        }
+      }
+      setSummary({ ...done, needsCategory });
       setPreview(null);
       onImported();
     } catch { setError('The import stopped. Lines already added are kept, and importing again will not repeat them.'); } finally { setBusy(false); }
@@ -211,27 +274,58 @@ export function StatementImportSheet({ visible, scope, colors, onClose, onImport
 
   const toggle = (line: number) => setSkipped((prev) => { const next = new Set(prev); if (!next.delete(line)) next.add(line); return next; });
   const count = (status: PreviewStatus) => preview?.filter((p) => p.status === status).length ?? 0;
+  const importable = preview?.filter((p) => (p.status === 'new' || p.status === 'possible') && !skipped.has(p.row.line)) ?? [];
+  const totalIn = preview?.filter((p) => p.row.direction === 'income').reduce((s, p) => s + p.row.amount, 0) ?? 0;
+  const totalOut = preview?.filter((p) => p.row.direction === 'expense').reduce((s, p) => s + p.row.amount, 0) ?? 0;
+  const toCheck = preview?.filter((p) => p.status === 'new' && p.row.needsReview && !edited.has(p.row.line)).length ?? 0;
+  const title = pdf ? 'Import PDF Statement' : 'Import CSV';
 
-  return <Sheet visible={visible} onClose={onClose} title="Import statement" colors={colors} footer={preview ? <Button title={`Confirm import`} onPress={() => void confirm()} busy={busy} /> : undefined}>
+  const footer = preview ? <View>
+    <Button title={importable.length ? `Import ${importable.length} transaction${importable.length === 1 ? '' : 's'}` : 'Confirm import'} onPress={() => void confirm()} busy={busy} />
+    <Text onPress={busy ? undefined : onClose} accessibilityRole="button" style={{ color: colors.muted, textAlign: 'center', paddingTop: 12 }}>Cancel and import nothing</Text>
+  </View> : undefined;
+
+  return <Sheet visible={visible} onClose={busy ? () => undefined : onClose} title={title} colors={colors} footer={footer}>
     {error ? <Text style={{ color: palette.expenseText, marginBottom: 8 }}>{error}</Text> : null}
     {summary ? <View>
       <Text style={{ color: colors.text, fontWeight: '700', marginBottom: 6 }}>Import finished</Text>
-      {[['Transactions found', summary.found], ['Added', summary.added], ['Matched to existing', summary.matched], ['Possible duplicates', summary.possibleDuplicates], ['Need review', summary.needsReview], ['Imported before', summary.alreadyImported], ['Lines not understood', summary.errors]].map(([k, v]) =>
+      {[['Transactions found', summary.found], ['Added', summary.added], ['Matched to existing', summary.matched], ['Possible duplicates', summary.possibleDuplicates], ['Need a category check', summary.needsCategory], ['Imported before', summary.alreadyImported], ['Lines not understood', summary.errors]].map(([k, v]) =>
         <Text key={String(k)} style={{ color: colors.muted, marginBottom: 2 }}>{k}: {v}</Text>)}
+      <Text style={{ color: colors.muted, marginTop: 8 }}>Saved on this phone. They are sent to your account in the background, and show as synced only once the server confirms.</Text>
+      {summary.needsCategory > 0 ? <Text style={{ color: colors.muted, marginTop: 6 }}>Transactions that need a category are in Review transactions on your Profile.</Text> : null}
     </View> : preview ? <View>
-      <Text style={{ color: colors.muted, marginBottom: 8 }}>{count('new')} new · {count('matched')} already recorded · {count('possible')} possible duplicates · {count('already_imported')} imported before{parseErrors ? ` · ${parseErrors} lines not understood` : ''}. Tap a new or possible line to leave it out.</Text>
+      {pdf ? <View style={{ marginBottom: 10 }}>
+        <Text style={{ color: colors.text, fontWeight: '700' }} numberOfLines={1}>{fileName}</Text>
+        <Text style={{ color: colors.muted, marginTop: 2 }}>{[meta?.bankName, meta?.periodStart ? `${dayLabel(meta.periodStart)} to ${dayLabel(meta.periodEnd)}` : null].filter(Boolean).join(' · ') || 'Statement period not found'}</Text>
+        <Text style={{ color: colors.muted, marginTop: 2 }}>Income {formatPaise(Math.round(totalIn * 100))} · Expenses {formatPaise(Math.round(totalOut * 100))}</Text>
+      </View> : null}
+      <Text style={{ color: colors.muted, marginBottom: 8 }}>{preview.length} found · {count('new')} new · {count('matched')} already recorded · {count('possible')} possible duplicates · {count('already_imported')} imported before{toCheck ? ` · ${toCheck} to check` : ''}{parseErrors ? ` · ${parseErrors} lines not understood` : ''}. Tap a line to leave it out{pdf ? ', or its category to change it' : ''}.</Text>
+      {pdf && session ? <View style={{ marginBottom: 8 }}><Chip label={remember ? 'Remember my category choices' : 'Do not remember my choices'} active={remember} onPress={() => setRemember((v) => !v)} colors={colors} /></View> : null}
       {preview.slice(0, 200).map((p) => {
         const toggleable = p.status === 'new' || p.status === 'possible';
         const off = toggleable && skipped.has(p.row.line);
+        const category = edited.get(p.row.line) ?? p.row.category;
+        const flagged = p.status === 'new' && p.row.needsReview && !edited.has(p.row.line);
         return <View key={p.row.line} style={{ borderBottomWidth: 1, borderBottomColor: colors.border, paddingVertical: 8, opacity: off ? 0.45 : 1 }}>
           <Text onPress={toggleable ? () => toggle(p.row.line) : undefined} style={{ color: colors.text }} numberOfLines={1}>{when(p.row.date)} · {p.row.direction === 'income' ? '+' : '-'}{formatPaise(Math.round(p.row.amount * 100))} · {p.row.narration}</Text>
-          <Text style={{ color: colors.muted, fontSize: 12 }}>{off ? 'Left out' : STATUS_TEXT[p.status]}{p.matchLabel ? ` · ${p.matchLabel}` : ''}</Text>
+          <Text style={{ color: flagged ? palette.expenseText : colors.muted, fontSize: 12 }}>
+            {off ? 'Left out' : STATUS_TEXT[p.status]}{p.matchLabel ? ` · ${p.matchLabel}` : ''}{p.status === 'new' && category ? ` · ${p.row.direction === 'income' ? 'Income' : 'Expense'} · ${category}` : ''}{flagged ? ' · Check category' : ''}
+          </Text>
+          {pdf && p.status === 'new' && !off ? <Text onPress={() => setEditing(editing === p.row.line ? null : p.row.line)} accessibilityRole="button" style={{ color: palette.accentText, fontSize: 12, paddingVertical: 4 }}>{editing === p.row.line ? 'Close' : 'Change category'}</Text> : null}
+          {editing === p.row.line ? <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, paddingTop: 4 }}>
+            {categories.filter((c) => c.type === p.row.direction).map((c) => <Chip key={c.id} label={c.name} active={category === c.name} colors={colors} onPress={() => { setEdited((prev) => new Map(prev).set(p.row.line, c.name)); setEditing(null); }} />)}
+          </View> : null}
         </View>;
       })}
       {preview.length > 200 ? <Text style={{ color: colors.muted, marginTop: 8 }}>Showing the first 200 of {preview.length} lines. All will be imported.</Text> : null}
     </View> : <View>
-      <Text style={{ color: colors.muted, marginBottom: 12 }}>Choose a CSV statement downloaded from your bank. It is read on this phone, and you see every line before anything is added.</Text>
-      <Button title="Choose CSV file" onPress={() => void pick()} busy={busy} />
+      {busy && stage ? <Text style={{ color: colors.text, marginBottom: 12 }}>{stage}</Text> : null}
+      <Text style={{ color: colors.muted, marginBottom: 12 }}>
+        {pdf
+          ? 'Choose a bank statement PDF with selectable text. To read it, the PDF is sent securely to your Velnora server, which returns the text and does not keep the file or the text. You see every line before anything is added. Scanned (picture) statements and password-protected PDFs are not supported.'
+          : 'Choose a CSV statement downloaded from your bank. It is read on this phone, and you see every line before anything is added.'}
+      </Text>
+      <Button title={pdf ? 'Agree and choose PDF' : 'Choose CSV file'} onPress={() => void pick()} busy={busy} />
     </View>}
   </Sheet>;
 }

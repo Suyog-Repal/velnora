@@ -90,8 +90,12 @@ def test_database():
 
 
 @pytest.fixture(autouse=True)
-def cleanup_fixed_test_users(test_database):
-    """Ensure fixed test user accounts are cleaned up before and after each test."""
+def cleanup_fixed_test_users(request):
+    """Ensure fixed test user accounts are cleaned up before and after each test. Tests marked no_db never touch it."""
+    if request.node.get_closest_marker("no_db"):
+        yield
+        return
+    request.getfixturevalue("test_database")
     SessionLocal = get_session_factory()
 
     def _cleanup():

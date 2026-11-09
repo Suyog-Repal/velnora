@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Alert, Animated, Easing, Pressable, Text, View } from 'react-native';
 import { ACCENTS, palette, type AccentId, type ThemeMode } from '../../theme';
-import { Bell, Check, ChevronRight, LogOut, MessageSquare, ReceiptIcon, Settings, Sliders, TagIcon as Tag, UserRound, WalletCards, WifiOff } from '../../icons';
+import { Bell, Check, ChevronRight, FileText, LogOut, MessageSquare, ReceiptIcon, Settings, Sliders, TagIcon as Tag, UserRound, WalletCards, WifiOff } from '../../icons';
 import { currencySymbol, formatPaise, type Colors } from '../ui/common';
 import { useSmsPermission } from '../ui/useSmsPermission';
 import { useCapturePermissions } from '../ui/useCapturePermissions';
@@ -103,9 +103,9 @@ export function profileStats(transactions: TransactionEntity[], now = new Date()
   return { count, spentPaise, pending };
 }
 
-export function ProfileView({ session, colors, mode, accent, transactions, online, onOpenSettings, onOpenCurrency, currencyLabel, onOpenCategories, onOpenAliases, onOpenReview, onOpenAccounts, onOpenImport, reviewCount, onSignIn, onCreate, onLogout, accountSections }: {
+export function ProfileView({ session, colors, mode, accent, transactions, online, onOpenSettings, onOpenCurrency, currencyLabel, onOpenCategories, onOpenAliases, onOpenReview, onOpenAccounts, onOpenImport, onOpenImportPdf, reviewCount, onSignIn, onCreate, onLogout, accountSections }: {
   session: Session | null; colors: Colors; mode: ThemeMode; accent: AccentId;
-  transactions: TransactionEntity[]; online: boolean; onOpenSettings: () => void; onOpenCurrency: () => void; currencyLabel: string; onOpenCategories: () => void; onOpenAliases: () => void; onOpenReview: () => void; onOpenAccounts: () => void; onOpenImport: () => void; reviewCount: number; onSignIn: () => void; onCreate: () => void; onLogout: () => void;
+  transactions: TransactionEntity[]; online: boolean; onOpenSettings: () => void; onOpenCurrency: () => void; currencyLabel: string; onOpenCategories: () => void; onOpenAliases: () => void; onOpenReview: () => void; onOpenAccounts: () => void; onOpenImport: () => void; onOpenImportPdf: () => void; reviewCount: number; onSignIn: () => void; onCreate: () => void; onLogout: () => void;
   /** Real, existing account controls (delete local data, SMS status) rendered inside the Privacy card. */
   accountSections?: ReactNode;
 }) {
@@ -168,9 +168,10 @@ export function ProfileView({ session, colors, mode, accent, transactions, onlin
       <Group title="Your data" colors={colors}>
         <Row icon={<Tag size={18} color={palette.emerald} />} title="Categories" value="Create, edit and organise" colors={colors} onPress={onOpenCategories} />
         <Row icon={<Sliders size={18} color={palette.emerald} />} title="Merchant names" value={session ? 'Corrections Velnora remembers' : 'Sign in to use'} colors={colors} onPress={onOpenAliases} />
-        <Row icon={<Check size={18} color={palette.emerald} />} title="Review transactions" value={reviewCount > 0 ? `${reviewCount} waiting for you` : 'Nothing to review'} colors={colors} onPress={onOpenReview} />
+        <Row icon={<Check size={18} color={palette.emerald} />} title="Review transactions" value={reviewCount > 0 ? `${reviewCount} missing a category or details` : 'Nothing to review'} colors={colors} onPress={onOpenReview} />
         <Row icon={<WalletCards size={18} color={palette.emerald} />} title="Accounts" value="Found from your bank messages" colors={colors} onPress={onOpenAccounts} />
-        <Row icon={<ReceiptIcon size={18} color={palette.emerald} />} title="Import statement" value="Add or match from a CSV file" colors={colors} onPress={onOpenImport} last />
+        <Row icon={<ReceiptIcon size={18} color={palette.emerald} />} title="Import CSV" value="Add or match from a CSV file" colors={colors} onPress={onOpenImport} />
+        <Row icon={<FileText size={18} color={palette.emerald} />} title="Import PDF Statement" value="Import transactions from your bank statement PDF." colors={colors} onPress={onOpenImportPdf} last />
       </Group>
     </Reveal>
 

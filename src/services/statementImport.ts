@@ -1,4 +1,4 @@
-import { TransactionRepository, type DetectionInput } from '../db/repositories/transactionRepository.ts';
+import { TransactionRepository, merchantsCompatible, type DetectionInput } from '../db/repositories/transactionRepository.ts';
 import { withWriteLock } from '../db/writeLock.ts';
 import type { CreateTransactionInput, Direction, IDatabase } from '../db/types.ts';
 import { extractReference } from '../../transactionParser.ts';
@@ -19,6 +19,16 @@ export interface StatementRow {
   balance?: number;
   fingerprint: string;
   kind: KindForCategory;
+  /** Where the row was read from. Absent means CSV. */
+  origin?: 'csv' | 'pdf';
+  /** The statement printed a time of day, so `date` carries it; otherwise `date` is the day only. */
+  hasTime?: boolean;
+  /** The person's (or a saved merchant rule's) category; wins over the suggested one. */
+  category?: string;
+  /** Set by the PDF flow: the category is a guess the person should check. */
+  needsReview?: boolean;
+  /** How sure the category is. 'user' means the person chose it (now or in a saved rule). */
+  categoryConfidence?: 'high' | 'medium' | 'low' | 'user';
 }
 
 export interface StatementParseResult { rows: StatementRow[]; errors: { line: number; reason: string }[]; headerFound: boolean }
@@ -102,13 +112,13 @@ function findColumns(header: string[]) {
   return cols.date !== -1 && cols.narration !== -1 && hasMoney ? cols : null;
 }
 
-function hashRow(value: string): string {
+export function hashRow(value: string): string {
   let hash = 2166136261;
   for (let i = 0; i < value.length; i += 1) { hash ^= value.charCodeAt(i); hash = Math.imul(hash, 16777619); }
   return (hash >>> 0).toString(16);
 }
 
-function kindOf(narration: string): KindForCategory {
+export function kindOf(narration: string): KindForCategory {
   if (/\brevers(?:al|ed)\b/i.test(narration)) return 'reversal';
   if (/\brefund\b/i.test(narration)) return 'refund';
   if (/\b(?:self|own a\/?c)\b/i.test(narration)) return 'transfer';
@@ -163,7 +173,7 @@ export function parseStatementCsv(text: string): StatementParseResult {
   return { rows, errors, headerFound: true };
 }
 
-function displayName(narration: string): string {
+export function displayName(narration: string): string {
   const parts = narration.split(/[/-]/).map((p) => p.trim()).filter((p) => /[A-Za-z]{3}/.test(p) && !/^(?:UPI|NEFT|IMPS|RTGS|P2M|P2A|DR|CR|ATM|POS)$/i.test(p));
   return (parts[0] ?? narration).slice(0, 60).trim() || 'Statement entry';
 }
@@ -172,14 +182,14 @@ function toInput(row: StatementRow, scope: string | null): CreateTransactionInpu
   const counterparty = displayName(row.narration);
   return {
     amount: row.amount, direction: row.direction, counterparty,
-    category: suggestCategory({ merchant: row.narration, body: row.narration, direction: row.direction, kind: row.kind }),
-    description: `Imported from statement: ${row.narration}`, transaction_date: row.date, source: 'sms', capture_source: 'csv_import',
-    txn_kind: row.kind, verification_status: 'verified', reference_id: row.referenceId || null, fingerprint: row.fingerprint, user_id: scope, sync_status: 'pending_create',
+    category: row.category ?? suggestCategory({ merchant: row.narration, body: row.narration, direction: row.direction, kind: row.kind }),
+    description: `Imported from ${row.origin === 'pdf' ? 'PDF ' : ''}statement: ${row.narration}`, transaction_date: row.date, source: 'sms', capture_source: 'csv_import',
+    txn_kind: row.kind, verification_status: row.needsReview ? 'needs_review' : 'verified', reference_id: row.referenceId || null, fingerprint: row.fingerprint, user_id: scope, sync_status: 'pending_create',
   };
 }
 
 const detectionFor = (row: StatementRow): DetectionInput => ({
-  source: 'csv_import', detectedAt: new Date(row.date).getTime(), dayPrecision: true,
+  source: 'csv_import', detectedAt: new Date(row.date).getTime(), dayPrecision: !row.hasTime,
   metadata: { referenceId: row.referenceId || undefined, balance: row.balance, fingerprint: row.fingerprint },
 });
 
@@ -187,10 +197,14 @@ const detectionFor = (row: StatementRow): DetectionInput => ({
 export async function previewStatement(db: IDatabase, scope: string | null, rows: StatementRow[]): Promise<PreviewRow[]> {
   const repo = new TransactionRepository(db);
   const key = scope ?? '';
+  const claimed = new Set<string>();
   const out: PreviewRow[] = [];
   for (const row of rows) {
     if (await repo.hasIdentityKey(key, `fp:${row.fingerprint}`)) { out.push({ row, status: 'already_imported', matchId: null, matchLabel: null }); continue; }
     const match = await repo.findPossibleDuplicate(toInput(row, scope), detectionFor(row), key);
+    // Two lines of one statement are two payments: an existing transaction can stand for only one of them.
+    if (match && claimed.has(match.row.id)) { out.push({ row, status: 'new', matchId: null, matchLabel: null }); continue; }
+    if (match) claimed.add(match.row.id);
     const certain = match && (match.result.outcome === 'exact' || match.result.outcome === 'strong');
     out.push({ row, status: certain ? 'matched' : match ? 'possible' : 'new', matchId: match?.row.id ?? null, matchLabel: match?.row.counterparty ?? null });
   }
@@ -226,3 +240,36 @@ export async function applyStatement(
   }
   return summary;
 }
+
+/**
+ * Two different statement files (a CSV and a PDF of the same account, or two overlapping PDFs) both arrive through the
+ * statement channel, and the ledger rule "one channel reports each payment once" cannot tell them apart. So a new row
+ * that lines up with an already-imported statement row (same day, amount, direction, compatible merchant) is offered to
+ * the person as a possible duplicate instead of being added silently. Each existing row is offered at most once, so two
+ * genuine same-day payments of one amount are not both blocked by a single earlier row.
+ */
+export async function flagStatementOverlaps(db: IDatabase, scope: string | null, preview: PreviewRow[]): Promise<PreviewRow[]> {
+  const key = scope ?? '';
+  const taken = new Set<string>();
+  const out: PreviewRow[] = [];
+  for (const p of preview) {
+    if (p.status !== 'new') { out.push(p); continue; }
+    const d = new Date(p.row.date);
+    const from = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0).toISOString();
+    const to = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59, 999).toISOString();
+    const rows = await db.getAllAsync<{ id: string; counterparty: string }>(
+      `SELECT t.id, t.counterparty FROM transactions t
+       WHERE t.deleted_at IS NULL AND COALESCE(t.user_id, '') = ? AND t.direction = ? AND t.amount_paise = ?
+         AND t.transaction_date >= ? AND t.transaction_date <= ?
+         AND EXISTS (SELECT 1 FROM transaction_sources s WHERE s.transaction_id = t.id AND s.source = 'csv_import')
+       ORDER BY t.created_at`,
+      key, p.row.direction, Math.round(p.row.amount * 100), from, to,
+    );
+    const hit = rows.find((r) => !taken.has(r.id) && merchantsCompatible(r.counterparty, displayName(p.row.narration)));
+    if (hit) { taken.add(hit.id); out.push({ ...p, status: 'possible', matchId: hit.id, matchLabel: hit.counterparty }); } else out.push(p);
+  }
+  return out;
+}
+
+/** Lines of a preview that start out left out: a possible duplicate is added only if the person chooses to add it. */
+export const defaultExcludedLines = (preview: PreviewRow[]): Set<number> => new Set(preview.filter((p) => p.status === 'possible').map((p) => p.row.line));
