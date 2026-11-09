@@ -15,7 +15,7 @@ export const MAX_PDF_BYTES = 10 * 1024 * 1024;
 
 export type PdfFailure =
   | 'not_pdf' | 'empty_file' | 'too_large' | 'signin_required' | 'offline' | 'session_expired' | 'server'
-  | 'encrypted' | 'invalid' | 'scanned' | 'too_many_pages' | 'unsupported_layout' | 'unsupported_currency' | 'no_transactions';
+  | 'encrypted' | 'invalid' | 'scanned' | 'too_many_pages' | 'unsupported_layout' | 'unsupported_currency' | 'no_transactions' | 'rows_not_understood';
 
 export const PDF_FAILURE_MESSAGES: Record<PdfFailure, string> = {
   not_pdf: 'Please choose a PDF file.',
@@ -31,7 +31,8 @@ export const PDF_FAILURE_MESSAGES: Record<PdfFailure, string> = {
   too_many_pages: 'That statement has more than 200 pages. Download a shorter date range.',
   unsupported_layout: 'Velnora could not find a transaction table in this PDF (date, description and amount columns). Try the CSV export from your bank.',
   unsupported_currency: 'This statement is not in rupees. Velnora imports INR statements only.',
-  no_transactions: 'No transactions were found in this PDF.',
+  no_transactions: 'The statement table was found, but it has no transactions.',
+  rows_not_understood: 'Transactions were found in this PDF but none could be read with confidence.',
 };
 
 export interface PdfFile { uri: string; name: string; mimeType?: string | null; size?: number | null }
@@ -47,7 +48,19 @@ export type PdfReadResult =
   | { ok: true; rows: StatementRow[]; errors: { line: number; reason: string }[]; meta: PdfStatementMeta; pageCount: number }
   | { ok: false; reason: PdfFailure; message: string };
 
-const fail = (reason: PdfFailure): PdfReadResult => ({ ok: false, reason, message: PDF_FAILURE_MESSAGES[reason] });
+const fail = (reason: PdfFailure, message?: string): PdfReadResult => ({ ok: false, reason, message: message ?? PDF_FAILURE_MESSAGES[reason] });
+
+/** Counts only, never statement text: what stopped the lines that looked like transactions from being read. */
+export function explainUnreadRows(errors: { reason: string }[]): string {
+  const counts = new Map<string, number>();
+  for (const e of errors) counts.set(e.reason, (counts.get(e.reason) ?? 0) + 1);
+  const [top, n] = [...counts.entries()].sort((a, b) => b[1] - a[1])[0];
+  const why = top === 'Could not tell money in from money out' ? 'could not tell money received from money paid'
+    : top === 'Amount not understood' ? 'had no amount Velnora could be sure of'
+    : top === 'Date not understood' ? 'had a date Velnora could not read'
+    : 'could not be read';
+  return `Found ${errors.length} line${errors.length === 1 ? '' : 's'} that look like transactions, but ${n === errors.length ? 'all' : `${n} of them`} ${why}. Nothing was imported. Try the CSV export from your bank.`;
+}
 
 export function validatePdfFile(file: PdfFile): PdfFailure | null {
   const mime = (file.mimeType ?? '').toLowerCase();
@@ -92,6 +105,9 @@ export async function readPdfStatement(
 
   const parsed = parsePdfStatement(pages);
   if (parsed.meta.unsupportedCurrency) return fail('unsupported_currency');
-  if (!parsed.rows.length) return fail(parsed.meta.headerFound || parsed.errors.length ? 'no_transactions' : 'unsupported_layout');
+  if (!parsed.rows.length) {
+    if (parsed.errors.length) return fail('rows_not_understood', explainUnreadRows(parsed.errors));
+    return fail(parsed.meta.headerFound ? 'no_transactions' : 'unsupported_layout');
+  }
   return { ok: true, rows: parsed.rows, errors: parsed.errors, meta: parsed.meta, pageCount };
 }

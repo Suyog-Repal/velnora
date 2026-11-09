@@ -174,7 +174,8 @@ export function parseStatementCsv(text: string): StatementParseResult {
 }
 
 export function displayName(narration: string): string {
-  const parts = narration.split(/[/-]/).map((p) => p.trim()).filter((p) => /[A-Za-z]{3}/.test(p) && !/^(?:UPI|NEFT|IMPS|RTGS|P2M|P2A|DR|CR|ATM|POS)$/i.test(p));
+  // UPI app statements word the line as "Paid to <payee>" / "Received from <payer>"; the payee is the name.
+  const parts = narration.replace(/^(?:paid to|received from|sent to|payment to)\s+/i, '').split(/[/-]/).map((p) => p.trim()).filter((p) => /[A-Za-z]{3}/.test(p) && !/^(?:UPI|NEFT|IMPS|RTGS|P2M|P2A|DR|CR|ATM|POS)$/i.test(p));
   return (parts[0] ?? narration).slice(0, 60).trim() || 'Statement entry';
 }
 

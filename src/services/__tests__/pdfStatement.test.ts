@@ -431,6 +431,111 @@ async function main() {
     assert.ok(!dump.includes('Statement period') && !dump.includes('Page 1 of 2') && !dump.includes('Closing Balance'));
   });
 
+  // ── UPI app statements: one payment over several lines, no balance, direction from wording ──
+  const UPI_HEADER = L([0, 'Date'], [22, 'Transaction Details'], [70, 'Type'], [85, 'Amount']);
+  const upi = (date: string, time: string, who: string, id: string | null, type: string, amount: string) => [
+    L([0, date], [22, who], ...(type ? [[70, type] as [number, string]] : []), ...(amount ? [R(95, amount)] : [])),
+    L([0, time], ...(id ? [[22, `UPI Transaction ID: ${id}`] as [number, string]] : [])),
+    L([22, 'Paid by State Bank of India 4823']),
+  ];
+  const UPI_PAGE = [
+    'Transaction Statement  01 Oct, 2026 - 31 Oct, 2026',
+    UPI_HEADER,
+    ...upi('01 Oct, 2026', '06:43 PM', 'Paid to Night canteen', '62742596121', 'DEBIT', '₹43'),
+    ...upi('02 Oct, 2026', '07:02 PM', 'Received from Aksh', '62742596122', 'CREDIT', '₹200'),
+    ...upi('02 Oct, 2026', '10:44 AM', 'Paid to UDUPI KRISHNA CAFETERIA', '62742596123', 'DEBIT', '₹30'),
+    ...upi('03 Oct, 2026', '05:52 PM', 'Paid to Night canteen', '62742596124', 'DEBIT', '₹43'),
+    ...upi('03 Oct, 2026', '05:55 PM', 'Paid to Night canteen', '62742596125', 'DEBIT', '₹43'),
+    'Page 1 of 1',
+  ];
+  await test('UPI statement: date, time, payee, UPI id and amount are grouped into one transaction each', () => {
+    const r = parsePdfStatement([UPI_PAGE]);
+    assert.deepEqual(r.errors, []);
+    assert.deepEqual(r.rows.map((x) => [ymd(x.date), x.direction, x.amount, x.narration, x.referenceId]), [
+      ['2026-10-01', 'expense', 43, 'Paid to Night canteen', '62742596121'],
+      ['2026-10-02', 'income', 200, 'Received from Aksh', '62742596122'],
+      ['2026-10-02', 'expense', 30, 'Paid to UDUPI KRISHNA CAFETERIA', '62742596123'],
+      ['2026-10-03', 'expense', 43, 'Paid to Night canteen', '62742596124'],
+      ['2026-10-03', 'expense', 43, 'Paid to Night canteen', '62742596125'],
+    ]);
+    const t = (i: number) => { const d = new Date(r.rows[i].date); return [d.getHours(), d.getMinutes()]; };
+    assert.deepEqual([t(0), t(1), t(2), t(3)], [[18, 43], [19, 2], [10, 44], [17, 52]]);
+    assert.ok(r.rows.every((x) => x.hasTime === true));
+    assert.ok(!r.rows.some((x) => /State Bank|4823|Transaction ID/i.test(x.narration)), 'the paying account and the id line are not part of the payee');
+  });
+  await test('UPI statement: with no Type column, "Paid to" is an expense and "Received from" is income', () => {
+    const r = parsePdfStatement([[
+      L([0, 'Date'], [22, 'Transaction Details'], [85, 'Amount']),
+      ...upi('01 Oct, 2026', '06:43 PM', 'Paid to Night canteen', '62742596121', '', '₹43'),
+      ...upi('02 Oct, 2026', '07:02 PM', 'Received from Aksh', '62742596122', '', '₹200'),
+    ]]);
+    assert.deepEqual(r.rows.map((x) => [x.direction, x.amount]), [['expense', 43], ['income', 200]]);
+  });
+  await test('UPI statement: no headings at all still reads (₹ amounts are sure, wording gives direction)', () => {
+    const r = parsePdfStatement([upi('01 Oct, 2026', '06:43 PM', 'Paid to Night canteen', '62742596121', '', '₹43')]);
+    assert.deepEqual(r.rows.map((x) => [x.direction, x.amount, x.referenceId]), [['expense', 43, '62742596121']]);
+  });
+  await test('UPI statement: the amount may be on a different line from the description, and month-first dates work', () => {
+    const r = parsePdfStatement([[
+      UPI_HEADER,
+      L([0, 'Oct 05, 2026'], [22, 'Paid to Metro Card']),
+      L([0, '08:10 AM'], [22, 'UPI Transaction ID: 62742596130'], R(95, '₹ 1,250')),
+      L([22, 'Paid by State Bank of India 4823']),
+      L([0, 'Oct 06, 2026'], R(95, '₹16')),
+      L([22, 'Received from Priya']),
+      L([0, '09:00 AM'], [22, 'UPI Transaction ID: 62742596131']),
+    ]]);
+    assert.deepEqual(r.rows.map((x) => [ymd(x.date), x.direction, x.amount, x.referenceId]), [['2026-10-05', 'expense', 1250, '62742596130'], ['2026-10-06', 'income', 16, '62742596131']]);
+  });
+  await test('UPI statement: amounts in the app formats, and ids/bank digits/times are never read as money', () => {
+    const r = parsePdfStatement([UPI_PAGE]);
+    assert.deepEqual(r.rows.map((x) => x.amount), [43, 200, 30, 43, 43]);
+    const indian = parsePdfStatement([[UPI_HEADER, ...upi('01 Oct, 2026', '06:43 PM', 'Paid to Builder', '62742596140', 'DEBIT', '₹1,25,000')]]);
+    assert.equal(indian.rows[0].amount, 125000);
+  });
+  await test('UPI statement: a missing id is not invented; transactions stay separate and keep their own fingerprints', () => {
+    const r = parsePdfStatement([[UPI_HEADER, ...upi('01 Oct, 2026', '06:43 PM', 'Paid to Night canteen', null, 'DEBIT', '₹43'), ...upi('01 Oct, 2026', '06:43 PM', 'Paid to Night canteen', null, 'DEBIT', '₹43')]]);
+    assert.equal(r.rows.length, 2);
+    assert.deepEqual(r.rows.map((x) => x.referenceId), ['', '']);
+    assert.notEqual(r.rows[0].fingerprint, r.rows[1].fingerprint);
+  });
+  await test('UPI statement: a missing amount or an unknown direction is reported, never guessed or imported', () => {
+    const noAmount = parsePdfStatement([[UPI_HEADER, ...upi('01 Oct, 2026', '06:43 PM', 'Paid to Night canteen', '62742596121', 'DEBIT', ''), ...upi('02 Oct, 2026', '07:02 PM', 'Received from Aksh', '62742596122', 'CREDIT', '₹200')]]);
+    assert.deepEqual(noAmount.rows.map((x) => x.amount), [200], 'the next transaction is not given the missing amount');
+    assert.deepEqual(noAmount.errors.map((e) => e.reason), ['Amount not understood']);
+    const unknown = parsePdfStatement([[UPI_HEADER, ...upi('01 Oct, 2026', '06:43 PM', 'Night canteen', '62742596121', '', '₹43')]]);
+    assert.equal(unknown.rows.length, 0);
+    assert.deepEqual(unknown.errors.map((e) => e.reason), ['Could not tell money in from money out']);
+    const both = parsePdfStatement([[UPI_HEADER, ...upi('01 Oct, 2026', '06:43 PM', 'Paid to Aksh', '62742596121', '', '₹43'), L([22, 'Received from Priya'])]]);
+    assert.equal(both.rows.length, 0, 'contradictory wording is ambiguous');
+  });
+  await test('UPI statement: wording never overrides a debit/credit column', () => {
+    const r = parsePdfStatement([[UPI_HEADER, ...upi('01 Oct, 2026', '06:43 PM', 'Paid to Night canteen', '62742596121', 'CREDIT', '₹43')]]);
+    assert.equal(r.rows[0].direction, 'income');
+  });
+  await test('the person-facing message says why lines were not read, with counts only', async () => {
+    const body = { status: 'text', page_count: 1, pages: [[UPI_HEADER, ...upi('01 Oct, 2026', '06:43 PM', 'Night canteen', '62742596121', '', '₹43'), ...upi('02 Oct, 2026', '06:43 PM', 'Night canteen', '62742596122', '', '₹43')]] };
+    const res = (await readPdfStatement(file, A, port([{ httpStatus: 200, body }]))) as { ok: false; reason: string; message: string };
+    assert.equal(res.reason, 'rows_not_understood');
+    assert.match(res.message, /Found 2 lines that look like transactions, but all could not tell money received from money paid/);
+    assert.ok(!/Night|43|6274/.test(res.message), 'no statement data in the message');
+  });
+  await test('UPI statement imports end to end with real dates, references kept apart, and correct totals', async () => {
+    const db = await fresh();
+    const rows = await categorizeRows(db, A.user.id, parsePdfStatement([UPI_PAGE]).rows);
+    const preview = await flagStatementOverlaps(db, A.user.id, await previewStatement(db, A.user.id, rows));
+    assert.deepEqual(preview.map((p) => p.status), Array(5).fill('new'), 'same payee and amount with different UPI ids are separate');
+    await applyStatement(db, A.user.id, preview, () => true);
+    const saved = await live(db);
+    assert.equal(saved.length, 5);
+    assert.deepEqual(saved.map((t) => String(t.reference_id)).sort(), ['62742596121', '62742596122', '62742596123', '62742596124', '62742596125']);
+    assert.equal(saved[0].counterparty, 'Night canteen', 'the payee is the name, not the "Paid to" wording');
+    const oct = await getCashFlowSummary(db, A.user.id, new Date(2026, 9, 20));
+    assert.deepEqual([oct.monthIncomePaise, oct.monthExpensePaise], [20000, (43 + 30 + 43 + 43) * 100]);
+    const again = await previewStatement(db, A.user.id, await categorizeRows(db, A.user.id, parsePdfStatement([UPI_PAGE]).rows));
+    assert.deepEqual(again.map((p) => p.status), Array(5).fill('already_imported'));
+  });
+
   console.log(`\n${passed} PDF statement tests passed`);
 }
 

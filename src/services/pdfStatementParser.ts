@@ -30,18 +30,21 @@ interface Money { value: number; text: string; cell: Cell; line: number }
 interface Group { cellsByLine: Cell[][] }
 interface DateContext { start: Date | null; end: Date | null }
 /** One statement row before the running balance has had its say about direction. */
-interface Draft { line: number; date: Date; hasTime: boolean; amount: number; columnDirection: Direction | null; balance: number | null; narration: string; referenceId: string }
+interface Draft { line: number; date: Date; hasTime: boolean; amount: number; columnDirection: Direction | null; textDirection: Direction | null; balance: number | null; narration: string; referenceId: string }
 
 const MONTH_NAMES = 'jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec';
 const DATE_SOURCE = `\\d{4}-\\d{1,2}-\\d{1,2}|\\d{1,2}[/.-]\\d{1,2}[/.-]\\d{2,4}|\\d{1,2}[\\s/-](?:${MONTH_NAMES})[a-z]*[\\s/,-]+\\d{2,4}`;
 const PERIOD = new RegExp(`(${DATE_SOURCE})\\s*(?:to|-|–|till|through)\\s*(${DATE_SOURCE})`, 'i');
 const DAY_MONTH_ONLY = new RegExp(`^(\\d{1,2})[\\s/-](${MONTH_NAMES})[a-z]*\\b(?![\\s/,-]*\\d)`, 'i');
-const TIME = /\b(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?\b/i;
+const MONTH_FIRST = new RegExp(`^(${MONTH_NAMES})[a-z]*\\.?\\s+(\\d{1,2}),?\\s+(\\d{4})\\b`, 'i');
+const TIME =/\b(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?\b/i;
 // Indian (1,25,000) and western (125,000) grouping are both valid; a stray comma is not.
 const GROUPED = '(?:\\d{1,2}(?:,\\d{2})*,\\d{3}|\\d{1,3}(?:,\\d{3})+)';
-const wrap = (num: string, symbol = '(?:(?:INR|Rs\\.?|₹)\\s*)?') => new RegExp(`^${symbol}\\(?-?${num}\\)?(?:\\s*(?:Dr|Cr)\\.?)?$`, 'i');
+// The rupee sign is often extracted as a different glyph (a backtick, a superscript one) when the PDF font lacks it.
+const SYMBOL = '(?:INR|Rs\\.?|[₹₨`¹])';
+const wrap = (num: string, symbol = `(?:${SYMBOL}\\s*)?`) => new RegExp(`^${symbol}\\(?-?${num}\\)?(?:\\s*(?:Dr|Cr)\\.?)?$`, 'i');
 /** Sure to be money wherever it sits: has decimals, or digit grouping, or a currency symbol. */
-const AMOUNT_SURE = [wrap(`(?:${GROUPED}|\\d+)\\.\\d{1,2}`), wrap(GROUPED), wrap('\\d{1,9}', '(?:INR|Rs\\.?|₹)\\s*')];
+const AMOUNT_SURE = [wrap(`(?:${GROUPED}|\\d+)\\.\\d{1,2}`), wrap(GROUPED), wrap('\\d{1,9}', `${SYMBOL}\\s*`)];
 /** A bare whole number ("1250"): money only when it sits under a money column, never a date, reference or page number. */
 const AMOUNT_PLAIN = wrap('\\d{1,9}', '');
 const AMOUNT = { test: (text: string) => AMOUNT_SURE.some((r) => r.test(text)) };
@@ -68,6 +71,11 @@ const BANKS: [RegExp, string][] = [
   [/yes bank/i, 'Yes Bank'], [/indusind/i, 'IndusInd Bank'], [/canara/i, 'Canara Bank'], [/idfc/i, 'IDFC First Bank'], [/union bank/i, 'Union Bank of India'],
 ];
 const MAX_GROUP_LINES = 8;
+// "UPI Transaction ID: 62742596121", "Transaction ID T2610011843", "UTR No: 4012..." -> the id
+const ID_LINE = /^(?:UPI\s+)?(?:transaction|txn|utr|ref(?:erence)?)\s*(?:id|no\.?|number)?\s*[:#.-]?\s*([A-Z0-9][A-Z0-9-]{5,})\s*$/i;
+const INSTRUMENT_LINE = /^(?:paid by|paid from|credited to|debited from|received in)\b/i;
+const OUT_WORDING = /^(?:paid to|sent to|payment to|money sent to|transferred to)\b/i;
+const IN_WORDING = /^(?:received from|money received from|credited by)\b/i;
 
 function splitCells(line: string): Cell[] {
   const cells: Cell[] = [];
@@ -104,6 +112,13 @@ const dayEnd = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate(),
 function parseDateCell(text: string, ctx: DateContext): Date | null {
   const full = parseStatementDate(text);
   if (full) return full;
+  // "Oct 01, 2026" (month first), as UPI app statements print it
+  const mf = MONTH_FIRST.exec(text.trim());
+  if (mf) {
+    const month = MONTH_NAMES.split('|').indexOf(mf[1].slice(0, 3).toLowerCase());
+    const d = new Date(+mf[3], month, +mf[2], 12, 0, 0);
+    return month >= 0 && d.getMonth() === month && d.getDate() === +mf[2] ? d : null;
+  }
   const m = DAY_MONTH_ONLY.exec(text.trim());
   if (!m || !ctx.start) return null;
   // The year is only in the statement heading: choose the year that puts the day inside the stated period.
@@ -126,7 +141,7 @@ function withTime(date: Date, text: string): { date: Date; hasTime: boolean } {
 }
 
 function amountValue(text: string): number | null {
-  const cleaned = text.replace(/(?:INR|Rs\.?|₹|\s|,|Dr\.?|Cr\.?|\(|\))/gi, '').replace(/^-/, '');
+  const cleaned = text.replace(/(?:INR|Rs\.?|[₹₨`¹]|\s|,|Dr\.?|Cr\.?|\(|\))/gi, '').replace(/^-/, '');
   const n = Number(cleaned);
   return Number.isFinite(n) ? Math.round(n * 100) / 100 : null;
 }
@@ -184,7 +199,7 @@ export function parsePdfStatement(pages: string[][]): PdfParseResult {
 
     const refColumn = columns?.find((c) => c.kind === 'reference');
     const narrationColumn = columns?.find((c) => c.kind === 'narration');
-    const money: Money[] = []; const words: string[] = []; let typeMarker = ''; let referenceCell = ''; let timeText = dateCell.text;
+    const money: Money[] = []; const words: string[] = []; let typeMarker = ''; let referenceCell = ''; let idText = ''; let timeText = dateCell.text;
     group.cellsByLine.forEach((lineCells, index) => {
       for (const cell of lineCells) {
         if (cell === dateCell || (index === 0 && !cells.includes(cell))) continue;
@@ -193,6 +208,10 @@ export function parsePdfStatement(pages: string[][]): PdfParseResult {
         if (/^(?:dr|cr|debit|credit)\.?$/i.test(text)) { typeMarker = text; continue; }
         if (/^\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM)?$/i.test(text)) { timeText += ` ${text}`; continue; }
         if (index === 0 && words.length === 0 && parseDateCell(text, ctx)) continue; // value date beside the transaction date
+        // UPI app statements spread one payment over several lines: who, the transaction id, and which account paid.
+        const idMatch = ID_LINE.exec(text);
+        if (idMatch) { if (/\d/.test(idMatch[1])) idText ||= idMatch[1]; continue; }
+        if (INSTRUMENT_LINE.test(text)) continue; // "Paid by State Bank of India 4823": the account, not the payee
         const nearRef = refColumn && Math.abs(centerOf(cell) - refColumn.center) < Math.abs(centerOf(cell) - (narrationColumn?.center ?? Infinity));
         if (nearRef && /^[A-Za-z0-9-]{6,}$/.test(text) && /\d/.test(text)) { referenceCell ||= text; continue; }
         words.push(text);
@@ -225,7 +244,10 @@ export function parsePdfStatement(pages: string[][]): PdfParseResult {
     }
     const narration = words.join(' ').replace(/\s+/g, ' ').trim().slice(0, 160);
     const { date, hasTime } = withTime(parsedDate, timeText);
-    drafts.push({ line, date, hasTime, amount, columnDirection, balance, narration, referenceId: referenceCell || extractReference(narration) });
+    // Wording is the weakest witness: used only when no column, marker or balance has spoken, and never if it says both.
+    const paidOut = words.some((w) => OUT_WORDING.test(w)); const paidIn = words.some((w) => IN_WORDING.test(w));
+    const textDirection: Direction | null = paidOut && !paidIn ? 'expense' : paidIn && !paidOut ? 'income' : null;
+    drafts.push({ line, date, hasTime, amount, columnDirection, textDirection, balance, narration, referenceId: referenceCell || idText || extractReference(narration) });
   };
 
   for (const page of pages) {
@@ -258,7 +280,7 @@ export function parsePdfStatement(pages: string[][]): PdfParseResult {
   const seen = new Map<string, number>();
   drafts.forEach((d, i) => {
     const before = ascending ? (i > 0 ? drafts[i - 1].balance : meta.openingBalance) : (drafts[i + 1]?.balance ?? null);
-    let direction = d.columnDirection;
+    let direction = d.columnDirection ?? d.textDirection;
     if (d.balance !== null && before !== null) {
       const delta = Math.round((d.balance - before) * 100) / 100;
       if (delta !== 0 && Math.abs(Math.abs(delta) - d.amount) < 0.01) direction = delta > 0 ? 'income' : 'expense';
