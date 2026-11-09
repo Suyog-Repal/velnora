@@ -8,10 +8,10 @@ treat button names as a guide and check Render's own documentation if something 
 
 | Item | Value |
 |---|---|
-| Backend package | `backend/` (the code imports itself as `backend.app...`, so the service must run from the **repository root**) |
-| FastAPI app | `backend.app.main:app` |
+| Backend package | `backend/` (the code imports itself as `app...`, so the service must run from the **`backend` directory**) |
+| FastAPI app | `app.main:app` |
 | Dependencies | `backend/requirements.txt` |
-| Migrations | Alembic, `alembic.ini` at the repository root (scripts in `backend/alembic/versions`, 4 revisions, single head) |
+| Migrations | Alembic, `alembic.ini` at the repository root (scripts in `backend/alembic/versions`, 5 revisions, single head) |
 | Health check (no DB) | `GET /api/v1/health` → `{"status":"ok","service":"velnora-api"}` |
 | Readiness (checks DB) | `GET /api/v1/health/ready` → `{"status":"ok","database":"ok"}` or `503` |
 | API docs | `/api/docs` |
@@ -38,15 +38,15 @@ Rules:
 
 1. Render dashboard → **New → Web Service** → connect the GitHub repository `Suyog-Repal/velnora`.
 2. **Branch:** `main` (or your release branch).
-3. **Root Directory:** leave **empty** (repository root). Do **not** set it to `backend`, the imports would break.
+3. **Root Directory:** `backend`. Do **not** leave it empty, the imports would break.
 4. **Language / Runtime:** Python 3.
 5. **Build Command:**
    ```
-   pip install -r backend/requirements.txt
+   pip install -r requirements.txt
    ```
 6. **Start Command (exact):**
    ```
-   uvicorn backend.app.main:app --host 0.0.0.0 --port $PORT
+   uvicorn app.main:app --host 0.0.0.0 --port $PORT
    ```
    Render provides `$PORT`; the app must not use a fixed port in production.
 7. **Health Check Path:** `/api/v1/health`
@@ -102,7 +102,7 @@ alembic -c alembic.ini upgrade head --sql
 alembic -c alembic.ini upgrade head
 
 # 4) Confirm
-alembic -c alembic.ini current        # should print e5b2c8d4a7f1 (head)
+alembic -c alembic.ini current        # should print f7c3a1d9e2b6 (head)
 
 # 5) Clear the variables from this shell
 Remove-Item Env:DIRECT_DATABASE_URL, Env:DATABASE_URL
