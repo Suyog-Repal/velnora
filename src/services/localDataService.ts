@@ -58,6 +58,7 @@ export async function deleteUserLocalData(
         id,
         id,
       );
+      await db.runAsync('DELETE FROM account_profiles WHERE user_id = ?', id);
       const deleted = await db.runAsync('DELETE FROM transactions WHERE user_id = ?', id);
       await db.runAsync(
         'DELETE FROM app_metadata WHERE key IN (?, ?)',

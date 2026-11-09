@@ -113,13 +113,13 @@ export function ReceiptScan({ visible, session, categories, colors, onClose, onS
       <Button title="Choose from gallery" kind="ghost" onPress={() => void pick('gallery')} />
       <Button title="Upload an image file" kind="ghost" onPress={() => void pick('file')} />
       <Text style={{ color: colors.muted, fontSize: 12, marginTop: 8 }}>PDF files can't be read yet; use a screenshot or photo.</Text>
-      {error ? <Text style={{ color: palette.danger, marginTop: 8 }}>{error}</Text> : null}
+      {error ? <Text style={{ color: palette.expenseText, marginTop: 8 }}>{error}</Text> : null}
     </View> : <View>
       <Image source={{ uri }} style={{ width: '100%', height: 150, borderRadius: 14, backgroundColor: colors.card, marginBottom: 12 }} resizeMode="cover" />
       {working ? <Text style={{ color: colors.muted }}>Reading…</Text> : null}
       {ocrFailed ? <Text style={{ color: palette.warning, marginBottom: 10 }}>We couldn't read this image, so nothing was filled in. The image is kept; enter the details below.</Text> : null}
       {sugg && !sugg.looksLikeReceipt && !sugg.isPaymentScreen ? <Text style={{ color: palette.warning, marginBottom: 10 }}>This doesn't look like a receipt or payment. Check the values carefully.</Text> : null}
-      {sugg?.paymentStatus === 'failed' ? <Text style={{ color: palette.danger, marginBottom: 10 }}>This payment looks like it FAILED. Only save it if money really moved.</Text> : null}
+      {sugg?.paymentStatus === 'failed' ? <Text style={{ color: palette.expenseText, marginBottom: 10 }}>This payment looks like it FAILED. Only save it if money really moved.</Text> : null}
       {sugg?.paymentStatus === 'pending' ? <Text style={{ color: palette.warning, marginBottom: 10 }}>This payment looks pending.</Text> : null}
 
       <Labeled label="TYPE" colors={colors} hint={sugg?.direction ? 'Suggested from the image. Please verify.' : undefined}>
@@ -143,7 +143,7 @@ export function ReceiptScan({ visible, session, categories, colors, onClose, onS
       <Labeled label="NOTE (OPTIONAL)" colors={colors}><Input colors={colors} value={note} onChangeText={setNote} placeholder="What was this for?" /></Labeled>
 
       {dupe ? <View style={{ marginVertical: 8 }}><Text style={{ color: palette.warning, marginBottom: 6 }}>You already have a transaction with {dupe}. Is this the same one?</Text><Button title="Save anyway" onPress={() => void save(true)} busy={working} /></View> : null}
-      {error ? <Text style={{ color: palette.danger, marginBottom: 8 }}>{error}</Text> : null}
+      {error ? <Text style={{ color: palette.expenseText, marginBottom: 8 }}>{error}</Text> : null}
       {!dupe ? <Button title="Save transaction" onPress={() => void save()} busy={working} /> : null}
       <Button title="Choose another image" kind="ghost" onPress={reset} />
     </View>}

@@ -83,7 +83,7 @@ async function accountFlow() {
   assert.equal(queued.length, 3); assert.ok(queued.every((q) => q.operation === 'create'));
   const sample = JSON.parse(queued.find((q) => JSON.parse(q.payload).amount_paise === 25000)!.payload);
   assert.deepEqual({ direction: sample.direction, counterparty: sample.counterparty, category: sample.category, amount: sample.amount, ref: sample.reference_id, user: sample.user_id },
-    { direction: 'expense', counterparty: 'ZOMATO', category: 'Other Expenses', amount: 250, ref: '412345678901', user: A.user.id });
+    { direction: 'expense', counterparty: 'ZOMATO', category: 'Food & Dining', amount: 250, ref: '412345678901', user: A.user.id });
   assert.ok(rows.every((r) => r.sync_status === 'pending_create'), 'not marked synced before the server confirms');
 
   // the raw SMS text is never persisted in the app database

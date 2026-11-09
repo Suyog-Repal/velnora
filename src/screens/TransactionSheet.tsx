@@ -9,13 +9,14 @@ import { DateField } from '../ui/CalendarDatePicker';
 import { TimeField } from '../ui/TimePicker';
 import { notices } from '../ui/Toast';
 import { buildMerchantPhone, formatDateInput, formatTimeInput, parseLocalDateTime } from '../services/transactionDetails';
-import { deleteTransaction, getServiceDb, updateTransactionDetails } from '../services/transactionService';
+import { deleteTransaction, getServiceDb, updateLedgerFields, updateTransactionDetails } from '../services/transactionService';
 import { rememberAlias } from '../services/merchantAliasService';
 import { attachReceipt, removeReceipt } from '../services/receiptService';
 import { downloadReceipt, expoReceiptFs } from '../services/receiptFiles';
 import { API_URL } from '../../auth';
 import type { CategoryView } from '../services/categoryService';
-import type { Direction, Session, TransactionEntity } from '../db/types';
+import { KIND_LABELS, VERIFICATION_LABELS, sourceLabel } from '../services/ledgerRules';
+import type { Direction, Session, TransactionEntity, TransactionKind } from '../db/types';
 
 const PAYMENT_METHODS = ['UPI', 'Card', 'Cash', 'Net banking', 'Other'];
 const DIAL_CODES = ['+91', '+1', '+44', '+971', '+65', '+61'];
@@ -37,12 +38,16 @@ export function TransactionSheet({ tx, session, categories, colors, onClose, onC
   const [busy, setBusy] = useState(false);
   const [showMap, setShowMap] = useState(false);
   const [receiptUri, setReceiptUri] = useState<string | null>(null);
+  const [kind, setKind] = useState<TransactionKind>('payment');
+  const [bank, setBank] = useState('');
+  const [last4, setLast4] = useState('');
 
   const id = tx?.id;
   useEffect(() => {
     if (!tx) return;
     setMerchant(tx.counterparty); setAmount(String(tx.amount_paise / 100)); setDate(formatDateInput(tx.transaction_date)); setTime(formatTimeInput(tx.transaction_date));
     setDirection(tx.direction); setCategory(tx.category); setPayment(tx.payment_method ?? null); setError(''); setNote('');
+    setKind(tx.txn_kind ?? 'payment'); setBank(tx.bank_name ?? ''); setLast4(tx.account_last4 ?? '');
     const p = tx.merchant_phone ?? '';
     const known = [...DIAL_CODES].sort((x, y) => y.length - x.length).find((c) => p.startsWith(c));
     if (!p) { setDial('+91'); setPhone(''); } else if (known) { setDial(known); setPhone(p.slice(known.length)); } else { setDial('+91'); setPhone(p); }
@@ -78,6 +83,7 @@ export function TransactionSheet({ tx, session, categories, colors, onClose, onC
     if (!Number.isFinite(value) || value <= 0) { setError('Enter an amount greater than zero.'); return; }
     if (whenChanged && !iso) { setError('Select a valid date and time.'); return; }
     if (!phoneCheck.ok) { setError(phoneCheck.error); return; }
+    if (last4.trim() && !/^\d{3,4}$/.test(last4.trim())) { setError('Account: enter only the last 3 or 4 digits.'); return; }
     setBusy(true);
     try {
       const cat = categories.find((c) => c.type === direction && c.name.toLowerCase() === category.toLowerCase()) ?? categories.find((c) => c.name.toLowerCase() === category.toLowerCase());
@@ -86,6 +92,10 @@ export function TransactionSheet({ tx, session, categories, colors, onClose, onC
         counterparty: merchant, amount: value, ...(iso ? { transaction_date: iso } : {}), category, category_id: cat && !cat.isCustom ? null : cat?.id ?? null,
         payment_method: payment, merchantPhone: { number: phone, dialCode: dial },
       }, session);
+      const bankValue = bank.trim() || null; const last4Value = last4.trim() || null;
+      if (kind !== (tx.txn_kind ?? 'payment') || bankValue !== (tx.bank_name ?? null) || last4Value !== (tx.account_last4 ?? null)) {
+        await updateLedgerFields(tx.id, { txn_kind: kind, bank_name: bankValue, account_last4: last4Value }, session);
+      }
       onChanged();
       notices.localSave('edit', !!session);
       const merchantChanged = merchant.trim() !== tx.counterparty;
@@ -126,12 +136,12 @@ export function TransactionSheet({ tx, session, categories, colors, onClose, onC
 
   const hasLoc = tx.location_lat != null && tx.location_lng != null;
   const footer = <>
-    {error ? <Text style={{ color: palette.danger, marginBottom: 8 }}>{error}</Text> : null}
+    {error ? <Text style={{ color: palette.expenseText, marginBottom: 8 }}>{error}</Text> : null}
     <Button title="Save changes" onPress={() => void save()} busy={busy} />
   </>;
   return <Sheet visible onClose={onClose} title={tx.counterparty} colors={colors} footer={footer}>
-    <Text style={{ fontSize: 30, fontWeight: '800', color: direction === 'income' ? palette.emerald : palette.danger, marginBottom: 4 }}>{direction === 'income' ? '+' : '-'}{formatPaise(tx.amount_paise)}</Text>
-    <Text style={{ color: colors.muted, marginBottom: 16 }}>{tx.source === 'sms' ? 'Detected from SMS' : 'Added manually'} · {tx.user_id ? (tx.sync_status === 'synced' ? 'Synced' : 'Waiting to sync') : 'Stored on this device only'}</Text>
+    <Text style={{ fontSize: 30, fontWeight: '700', color: direction === 'income' ? palette.accentText : palette.expenseText, marginBottom: 4, fontVariant: ['tabular-nums'] }}>{direction === 'income' ? '+' : '-'}{formatPaise(tx.amount_paise)}</Text>
+    <Text style={{ color: colors.muted, marginBottom: 16 }}>{sourceLabel(tx)} · {VERIFICATION_LABELS[tx.verification_status ?? 'verified']} · {tx.user_id ? (tx.sync_status === 'synced' ? 'Synced' : 'Waiting to sync') : 'Stored on this device only'}</Text>
 
     <Labeled label="TYPE" colors={colors} hint={direction !== tx.direction ? `Will be saved as ${direction === 'income' ? 'income' : 'an expense'}.` : undefined}><TypeToggle value={direction} onChange={chooseDirection} colors={colors} /></Labeled>
     <Labeled label="MERCHANT" colors={colors}><Input colors={colors} value={merchant} onChangeText={setMerchant} accessibilityLabel="Merchant" /></Labeled>
@@ -144,6 +154,15 @@ export function TransactionSheet({ tx, session, categories, colors, onClose, onC
     <Labeled label="CATEGORY" colors={colors}>
       <ScrollView horizontal showsHorizontalScrollIndicator={false}>{typeCats.map((c) => <Chip key={c.id} label={c.name} active={category.toLowerCase() === c.name.toLowerCase()} color={c.color} onPress={() => setCategory(c.name)} colors={colors} />)}</ScrollView>
     </Labeled>
+    {(tx.verification_status === 'needs_review' || tx.verification_status === 'detected') && !tx.possible_duplicate_of ? <View style={{ marginBottom: 14 }}><Button title="Mark as reviewed" kind="ghost" onPress={() => { void updateLedgerFields(tx.id, { verification_status: 'verified' }, session).then(() => { onChanged(); onClose(); }).catch(() => setError('Could not save.')); }} /></View> : null}
+    <Labeled label="COUNTS AS" colors={colors} hint={kind === 'transfer' ? 'Left out of income and expenses.' : kind === 'refund' || kind === 'reversal' ? 'Money back: not counted as income.' : undefined}>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false}>{(Object.keys(KIND_LABELS) as TransactionKind[]).map((k) => <Chip key={k} label={KIND_LABELS[k]} active={kind === k} onPress={() => setKind(k)} colors={colors} />)}</ScrollView>
+    </Labeled>
+    <View style={{ flexDirection: 'row', gap: 10 }}>
+      <View style={{ flex: 2 }}><Labeled label="BANK" colors={colors}><Input colors={colors} value={bank} onChangeText={setBank} placeholder="Unknown" maxLength={60} accessibilityLabel="Bank" /></Labeled></View>
+      <View style={{ flex: 1 }}><Labeled label="LAST 4" colors={colors}><Input colors={colors} value={last4} onChangeText={setLast4} placeholder="Unknown" keyboardType="number-pad" maxLength={4} accessibilityLabel="Account last 4 digits" /></Labeled></View>
+    </View>
+    {tx.payment_app ? <Text style={{ color: colors.muted, marginBottom: 14 }}>Seen in {tx.payment_app}. The app does not show which bank paid.</Text> : null}
     <Labeled label="PAYMENT METHOD (OPTIONAL)" colors={colors}>
       <ScrollView horizontal showsHorizontalScrollIndicator={false}>{PAYMENT_METHODS.map((m) => <Chip key={m} label={m} active={payment === m} onPress={() => setPayment(payment === m ? null : m)} colors={colors} />)}</ScrollView>
     </Labeled>
@@ -154,8 +173,8 @@ export function TransactionSheet({ tx, session, categories, colors, onClose, onC
         <View style={{ marginRight: 10 }}><Phone size={18} color={colors.muted} /></View>
         <View style={{ flex: 1 }}><Input colors={colors} value={phone} onChangeText={setPhone} placeholder="Enter merchant mobile number (optional)" keyboardType="phone-pad" accessibilityLabel="Merchant mobile number" /></View>
       </View>
-      {phone && !phoneCheck.ok ? <Text style={{ color: palette.danger, marginTop: 6, fontSize: 12 }}>{phoneCheck.error}</Text> : null}
-      {phone ? <Text onPress={() => setPhone('')} style={{ color: palette.emerald, fontWeight: '700', marginTop: 6 }}>Clear number</Text> : null}
+      {phone && !phoneCheck.ok ? <Text style={{ color: palette.expenseText, marginTop: 6, fontSize: 12 }}>{phoneCheck.error}</Text> : null}
+      {phone ? <Text onPress={() => setPhone('')} style={{ color: palette.accentText, fontWeight: '700', marginTop: 6 }}>Clear number</Text> : null}
     </Labeled>
 
     <Labeled label="LOCATION (OPTIONAL)" colors={colors}>
@@ -172,7 +191,7 @@ export function TransactionSheet({ tx, session, categories, colors, onClose, onC
         <View style={{ flex: 1 }}><Button title={receiptUri ? 'Retake' : 'Take photo'} kind="ghost" onPress={() => void pickReceipt('camera')} /></View>
         <View style={{ flex: 1 }}><Button title={receiptUri ? 'Replace' : 'Gallery'} kind="ghost" onPress={() => void pickReceipt('gallery')} /></View>
       </View>
-      {receiptUri ? <Text onPress={() => void clearReceipt()} style={{ color: palette.danger, fontWeight: '700', marginTop: 6 }}>Remove photo</Text> : null}
+      {receiptUri ? <Text onPress={() => void clearReceipt()} style={{ color: palette.expenseText, fontWeight: '700', marginTop: 6 }}>Remove photo</Text> : null}
       {note ? <Text style={{ color: colors.muted, marginTop: 6 }}>{note}</Text> : null}
       <Text style={{ color: colors.muted, fontSize: 12, marginTop: 6 }}>{session ? 'Kept on this device and uploaded to your account when online.' : 'Guest photos stay on this device.'}</Text>
     </Labeled>

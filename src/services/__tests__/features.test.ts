@@ -394,7 +394,7 @@ async function migrationKeepsExistingData() {
   for (const m of MIGRATIONS.filter((x) => x.version <= 2)) { await db.execAsync(m.up); await db.runAsync('INSERT INTO schema_migrations VALUES (?, ?)', m.version, 'x'); }
   await db.runAsync(`INSERT INTO transactions (id, user_id, amount, amount_paise, direction, counterparty, category, transaction_date, source, sync_status, created_at, updated_at) VALUES ('t1','u1',5,500,'expense','M','C','2026-01-01','manual','pending_create','x','x')`);
   await db.runAsync(`INSERT INTO sync_queue (id, entity_type, entity_id, operation, payload, retry_count, created_at) VALUES ('q1','transaction','t1','create','{"user_id":"u1"}',3,'x')`);
-  assert.equal(await runMigrations(db), 3);
+  assert.equal(await runMigrations(db), 6);
   const q = await db.getFirstAsync<{ retry_count: number; payload: string }>("SELECT * FROM sync_queue WHERE id = 'q1'");
   assert.deepEqual([q!.retry_count, q!.payload], [3, '{"user_id":"u1"}']);
   assert.equal((await db.getFirstAsync<{ c: number }>('SELECT COUNT(*) c FROM transactions'))!.c, 1);

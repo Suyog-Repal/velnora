@@ -154,6 +154,16 @@ class Transaction(Base):
     location_address = Column(Text, nullable=True)
     location_confirmed = Column(Boolean, nullable=False, default=False, server_default=text("false"))
 
+    # Unified ledger metadata. Only an account suffix is ever stored, never a full account number.
+    txn_kind = Column(String(20), nullable=False, default="payment", server_default="payment")
+    verification_status = Column(String(20), nullable=False, default="verified", server_default="verified")
+    capture_source = Column(String(20), nullable=True)
+    account_last4 = Column(String(4), nullable=True)
+    bank_name = Column(String(60), nullable=True)
+    payment_app = Column(String(40), nullable=True)
+    possible_duplicate_of = Column(UUID(as_uuid=True), nullable=True)
+    confidence = Column(Float, nullable=True)
+
     # Relationships
     user = relationship("User", back_populates="transactions")
     category_rel = relationship("Category", back_populates="transactions")

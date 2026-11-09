@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { StyleSheet, Text, View } from 'react-native';
+import { AppState, Pressable, StyleSheet, Text, View } from 'react-native';
+import { isNotificationAccessGranted, isSmsDetectionAvailable, openNotificationAccessSettings } from '../../sms';
 import { getStagingStore } from '../services/smsStagingService';
 import { loadSmsStagingStatus, type SmsStagingStatus } from '../services/smsStagingStatus';
 
@@ -9,6 +10,15 @@ type Colors = { canvas: string; card: string; border: string; text: string; mute
 export function SmsStagingStatusSection({ userId, colors, refreshKey }: { userId: string; colors: Colors; refreshKey: number }) {
   const [status, setStatus] = useState<SmsStagingStatus | null>(null);
   const [failed, setFailed] = useState(false);
+  const [tcAccess, setTcAccess] = useState(false);
+
+  // Notification access is granted in system Settings, so re-check whenever the app returns to the foreground.
+  useEffect(() => {
+    const check = () => setTcAccess(isNotificationAccessGranted());
+    check();
+    const sub = AppState.addEventListener('change', (state) => { if (state === 'active') check(); });
+    return () => sub.remove();
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -26,6 +36,9 @@ export function SmsStagingStatusSection({ userId, colors, refreshKey }: { userId
 
   return <View style={[styles.box, { borderBottomColor: colors.border }]}>
     <Text style={[styles.title, { color: colors.text }]}>Bank SMS processing</Text>
+    {isSmsDetectionAvailable() && (tcAccess
+      ? <Text style={[styles.caption, { color: colors.muted }]}>Truecaller alerts: on. A payment seen by both SMS and Truecaller is recorded once.</Text>
+      : <Pressable onPress={() => openNotificationAccessSettings()}><Text style={[styles.caption, { color: colors.muted }]}>Truecaller alerts: off. Tap to allow Notification access for Velnora.</Text></Pressable>)}
     {status.isEmpty
       ? <Text style={[styles.caption, { color: colors.muted }]}>No SMS need attention.</Text>
       : <>

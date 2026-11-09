@@ -5,14 +5,19 @@ import {
   type SmsReceivedPayload,
   DEFAULT_SMS_RULE,
 } from '../../transactionParser.ts';
-import { addSmsTransaction, initTransactionService } from './transactionService.ts';
-import type { Session, TransactionEntity } from '../db/types.ts';
+import { ingestDetectedTransaction } from './transactionService.ts';
+import type { DetectionSource, Session, TransactionEntity } from '../db/types.ts';
 
 export interface SmsProcessResult {
   success: boolean;
   action: 'saved' | 'duplicate_ignored' | 'unsupported_or_invalid' | 'held' | 'error';
   transaction?: TransactionEntity;
   reason?: string;
+}
+
+function notificationSenderLabel(title: string): string {
+  const cleaned = title.replace(/[^A-Za-z0-9 -]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 30).trim();
+  return cleaned.length >= 4 ? cleaned : 'TRUECALLER';
 }
 
 /**
@@ -56,7 +61,12 @@ export async function processIncomingSms(
   }
 
   // 2. Parse using the existing domain parser (preserving recognition rules)
-  const parsed: ParsedSmsTransaction | null = parseSmsTransaction(event, rules);
+  // A Truecaller notification title is free text ("Axis Bank Ltd."), not a short sender id: normalise it so sender-id
+  // rules apply. Whether the body is actually a transaction is decided by the parser, not the title.
+  const parseInput = event.source === 'truecaller_notification'
+    ? { ...event, sender: notificationSenderLabel(event.sender) }
+    : event;
+  const parsed: ParsedSmsTransaction | null = parseSmsTransaction(parseInput, rules);
   if (!parsed) {
     return {
       success: false,
@@ -101,44 +111,24 @@ export async function processIncomingSms(
   }
 
   try {
-    const { transactionRepository } = await initTransactionService();
-
-    // 4. Duplicate prevention check
-    if (parsed.referenceId?.trim()) {
-      const existingRef = await transactionRepository.findByReferenceId(parsed.referenceId.trim(), ownerId);
-      if (existingRef) {
-        return {
-          success: true,
-          action: 'duplicate_ignored',
-          transaction: existingRef,
-          reason: `Duplicate transaction with reference ID ${parsed.referenceId} already exists`,
-        };
-      }
+    // 4+5. One atomic, idempotent ingest: duplicate detection (reference -> fingerprint -> cross-source event key ->
+    // conservative cross-source proximity match) and the insert happen inside a single SQLite transaction, so SMS and
+    // Truecaller events racing each other, retries and restarts can never produce two rows.
+    const source: DetectionSource = event.source ?? 'sms';
+    const outcome = await ingestDetectedTransaction(
+      parsed,
+      { source, detectedAt: event.receivedAt || Date.now(), senderLabel: event.sender },
+      session,
+    );
+    if (!outcome.created) {
+      return {
+        success: true,
+        action: 'duplicate_ignored',
+        transaction: outcome.transaction,
+        reason: `Already recorded (matched by ${outcome.matchedBy}); source '${source}' ${outcome.newSource ? 'added' : 'already known'}`,
+      };
     }
-
-    if (parsed.fingerprint?.trim()) {
-      const existingFp = await transactionRepository.findByFingerprint(parsed.fingerprint.trim(), ownerId);
-      if (existingFp) {
-        // Only treat as duplicate if incoming has no reference_id, or existing has matching/empty reference_id
-        if (!parsed.referenceId?.trim() || !existingFp.reference_id || parsed.referenceId.trim() === existingFp.reference_id) {
-          return {
-            success: true,
-            action: 'duplicate_ignored',
-            transaction: existingFp,
-            reason: `Duplicate transaction matching fingerprint already exists`,
-          };
-        }
-      }
-    }
-
-    // 5. Save through transaction service (atomic SQLite transaction insertion & sync_queue enqueue)
-    const saved = await addSmsTransaction(parsed, session);
-
-    return {
-      success: true,
-      action: 'saved',
-      transaction: saved,
-    };
+    return { success: true, action: 'saved', transaction: outcome.transaction };
   } catch (err) {
     const errorMsg = err instanceof Error ? err.message : String(err);
     console.warn('Failed to process incoming SMS (event retained for retry)');

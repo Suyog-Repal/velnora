@@ -14,7 +14,7 @@ import android.database.sqlite.SQLiteOpenHelper
  * Never log sender/body/amount here.
  */
 class VelnoraSmsStagingStore private constructor(context: Context) :
-  SQLiteOpenHelper(context.applicationContext, "velnora_sms_staging.db", null, 1) {
+  SQLiteOpenHelper(context.applicationContext, "velnora_sms_staging.db", null, 3) {
 
   override fun onCreate(db: SQLiteDatabase) {
     db.execSQL(
@@ -32,7 +32,10 @@ class VelnoraSmsStagingStore private constructor(context: Context) :
         lease_until INTEGER NOT NULL DEFAULT 0,
         last_error TEXT,
         created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL
+        updated_at INTEGER NOT NULL,
+        source TEXT NOT NULL DEFAULT 'sms',
+        content_hash TEXT,
+        source_app TEXT
       )""",
     )
     db.execSQL("CREATE INDEX idx_sms_staging_owner_state ON sms_staging(owner_user_id, state)")
@@ -40,16 +43,51 @@ class VelnoraSmsStagingStore private constructor(context: Context) :
   }
 
   override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-    // Forward-only; v1 is the first version.
+    // Forward-only.
+    if (oldVersion < 2) {
+      // v2: events can come from the Truecaller notification listener as well as the SMS receiver.
+      db.execSQL("ALTER TABLE sms_staging ADD COLUMN source TEXT NOT NULL DEFAULT 'sms'")
+      db.execSQL("ALTER TABLE sms_staging ADD COLUMN content_hash TEXT")
+    }
+    if (oldVersion < 3) {
+      // v3: payment-app notifications record which app posted them.
+      db.execSQL("ALTER TABLE sms_staging ADD COLUMN source_app TEXT")
+    }
   }
 
   /** Returns the new row id, or -1 if this broadcast was already staged (durable dedupe). */
   @Synchronized
   fun stage(sender: String, body: String, receivedAt: Long, partCount: Int): Long {
+    return stageInternal("sms", "$sender:$receivedAt:$partCount", sender, body, receivedAt, partCount, null, null)
+  }
+
+  /**
+   * Stages an app notification. Returns -1 when it is a replay (same notification key + post time, e.g. the
+   * listener reconnecting and re-delivering active notifications) or a repeat/update of text already staged for the
+   * same notification key within [REPEAT_WINDOW_MS] (the app re-posting or updating an existing notification).
+   */
+  @Synchronized
+  fun stageNotification(source: String, notificationKey: String, sender: String, body: String, postTime: Long, sourceApp: String): Long {
+    val db = writableDatabase
+    val hash = sha256(body)
+    val repeated = db.rawQuery(
+      "SELECT 1 FROM sms_staging WHERE source = ? AND content_hash = ? AND dedupe_key LIKE ? AND received_at >= ? LIMIT 1",
+      arrayOf(source, hash, "tc:" + notificationKey + ":%", (postTime - REPEAT_WINDOW_MS).toString()),
+    ).use { it.moveToFirst() }
+    if (repeated) return -1
+    return stageInternal(source, "tc:$notificationKey:$postTime:$hash", sender, body, postTime, 1, hash, sourceApp)
+  }
+
+  private fun stageInternal(
+    source: String, dedupeKey: String, sender: String, body: String, receivedAt: Long, partCount: Int, contentHash: String?, sourceApp: String?,
+  ): Long {
     val db = writableDatabase
     val now = System.currentTimeMillis()
     val values = ContentValues().apply {
-      put("dedupe_key", "$sender:$receivedAt:$partCount")
+      put("dedupe_key", dedupeKey)
+      put("source", source)
+      put("content_hash", contentHash)
+      put("source_app", sourceApp)
       put("sender", sender)
       put("body", body)
       put("received_at", receivedAt)
@@ -100,7 +138,7 @@ class VelnoraSmsStagingStore private constructor(context: Context) :
         arrayOf<Any?>(now, *ownerArgs, now, now, maxAttempts),
       )
       db.rawQuery(
-        "SELECT id, sender, body, received_at, part_count, attempts FROM sms_staging WHERE $dueClause ORDER BY received_at ASC LIMIT ?",
+        "SELECT id, sender, body, received_at, part_count, attempts, source, source_app FROM sms_staging WHERE $dueClause ORDER BY received_at ASC LIMIT ?",
         arrayOf(*ownerArgs, now.toString(), now.toString(), limit.toString()),
       ).use { c ->
         while (c.moveToNext()) {
@@ -112,6 +150,8 @@ class VelnoraSmsStagingStore private constructor(context: Context) :
               "receivedAt" to c.getLong(3),
               "partCount" to c.getInt(4),
               "attempts" to c.getInt(5) + 1,
+              "source" to c.getString(6),
+              "sourceApp" to c.getString(7),
             ),
           )
         }
@@ -193,6 +233,12 @@ class VelnoraSmsStagingStore private constructor(context: Context) :
   }
 
   companion object {
+    const val REPEAT_WINDOW_MS = 2L * 60 * 1000
+
+    private fun sha256(text: String): String =
+      java.security.MessageDigest.getInstance("SHA-256").digest(text.toByteArray(Charsets.UTF_8))
+        .joinToString("") { "%02x".format(it) }
+
     @Volatile private var instance: VelnoraSmsStagingStore? = null
     fun get(context: Context): VelnoraSmsStagingStore =
       instance ?: synchronized(this) {

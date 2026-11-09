@@ -1,16 +1,19 @@
 import { StatusBar } from 'expo-status-bar';
-import { Alert, Animated, AppState, Easing, Keyboard, KeyboardAvoidingView, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Alert, Animated, AppState, Easing, Keyboard, KeyboardAvoidingView, Linking, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View, useWindowDimensions } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { clearSession, loadSession, login, logout, refreshSession, register, requestPasswordReset, saveSession, type Session } from './auth';
 import { restoreSession } from './src/services/sessionRestore';
 import { getGuestDataSummary, importGuestData, isGuestModeChosen, setGuestModeChosen } from './src/services/guestModeService';
-import { addSmsStagedListener, configureSupportedSenderPatterns } from './sms';
+import { addSmsStagedListener, configureSupportedSenderPatterns, getNativeReviewNotifier } from './sms';
+import { REVIEW_SETTLE_MS, cancelReviewNotification, clearReviewNotifications, runReviewPass, setReviewNotifierPort } from './src/services/reviewNotifications';
+import { createReviewLinkRouter, resolveReviewTarget, type ReviewLink } from './src/services/reviewLinks';
 import { clearSmsOwner, drainNativeStagedSms, recordSmsOwner } from './src/services/smsStagingService';
 import { LocalDataSection } from './src/components/LocalDataSection';
 import { SmsStagingStatusSection } from './src/components/SmsStagingStatusSection';
 import { DEFAULT_SMS_RULE, parseSmsTransaction } from './transactionParser';
-import { applyAccent, palette, useAccent, useCurrency, useResolvedScheme, useThemeMode, type ThemeMode } from './theme';
+import { type } from './typography';
+import { applyAccent, applyScheme, elevation, radius, tint, palette, useAccent, useCurrency, useResolvedScheme, useThemeMode, type ThemeMode } from './theme';
 import { ProfileView } from './src/screens/ProfileView';
 import { PeopleView } from './src/screens/PeopleView';
 import { findOpenForPerson, outstandingPaise, recordPayment } from './src/services/expectedPaymentService';
@@ -34,16 +37,18 @@ import { expoReceiptFs, expoReceiptUploader } from './src/services/receiptFiles'
 import { triggerSync } from './src/services/syncEngine';
 import { API_URL } from './auth';
 import { Chip, Input, Sheet, TypeToggle, currencySymbol, readableOn, useOnline } from './src/ui/common';
-import { EMPTY_CASH_FLOW, getCashFlowSummary, type CashFlowSummary } from './src/services/cashFlowService';
+import { EMPTY_CASH_FLOW, EMPTY_LEDGER_HEALTH, getCashFlowSummary, getLedgerHealth, type CashFlowSummary, type LedgerHealth } from './src/services/cashFlowService';
 import { Splash } from './src/ui/Splash';
 import { VelnoraLogo } from './src/ui/VelnoraLogo';
-import { SmsPermissionPrompt } from './src/components/SmsPermissionPrompt';
+import { PermissionSetup } from './src/components/PermissionSetup';
+import { AccountsSheet, CompleteTransactionSheet, ReviewSheet, StatementImportSheet } from './src/screens/LedgerSheets';
 import { DateField } from './src/ui/CalendarDatePicker';
 import { TimeField } from './src/ui/TimePicker';
 import { ToastHost, notices, showToast } from './src/ui/Toast';
 import { useGreeting } from './src/ui/useGreeting';
 import { localHm, localYmd } from './src/services/dateUtils';
 import { parseLocalDateTime } from './src/services/transactionDetails';
+import { SpendingOverview } from './src/screens/SpendingOverview';
 import { formatAmount, formatMinor, setActiveCurrency } from './src/ui/currency';
 import { TransactionsView } from './src/screens/TransactionsView';
 import { TransactionSheet } from './src/screens/TransactionSheet';
@@ -74,7 +79,7 @@ function money(value: number) { return formatAmount(value); }
 export default function App() {
   // The SMS permission explanation waits until the splash has finished so the two never overlap.
   const [splashDone, setSplashDone] = useState(false);
-  return <View style={{ flex: 1 }}><AppInner /><Splash onFinish={() => setSplashDone(true)} /><SmsPermissionPrompt enabled={splashDone} /></View>;
+  return <View style={{ flex: 1 }}><AppInner /><Splash onFinish={() => setSplashDone(true)} /><PermissionSetup enabled={splashDone} /></View>;
 }
 
 function AppInner() {
@@ -103,6 +108,11 @@ function AppInner() {
   const savingRef = useRef(false); // blocks a second tap before the `saving` state re-renders
   const [amountFocused, setAmountFocused] = useState(false);
   const [cashFlow, setCashFlow] = useState<CashFlowSummary>(EMPTY_CASH_FLOW);
+  const [ledgerHealth, setLedgerHealth] = useState<LedgerHealth>(EMPTY_LEDGER_HEALTH);
+  const [showReview, setShowReview] = useState(false);
+  const [reviewTxId, setReviewTxId] = useState<string | null>(null);
+  const [showAccounts, setShowAccounts] = useState(false);
+  const [showImport, setShowImport] = useState(false);
   const [smsStatusTick, setSmsStatusTick] = useState(0);
   const [guestMode, setGuestMode] = useState(false);
   const [showAuth, setShowAuth] = useState(false);
@@ -149,9 +159,10 @@ function AppInner() {
   const [currency, setCurrency] = useCurrency(setActiveCurrency);
   const scheme = useResolvedScheme(mode);
   // The accent colour is baked into StyleSheet objects: rebuild them whenever the accent changes (before children render).
-  if (stylesAccent !== accent) { applyAccent(accent); styles = buildStyles(); stylesAccent = accent; }
+  if (stylesAccent !== `${accent}-${scheme}`) { applyAccent(accent); applyScheme(scheme === 'dark'); styles = buildStyles(); stylesAccent = `${accent}-${scheme}`; }
 
   const dark = scheme === 'dark';
+  const narrow = useWindowDimensions().width < 360; // small phones: tighter gutters so amounts keep room
   const colors = dark ? { canvas: palette.darkCanvas, card: palette.darkCard, border: palette.darkBorder, text: palette.darkText, muted: palette.darkMuted } : { canvas: palette.canvas, card: palette.card, border: palette.border, text: palette.ink, muted: palette.muted };
   const contacts = useMemo(() => {
     const map = new Map<string, Contact>();
@@ -171,14 +182,17 @@ function AppInner() {
   // Restore the stored session without destroying it on a transient failure (offline, 5xx).
   // Only an explicit server rejection of the refresh token ends the session; local data is never touched.
   useEffect(() => {
-    loadSession().then(async (stored) => {
-      if (!stored) { setAuthReady(true); return; }
-      try {
-        const result = await restoreSession(stored, refreshSession);
+    // The first screen comes from local data at once; the refresh runs behind it, so a slow or sleeping server never delays launch.
+    loadSession().then((stored) => {
+      if (stored) setSession(stored);
+      setAuthReady(true);
+      if (!stored) return;
+      void restoreSession(stored, refreshSession).then(async (result) => {
         if (result.status === 'expired') { await clearSession(); setAuthNotice('Your session has ended. Sign in again; your data on this device is preserved.'); }
-        setSession(result.session);
+        // Only apply this to the session it was started for (the person may have signed out meanwhile).
+        setSession((current) => (current?.refresh_token === stored.refresh_token ? result.session : current));
         setSessionStale(result.status === 'offline');
-      } finally { setAuthReady(true); }
+      });
     }).catch(() => setAuthReady(true));
   }, []);
 
@@ -223,7 +237,28 @@ function AppInner() {
     setTransactions(stored.map(toUiTransaction));
     setCatViews(await listCategories(getServiceDb(), owner));
     setDataTick((n) => n + 1);
+    // Also covers changes that arrived by sync, e.g. resolved on another device.
+    void runReviewPass(getServiceDb(), owner).catch(() => undefined);
   };
+
+  // Tapping a review notification. Links are held until the database and session are ready (cold start).
+  useEffect(() => { setReviewNotifierPort(getNativeReviewNotifier()); }, []);
+  const handleReviewLink = useRef<(link: ReviewLink) => void>(() => undefined);
+  handleReviewLink.current = (link) => {
+    if (link.kind === 'queue') { setShowReview(true); return; }
+    void resolveReviewTarget(getServiceDb(), scope, link.id).then((target) => {
+      if (target.status === 'missing') { cancelReviewNotification(link.id); showToast('This transaction is no longer available.', 'info', 'review-missing'); return; }
+      if (target.status === 'resolved') showToast('This transaction is already complete.', 'info', 'review-resolved');
+      setReviewTxId(link.id);
+    }).catch(() => undefined);
+  };
+  const reviewRouter = useRef(createReviewLinkRouter((link) => handleReviewLink.current(link))).current;
+  useEffect(() => {
+    void Linking.getInitialURL().then((url) => reviewRouter.receive(url)).catch(() => undefined);
+    const sub = Linking.addEventListener('url', (event) => reviewRouter.receive(event.url));
+    return () => sub.remove();
+  }, [reviewRouter]);
+  useEffect(() => { reviewRouter.setReady(authReady && dbReady && (!!session || inGuest)); }, [reviewRouter, authReady, dbReady, session, inGuest]);
   useEffect(() => {
     if (!dbReady) return;
     let live = true;
@@ -239,6 +274,7 @@ function AppInner() {
     let db;
     try { db = getServiceDb(); } catch { return; }
     getCashFlowSummary(db, scope).then((s) => { if (live) setCashFlow(s); }).catch(() => undefined);
+    getLedgerHealth(db, scope).then((h) => { if (live) setLedgerHealth(h); }).catch(() => undefined);
     return () => { live = false; };
   }, [dbReady, scope, transactions, dataTick]);
 
@@ -280,12 +316,18 @@ function AppInner() {
     configureSupportedSenderPatterns(smsRules.map((rule) => rule.senderPattern));
     if (!dbReady || (!session && !inGuest)) return;
     let active = true;
-    const drain = async () => {
+    let settleTimer: ReturnType<typeof setTimeout> | null = null;
+    const drain = async (returnedToApp = false) => {
       try {
         const summary = await drainNativeStagedSms(session, smsRules);
+        // A background task may have saved payments while the app was away, so coming back always refreshes.
+        if (active && summary && (summary.saved > 0 || summary.duplicates > 0) || (active && returnedToApp)) await reloadData();
+        if (active && summary && summary.processed > 0) {
+          if (settleTimer) clearTimeout(settleTimer);
+          settleTimer = setTimeout(() => { void reloadData().catch(() => undefined); }, REVIEW_SETTLE_MS + 500); // lets the second source arrive first
+        }
         if (active && summary && summary.saved > 0) {
-          await reloadData(); // reloads this scope's transactions and bumps dataTick → Home totals, analytics, budgets
-          if (active) showToast(`${summary.saved} bank transaction${summary.saved === 1 ? '' : 's'} added from SMS`, 'success', 'sms-detected');
+          if (active) showToast(`${summary.saved} bank transaction${summary.saved === 1 ? '' : 's'} detected`, 'success', 'sms-detected');
         }
       } catch {
         console.warn('Staged SMS drain failed; events remain staged for retry');
@@ -295,10 +337,10 @@ function AppInner() {
     };
     // Signed in: stamp new SMS with this account. Guest: clear the stamp so new SMS belong to the guest scope.
     const stamped = session ? recordSmsOwner(session.user.id) : clearSmsOwner();
-    void stamped.then(drain, drain);
+    void stamped.then(() => drain(), () => drain());
     const staged = addSmsStagedListener(() => { void drain(); });
-    const appState = AppState.addEventListener('change', (state) => { if (state === 'active') void drain(); });
-    return () => { active = false; staged?.remove(); appState.remove(); };
+    const appState = AppState.addEventListener('change', (state) => { if (state === 'active') void drain(true); });
+    return () => { active = false; if (settleTimer) clearTimeout(settleTimer); staged?.remove(); appState.remove(); };
   }, [session, inGuest, dbReady]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const submitAuth = async (screen: 'signup' | 'signin') => {
@@ -409,24 +451,24 @@ function AppInner() {
   if (!session && !inGuest) return <AuthScreens onGuest={continueAsGuest} screen={authScreen} setScreen={setAuthScreen} fullName={fullName} setFullName={setFullName} email={email} setEmail={setEmail} password={password} setPassword={setPassword} confirmPassword={confirmPassword} setConfirmPassword={setConfirmPassword} showPassword={showPassword} setShowPassword={setShowPassword} termsAccepted={termsAccepted} setTermsAccepted={setTermsAccepted} busy={authBusy} error={authError} notice={authNotice} onSubmit={submitAuth} onForgot={submitForgot} colors={colors} />;
 
   return <SafeAreaView style={[styles.safe, { backgroundColor: colors.canvas }]}><StatusBar style={dark ? 'light' : 'dark'} /><View style={styles.shell}>
-    <ScrollView contentContainerStyle={styles.content}>
-      <View style={styles.header}><View><Text style={[styles.overline, { color: palette.emerald }]}>VELNORA</Text><Text style={[styles.title, { color: colors.text }]}>{tab === 'home' ? `${greeting}${session ? `, ${session.user.full_name.split(' ')[0]}` : ''}` : tab.charAt(0).toUpperCase() + tab.slice(1)}</Text></View><Pressable style={[styles.iconButton, { backgroundColor: colors.card, borderColor: colors.border }]} onPress={() => changeTab('profile')}><Text style={[styles.avatarText, { color: colors.text }]}>{session ? session.user.full_name.charAt(0).toUpperCase() : 'G'}</Text></Pressable></View>
+    <ScrollView contentContainerStyle={[styles.content, narrow && { padding: 16, paddingBottom: 150 }]} keyboardShouldPersistTaps="handled">
+      <View style={styles.header}><View><Text style={[styles.overline, { color: palette.accentText }]}>VELNORA</Text><Text style={[styles.title, { color: colors.text }]}>{tab === 'home' ? `${greeting}${session ? `, ${session.user.full_name.split(' ')[0]}` : ''}` : tab.charAt(0).toUpperCase() + tab.slice(1)}</Text></View><Pressable style={[styles.iconButton, { backgroundColor: colors.card, borderColor: colors.border }]} onPress={() => changeTab('profile')}><Text style={[styles.avatarText, { color: colors.text }]}>{session ? session.user.full_name.charAt(0).toUpperCase() : 'G'}</Text></Pressable></View>
       {!session && <Text style={[styles.caption, { color: colors.muted, marginBottom: 12 }]}>Guest mode · data stays on this device and is not synced.</Text>}
       {importNotice ? <Text style={styles.noticeText}>{importNotice}</Text> : null}
       {session && sessionStale ? <Text style={[styles.caption, { color: colors.muted, marginBottom: 12 }]}>Offline · working from local data; sync resumes when you reconnect.</Text> : null}
       <Animated.View style={{ opacity: enter, transform: [{ translateX: enter.interpolate({ inputRange: [0, 1], outputRange: [slideDir.current * 28, 0] }) }] }}>
-      {tab === 'home' && <HomeScreen onOpen={setOpenTx} transactions={transactions} cashFlow={cashFlow} colors={colors} onAddIncome={() => openForm('income')} onAddExpense={() => openForm('expense')} onViewAll={() => changeTab('transactions')} onAnalytics={() => changeTab('analytics')} />}
+      {tab === 'home' && <HomeScreen scope={scope} onOpen={setOpenTx} transactions={transactions} cashFlow={cashFlow} health={ledgerHealth} onReview={() => setShowReview(true)} colors={colors} onAddIncome={() => openForm('income')} onAddExpense={() => openForm('expense')} onViewAll={() => changeTab('transactions')} onAnalytics={() => changeTab('analytics')} />}
       {tab === 'transactions' && <TransactionsView key={drillCategory ?? 'all'} transactions={transactions} categories={catViews} colors={colors} loading={txLoading} online={online} onOpen={setOpenTx} onAdd={() => openForm('expense')} initialCategory={drillCategory} />}
       {tab === 'analytics' && <AnalyticsView scope={scope} colors={colors} refreshKey={dataTick} onDrill={(c) => { setDrillCategory(c); changeTab('transactions'); }} />}
       {tab === 'budgets' && <BudgetsView scope={scope} categories={catViews} colors={colors} refreshKey={dataTick} />}
             {tab === 'people' && <PeopleView transactions={transactions} categories={catViews} session={session} colors={colors} refreshKey={dataTick} onOpenTx={setOpenTx} onChanged={() => void reloadData()} onAddTransaction={() => openForm('expense')} />}
       {tab === 'profile' && <ProfileView session={session} colors={colors} mode={mode} accent={accent} transactions={transactions} online={online} onOpenSettings={() => setShowSettings(true)} onOpenCurrency={() => setShowCurrency(true)} currencyLabel={(() => { const c = CURRENCIES.find((x) => x.code === currency); return c ? `${c.name} (${c.symbol.trim()})` : currency; })()}
-        onOpenCategories={() => setShowCats(true)} onOpenAliases={() => setShowAliases(true)} onSignIn={() => openAuth('signin')} onCreate={() => openAuth('signup')}
-        onLogout={async () => { if (!session) return; await logout(session); setSession(null); setSessionStale(false); setTransactions([]); setAuthScreen('welcome'); setShowAuth(true); }}
+        onOpenCategories={() => setShowCats(true)} onOpenAliases={() => setShowAliases(true)} reviewCount={ledgerHealth.needsReviewCount} onOpenReview={() => setShowReview(true)} onOpenAccounts={() => setShowAccounts(true)} onOpenImport={() => setShowImport(true)} onSignIn={() => openAuth('signin')} onCreate={() => openAuth('signup')}
+        onLogout={async () => { if (!session) return; await clearReviewNotifications(getServiceDb(), session.user.id).catch(() => undefined); await logout(session); setSession(null); setSessionStale(false); setTransactions([]); setAuthScreen('welcome'); setShowAuth(true); }}
         accountSections={session ? <><LocalDataSection userId={session.user.id} colors={colors} onDeleted={() => { setTransactions([]); setSmsStatusTick((n) => n + 1); }} /><SmsStagingStatusSection userId={session.user.id} colors={colors} refreshKey={smsStatusTick} /></> : null} />}
       </Animated.View>
     </ScrollView>
-    {tab !== 'profile' && <Pressable style={({ pressed }) => [styles.fab, pressed && { opacity: 0.9, transform: [{ scale: 0.97 }] }]} onPress={() => openForm('expense')} accessibilityRole="button" accessibilityLabel="Add transaction"><Plus color="#FFFFFF" size={28} strokeWidth={2.5} /></Pressable>}
+    {tab !== 'profile' && <Pressable style={({ pressed }) => [styles.fab, pressed && { opacity: 0.9, transform: [{ scale: 0.97 }] }]} onPress={() => openForm('expense')} accessibilityRole="button" accessibilityLabel="Add transaction"><Plus color="#FFFFFF" size={28} strokeWidth={2} /></Pressable>}
     <ToastHost bottom={156} />
     <BottomNav tab={tab} setTab={changeTab} colors={colors} dark={dark} />
   </View>
@@ -436,18 +478,22 @@ function AppInner() {
     <Pressable disabled={importBusy} style={styles.primaryButton} onPress={() => void confirmImport()}><Text style={styles.primaryButtonText}>{importBusy ? 'Importing...' : 'Import and sync'}</Text></Pressable>
     <Pressable disabled={importBusy} onPress={() => setImportPrompt(null)}><Text style={[styles.link, { textAlign: 'center', marginTop: 16 }]}>Not now</Text></Pressable>
   </View></View></Modal>
+  <ReviewSheet visible={showReview} session={session} colors={colors} onClose={() => setShowReview(false)} onComplete={setReviewTxId} />
+  <CompleteTransactionSheet transactionId={reviewTxId} session={session} categories={catViews} colors={colors} onClose={() => setReviewTxId(null)} onChanged={() => void reloadData()} onEdit={setOpenTx} />
+  <AccountsSheet visible={showAccounts} scope={scope} colors={colors} onClose={() => setShowAccounts(false)} onChanged={() => void reloadData()} />
+  <StatementImportSheet visible={showImport} scope={scope} colors={colors} onClose={() => setShowImport(false)} onImported={() => { void reloadData(); if (session) void syncPendingTransactions(session); }} />
   <Sheet visible={showForm} onClose={closeForm} title="Record transaction" colors={colors} footer={<>
     {formError ? <Text style={[styles.errorText, { marginTop: 0, marginBottom: 8 }]} accessibilityLiveRegion="polite">{formError}</Text> : null}
     <Pressable disabled={saving} onPress={() => void addTransaction()} accessibilityRole="button" accessibilityState={{ disabled: saving, busy: saving }}
       style={({ pressed }) => [styles.primaryButton, { marginTop: 0, opacity: saving ? 0.6 : pressed ? 0.85 : 1 }]}>
-      <Text style={[styles.primaryButtonText, { color: readableOn(palette.emerald) }]}>{saving ? 'Saving…' : direction === 'income' ? 'Save income' : 'Save expense'}</Text>
+      <Text style={[styles.primaryButtonText, { color: readableOn(palette.accentText) }]}>{saving ? 'Saving…' : direction === 'income' ? 'Save income' : 'Save expense'}</Text>
     </Pressable>
   </>}>
     <Text style={[styles.label, { color: colors.muted, marginTop: 0 }]}>TYPE</Text>
     <TypeToggle value={direction} onChange={chooseDirection} colors={colors} />
     <Text style={[styles.label, { color: colors.muted }]}>AMOUNT</Text>
     <View style={[styles.amountBox, { backgroundColor: colors.card, borderColor: amountFocused ? palette.emerald : colors.border, borderWidth: amountFocused ? 1.5 : 1 }]}>
-      <Text style={[styles.amountSymbol, { color: direction === 'income' ? palette.emerald : palette.danger }]}>{currencySymbol()}</Text>
+      <Text style={[styles.amountSymbol, { color: direction === 'income' ? palette.accentText : palette.expenseText }]}>{currencySymbol()}</Text>
       <TextInput value={amount} onChangeText={(t) => { setAmount(t); if (formError) setFormError(''); }} keyboardType="decimal-pad" returnKeyType="done" onSubmitEditing={() => Keyboard.dismiss()}
         onFocus={() => setAmountFocused(true)} onBlur={() => setAmountFocused(false)} placeholder="0.00" placeholderTextColor={colors.muted} accessibilityLabel="Amount"
         style={[styles.amountInput, { color: colors.text }]} />
@@ -476,43 +522,34 @@ function AppInner() {
   </SafeAreaView>;
 }
 
-function HomeScreen({ onOpen, transactions, cashFlow, colors, onAddIncome, onAddExpense, onViewAll, onAnalytics }: { onOpen: (tx: TransactionEntity) => void; transactions: Transaction[]; cashFlow: CashFlowSummary; colors: Colors; onAddIncome: () => void; onAddExpense: () => void; onViewAll: () => void; onAnalytics: () => void }) {
-  const { monthIncomePaise: income, monthExpensePaise: expense, netPaise: net, balancePaise: balance, expenseRatioPercent: ratio } = cashFlow;
-  const monthName = new Date().toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
-  const signed = (paise: number) => `${paise > 0 ? '+' : ''}${formatMinor(paise)}`;
-  const barColor = ratio === null ? palette.danger : ratio > 100 ? palette.danger : ratio >= 80 ? palette.warning : palette.emerald;
-  const barWidth = ratio === null ? (expense > 0 ? 100 : 0) : Math.min(100, ratio);
-  const caption = income === 0 && expense === 0 ? `No income or expenses recorded in ${monthName} yet.`
-    : ratio === null ? `No income recorded this month · ${formatMinor(expense)} spent so far.`
-    : net < 0 ? `Expenses are ${ratio}% of this month's income · ${formatMinor(-net)} more spent than earned.`
-    : `Expenses are ${ratio}% of this month's income · ${formatMinor(net)} left over.`;
+function HomeScreen({ scope, onOpen, transactions, cashFlow, health, onReview, colors, onAddIncome, onAddExpense, onViewAll, onAnalytics }: { scope: string | null; onOpen: (tx: TransactionEntity) => void; transactions: Transaction[]; cashFlow: CashFlowSummary; health: LedgerHealth; onReview: () => void; colors: Colors; onAddIncome: () => void; onAddExpense: () => void; onViewAll: () => void; onAnalytics: () => void }) {
+  const { monthIncomePaise: income, monthExpensePaise: expense, balancePaise: balance } = cashFlow;
   return <>
     <View style={[styles.heroCard, { backgroundColor: palette.navy }]}>
       <Text style={styles.heroLabel}>RECORDED BALANCE</Text>
-      <Text style={[styles.heroValue, balance < 0 && { color: '#FF9AA3' }]} numberOfLines={1} adjustsFontSizeToFit>{formatMinor(balance)}</Text>
+      <Text style={[styles.heroValue, balance < 0 && { color: palette.expenseOnNavy }]} numberOfLines={1} adjustsFontSizeToFit>{formatMinor(balance)}</Text>
       <Text style={styles.heroHint}>Based on transactions recorded in Velnora. Not a verified bank balance.</Text>
       <View style={styles.metricRow}>
-        <Metric label="INCOME THIS MONTH" value={formatMinor(income)} color={palette.emerald} icon={<ArrowDownLeft color={palette.emerald} size={14} strokeWidth={2.5} />} />
+        <Metric label="INCOME THIS MONTH" value={formatMinor(income)} color={palette.emerald} icon={<ArrowDownLeft color={palette.emerald} size={14} strokeWidth={2} />} />
         <View style={styles.metricDivider} />
-        <Metric label="EXPENSES THIS MONTH" value={formatMinor(expense)} color="#FF9AA3" icon={<ArrowUpRight color="#FF9AA3" size={14} strokeWidth={2.5} />} />
+        <Metric label="EXPENSES THIS MONTH" value={formatMinor(expense)} color={palette.expenseOnNavy} icon={<ArrowUpRight color={palette.expenseOnNavy} size={14} strokeWidth={2} />} />
       </View>
+    </View>
+    <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border, marginTop: 14 }]}>
+      <Text style={[styles.cardTitle, { color: colors.text }]}>Today</Text>
+      <Text style={[styles.caption, { color: colors.muted, marginTop: 4 }]}>In {formatMinor(health.todayIncomePaise)} · Out {formatMinor(health.todayExpensePaise)} · Net {formatMinor(health.todayNetPaise)}</Text>
+      <Text style={[styles.caption, { color: colors.muted, marginTop: 4 }]}>{health.totalCount} transactions: {health.verifiedCount} verified, {health.detectedCount} detected, {health.needsReviewCount} to review</Text>
+      {health.monthUnverifiedExpensePaise > 0 ? <Text style={[styles.caption, { color: colors.muted, marginTop: 4 }]}>{formatMinor(health.monthUnverifiedExpensePaise)} of this month's spending is detected and not yet confirmed.</Text> : null}
+      {health.needsReviewCount > 0 ? <Pressable onPress={onReview} accessibilityRole="button" style={{ minHeight: 44, justifyContent: 'center' }}><Text style={[styles.link, { color: palette.accentText }]}>Review {health.needsReviewCount} transaction{health.needsReviewCount === 1 ? '' : 's'}</Text></Pressable> : null}
     </View>
     <SectionHeader title="Quick actions" colors={colors} />
     <View style={styles.actionRow}>
-      <ActionButton icon={<ArrowDownLeft color={palette.emerald} size={20} strokeWidth={2.5} />} tint={palette.emerald} label="Add income" hint="Salary, refunds" onPress={onAddIncome} colors={colors} />
-      <ActionButton icon={<ArrowUpRight color={palette.danger} size={20} strokeWidth={2.5} />} tint={palette.danger} label="Add expense" hint="Bills, shopping" onPress={onAddExpense} colors={colors} />
+      <ActionButton icon={<ArrowDownLeft color={palette.emerald} size={20} strokeWidth={2} />} tint={palette.emerald} label="Add income" hint="Salary, refunds" onPress={onAddIncome} colors={colors} />
+      <ActionButton icon={<ArrowUpRight color={palette.danger} size={20} strokeWidth={2} />} tint={palette.danger} label="Add expense" hint="Bills, shopping" onPress={onAddExpense} colors={colors} />
     </View>
     <SectionHeader title="Spending overview" action="Analytics" onPress={onAnalytics} colors={colors} />
-    <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
-      <View style={styles.flowHeader}><Text style={[styles.cardTitle, { color: colors.text }]}>Net monthly cash flow</Text><Text style={[styles.flowMonth, { color: colors.muted }]}>{monthName}</Text></View>
-      <Text style={[styles.flowValue, { color: net > 0 ? palette.emerald : net < 0 ? palette.danger : colors.text }]} accessibilityLabel={`Net cash flow ${signed(net)}`}>{signed(net)}</Text>
-      <View style={styles.flowSplit}>
-        <View style={styles.flowItem}><View style={[styles.flowDot, { backgroundColor: palette.emerald }]} /><Text style={[styles.flowItemLabel, { color: colors.muted }]}>Income</Text><Text style={[styles.flowItemValue, { color: colors.text }]}>{formatMinor(income)}</Text></View>
-        <View style={styles.flowItem}><View style={[styles.flowDot, { backgroundColor: palette.danger }]} /><Text style={[styles.flowItemLabel, { color: colors.muted }]}>Expenses</Text><Text style={[styles.flowItemValue, { color: colors.text }]}>{formatMinor(expense)}</Text></View>
-      </View>
-      <View style={[styles.progressTrack, { backgroundColor: colors.border }]}><View style={[styles.progressFill, { width: `${barWidth}%`, backgroundColor: barColor }]} /></View>
-      <Text style={[styles.caption, { color: colors.muted }]}>{caption}</Text>
-    </View>
+    <SpendingOverview scope={scope} refreshKey={transactions} colors={colors} transactions={transactions}
+      renderTransaction={(id) => { const item = transactions.find((t) => t.id === id); return item ? <Pressable onPress={() => onOpen(item)} accessibilityRole="button"><TransactionRow item={item} colors={colors} /></Pressable> : null; }} />
     <SectionHeader title="Recent transactions" action="See all" onPress={onViewAll} colors={colors} />
     {transactions.length ? transactions.slice(0, 5).map((item) => <Pressable key={item.id} onPress={() => onOpen(item)} accessibilityRole="button"><TransactionRow item={item} colors={colors} /></Pressable>) : <EmptyState colors={colors} onAdd={onAddExpense} />}
   </>;
@@ -532,7 +569,7 @@ function AnalyticsScreen({ transactions, categories = DEFAULT_CATEGORIES, totals
 
 function BudgetsScreen({ colors, onAdd }: { colors: Colors; onAdd: () => void }) { return <><View style={[styles.card, { backgroundColor: palette.navy, borderColor: palette.navy }]}><Target color={palette.emerald} size={28} /><Text style={styles.heroTitle}>Plan your month with intention</Text><Text style={styles.heroHint}>Create category budgets and savings goals from your real spending.</Text><Pressable style={styles.outlineButton} onPress={onAdd}><Text style={styles.outlineButtonText}>Create a budget</Text></Pressable></View><SectionHeader title="Budget utilization" colors={colors} /><View style={[styles.emptyCard, { backgroundColor: colors.card, borderColor: colors.border }]}><PiggyBank color={palette.emerald} size={28} /><Text style={[styles.emptyTitle, { color: colors.text }]}>No budgets yet</Text><Text style={[styles.caption, { color: colors.muted }]}>Your budget progress will appear here after you set a monthly allocation.</Text></View><SectionHeader title="Savings goals" colors={colors} /><View style={[styles.emptyCard, { backgroundColor: colors.card, borderColor: colors.border }]}><Text style={[styles.emptyTitle, { color: colors.text }]}>No savings goals yet</Text><Text style={[styles.caption, { color: colors.muted }]}>Set a goal to make your next milestone visible.</Text></View></>; }
 
-function PeopleScreen({ contacts, colors, onAdd }: { contacts: Contact[]; colors: Colors; onAdd: () => void }) { return <><Text style={[styles.subtitle, { color: colors.muted }]}>Track money received, money paid, and your recorded history with each person.</Text>{contacts.length ? contacts.map((contact) => <View key={contact.name} style={[styles.personRow, { borderBottomColor: colors.border }]}><View style={styles.personAvatar}><Text style={styles.personInitial}>{contact.name.charAt(0).toUpperCase()}</Text></View><View style={styles.rowBody}><Text style={[styles.rowTitle, { color: colors.text }]}>{contact.name}</Text><Text style={[styles.caption, { color: colors.muted }]}>{contact.count} transaction{contact.count === 1 ? '' : 's'} · Received {money(contact.received)}</Text></View><Text style={[styles.rowAmount, { color: palette.danger }]}>{money(contact.paid)}</Text></View>) : <EmptyState colors={colors} onAdd={onAdd} />}</>; }
+function PeopleScreen({ contacts, colors, onAdd }: { contacts: Contact[]; colors: Colors; onAdd: () => void }) { return <><Text style={[styles.subtitle, { color: colors.muted }]}>Track money received, money paid, and your recorded history with each person.</Text>{contacts.length ? contacts.map((contact) => <View key={contact.name} style={[styles.personRow, { borderBottomColor: colors.border }]}><View style={styles.personAvatar}><Text style={styles.personInitial}>{contact.name.charAt(0).toUpperCase()}</Text></View><View style={styles.rowBody}><Text style={[styles.rowTitle, { color: colors.text }]}>{contact.name}</Text><Text style={[styles.caption, { color: colors.muted }]}>{contact.count} transaction{contact.count === 1 ? '' : 's'} · Received {money(contact.received)}</Text></View><Text style={[styles.rowAmount, { color: palette.expenseText }]}>{money(contact.paid)}</Text></View>) : <EmptyState colors={colors} onAdd={onAdd} />}</>; }
 
 
 type Colors = { canvas: string; card: string; border: string; text: string; muted: string };
@@ -546,7 +583,14 @@ function ActionButton({ icon, tint, label, hint, onPress, colors }: { icon: Reac
   </Pressable>;
 }
 function SectionHeader({ title, action, onPress, colors }: { title: string; action?: string; onPress?: () => void; colors: Colors }) { return <View style={styles.sectionHeader}><Text style={[styles.sectionTitle, { color: colors.text }]}>{title}</Text>{action && <Pressable onPress={onPress}><Text style={styles.link}>{action}</Text></Pressable>}</View>; }
-function TransactionRow({ item, colors }: { item: Transaction; colors: Colors }) { const incoming = item.direction === 'income'; return <View style={[styles.transactionRow, { borderBottomColor: colors.border }]}><View style={[styles.transactionIcon, { backgroundColor: incoming ? palette.emeraldSoft : '#FCE7EA' }]}>{incoming ? <ArrowDownLeft color={palette.emerald} size={18} /> : <ArrowUpRight color={palette.danger} size={18} />}</View><View style={styles.rowBody}><Text style={[styles.rowTitle, { color: colors.text }]}>{item.counterparty}</Text><Text style={[styles.caption, { color: colors.muted }]}>{item.category} · {new Date(item.date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}</Text><Text style={[styles.sourceLabel, { color: item.source === 'sms' ? palette.emerald : colors.muted }]}>{item.source === 'sms' ? 'SMS detected' : 'Manual'}</Text></View><Text style={[styles.rowAmount, { color: incoming ? palette.emerald : palette.danger }]}>{incoming ? '+' : '-'}{money(item.amount)}</Text></View>; }
+function detectedLabel(via?: string[]): string {
+  const sms = via?.includes('sms');
+  const tc = via?.includes('truecaller_notification');
+  if (sms && tc) return 'SMS + Truecaller detected';
+  if (tc) return 'Truecaller detected';
+  return 'SMS detected';
+}
+function TransactionRow({ item, colors }: { item: Transaction; colors: Colors }) { const incoming = item.direction === 'income'; return <View style={[styles.transactionRow, { borderBottomColor: colors.border }]}><View style={[styles.transactionIcon, { backgroundColor: incoming ? tint(palette.emerald) : tint(palette.danger) }]}>{incoming ? <ArrowDownLeft color={palette.emerald} size={18} /> : <ArrowUpRight color={palette.danger} size={18} />}</View><View style={styles.rowBody}><Text style={[styles.rowTitle, { color: colors.text }]}>{item.counterparty}</Text><Text style={[styles.caption, { color: colors.muted }]}>{item.category} · {new Date(item.date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}</Text><Text style={[styles.sourceLabel, { color: item.source === 'sms' ? palette.accentText : colors.muted }]}>{item.source === 'sms' ? detectedLabel(item.detected_via) : 'Manual'}</Text></View><Text style={[styles.rowAmount, { color: incoming ? palette.accentText : palette.expenseText }]}>{incoming ? '+' : '-'}{money(item.amount)}</Text></View>; }
 function EmptyState({ colors, onAdd }: { colors: Colors; onAdd: () => void }) { return <View style={[styles.emptyCard, { backgroundColor: colors.card, borderColor: colors.border }]}><WalletCards color={palette.emerald} size={26} /><Text style={[styles.emptyTitle, { color: colors.text }]}>No transactions yet</Text><Text style={[styles.caption, { color: colors.muted }]}>Add your first income or expense to start understanding your cash flow.</Text><Pressable onPress={onAdd}><Text style={styles.link}>Add transaction</Text></Pressable></View>; }
 /** Bottom-navigation tap response: 3 dp up, 1.05x, ~200 ms in total, ease-out, no overshoot. */
 const NAV_TAP = { liftDp: 3, scale: 1.05, riseMs: 80, returnMs: 120 } as const;
@@ -571,15 +615,15 @@ function NavItem({ Icon, label, active, onPress, colors, dark }: { Icon: typeof 
     if (mounted.current && active) playPop();
     mounted.current = true;
   }, [active, on]); // eslint-disable-line react-hooks/exhaustive-deps
-  return <Pressable style={styles.navItem} onPress={() => { if (active) playPop(); onPress(); }} accessibilityRole="tab" accessibilityState={{ selected: active }} accessibilityLabel={label}>
+  return <Pressable style={styles.navItem} hitSlop={{ top: 4, bottom: 4 }} onPress={() => { if (active) playPop(); onPress(); }} accessibilityRole="tab" accessibilityState={{ selected: active }} accessibilityLabel={label}>
     <View style={styles.navPillWrap}>
       {/* Selected background: a rounded accent pill that grows in behind the active icon. */}
       <Animated.View pointerEvents="none" style={[styles.navPill, { backgroundColor: dark ? `${palette.emerald}38` : palette.emeraldSoft, opacity: on, transform: [{ scaleX: on.interpolate({ inputRange: [0, 1], outputRange: [0.5, 1] }) }] }]} />
       <Animated.View pointerEvents="none" style={{ transform: [{ translateY: pop.interpolate({ inputRange: [0, 1], outputRange: [0, -NAV_TAP.liftDp] }) }, { scale: pop.interpolate({ inputRange: [0, 1], outputRange: [1, NAV_TAP.scale] }) }] }}>
-        <Icon size={20} color={active ? palette.emerald : colors.muted} strokeWidth={active ? 2.5 : 2} />
+        <Icon size={22} color={active ? palette.emerald : colors.muted} strokeWidth={2} />
       </Animated.View>
     </View>
-    <Text style={[styles.navLabel, { color: active ? colors.text : colors.muted, fontWeight: active ? '800' : '600' }]} numberOfLines={1}>{label}</Text>
+    <Text style={[styles.navLabel, { color: active ? colors.text : colors.muted, fontWeight: active ? '600' : '500' }]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.85}>{label}</Text>
   </Pressable>;
 }
 function BottomNav({ tab, setTab, colors, dark }: { tab: Tab; setTab: (tab: Tab) => void; colors: Colors; dark: boolean }) {
@@ -599,14 +643,14 @@ function BottomNav({ tab, setTab, colors, dark }: { tab: Tab; setTab: (tab: Tab)
   </View>;
 }
 
-function AuthLoading({ colors }: { colors: Colors }) { return <SafeAreaView style={[styles.safe, { backgroundColor: colors.canvas }]}><View style={styles.loading}><Text style={[styles.brand, { color: palette.emerald }]}>VELNORA</Text></View></SafeAreaView>; }
+function AuthLoading({ colors }: { colors: Colors }) { return <SafeAreaView style={[styles.safe, { backgroundColor: colors.canvas }]}><View style={styles.loading}><Text style={[styles.brand, { color: palette.accentText }]}>VELNORA</Text></View></SafeAreaView>; }
 type AuthProps = { onGuest: () => void; screen: 'welcome' | 'signup' | 'signin' | 'forgot'; setScreen: (screen: 'welcome' | 'signup' | 'signin' | 'forgot') => void; fullName: string; setFullName: (value: string) => void; email: string; setEmail: (value: string) => void; password: string; setPassword: (value: string) => void; confirmPassword: string; setConfirmPassword: (value: string) => void; showPassword: boolean; setShowPassword: (value: boolean) => void; termsAccepted: boolean; setTermsAccepted: (value: boolean) => void; busy: boolean; error: string; notice: string; onSubmit: (screen: 'signup' | 'signin') => Promise<void>; onForgot: () => Promise<void>; colors: Colors };
 function AuthScreens(props: AuthProps) { const signup = props.screen === 'signup'; const forgot = props.screen === 'forgot'; if (props.screen === 'welcome') return <SafeAreaView style={[styles.safe, { backgroundColor: palette.navy }]}><StatusBar style="light" /><ScrollView contentContainerStyle={styles.welcome}><View style={{ marginBottom: 14 }}><VelnoraLogo size={92} /></View><Text style={styles.brand}>VELNORA</Text><Text style={styles.welcomeTitle}>Take control of your money.</Text><Text style={styles.welcomeDescription}>Track better. Budget smarter. Manage money confidently.</Text><Text style={styles.productDescriptor}>Personal Finance & Expense Tracker</Text><Pressable style={styles.primaryButton} onPress={() => props.setScreen('signup')}><Text style={styles.primaryButtonText}>Get started</Text></Pressable><Pressable style={styles.secondaryButton} onPress={() => props.setScreen('signin')}><Text style={styles.secondaryButtonText}>I already have an account</Text></Pressable><Pressable onPress={props.onGuest}><Text style={[styles.link, { textAlign: 'center', marginTop: 20 }]}>Continue without an account</Text></Pressable></ScrollView></SafeAreaView>; return <SafeAreaView style={[styles.safe, { backgroundColor: props.colors.canvas }]}><StatusBar style={props.colors.canvas === palette.darkCanvas ? 'light' : 'dark'} /><KeyboardAvoidingView style={styles.safe} behavior="padding"><ScrollView contentContainerStyle={[styles.formScreen, { paddingBottom: 160 }]} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag"><Pressable onPress={() => props.setScreen(forgot ? 'signin' : 'welcome')}><Text style={styles.link}>‹ Back</Text></Pressable><View style={{ marginTop: 28 }}><VelnoraLogo size={64} /></View><Text style={[styles.brand, { marginTop: 10 }]}>VELNORA</Text><Text style={[styles.authTitle, { color: props.colors.text }]}>{signup ? 'Create your account' : forgot ? 'Reset your password' : 'Welcome back'}</Text><Text style={[styles.subtitle, { color: props.colors.muted }]}>{signup ? 'Start building a clearer view of your finances.' : 'Sign in to continue managing your money.'}</Text>{signup && <AuthField label="FULL NAME" value={props.fullName} onChangeText={props.setFullName} placeholder="Your name" colors={props.colors} icon={<UserRound color={props.colors.muted} size={17} />} />}{<AuthField label="EMAIL" value={props.email} onChangeText={props.setEmail} placeholder="you@example.com" colors={props.colors} icon={<KeyRound color={props.colors.muted} size={17} />} />}{!forgot && <PasswordField label="PASSWORD" value={props.password} onChangeText={props.setPassword} visible={props.showPassword} toggle={() => props.setShowPassword(!props.showPassword)} colors={props.colors} />}{signup && <PasswordField label="CONFIRM PASSWORD" value={props.confirmPassword} onChangeText={props.setConfirmPassword} visible={props.showPassword} toggle={() => props.setShowPassword(!props.showPassword)} colors={props.colors} />}{signup && <Pressable style={styles.termsRow} onPress={() => props.setTermsAccepted(!props.termsAccepted)}><View style={[styles.checkbox, props.termsAccepted && styles.checkboxActive]}>{props.termsAccepted && <Text>✓</Text>}</View><Text style={[styles.caption, { color: props.colors.muted }]}>I accept the terms and privacy policy.</Text></Pressable>}{props.error ? <Text style={styles.errorText}>{props.error}</Text> : null}{props.notice ? <Text style={styles.noticeText}>{props.notice}</Text> : null}<Pressable disabled={props.busy} style={styles.primaryButton} onPress={() => forgot ? props.onForgot() : props.onSubmit(signup ? 'signup' : 'signin')}><Text style={styles.primaryButtonText}>{props.busy ? 'Please wait...' : signup ? 'Create account' : forgot ? 'Check reset options' : 'Sign in'}</Text></Pressable>{!signup && !forgot && <Pressable onPress={() => props.setScreen('forgot')}><Text style={[styles.link, { textAlign: 'center', marginTop: 18 }]}>Forgot password?</Text></Pressable>}{!forgot && <Pressable onPress={() => props.setScreen(signup ? 'signin' : 'signup')}><Text style={[styles.caption, { color: props.colors.muted, textAlign: 'center', marginTop: 22 }]}>{signup ? 'Already have an account? ' : 'New to Velnora? '}<Text style={styles.link}>{signup ? 'Sign in' : 'Create account'}</Text></Text></Pressable>}</ScrollView></KeyboardAvoidingView></SafeAreaView>; }
 function AuthField({ label, value, onChangeText, placeholder, icon, colors }: { label: string; value: string; onChangeText: (value: string) => void; placeholder: string; icon: React.ReactNode; colors: Colors }) { return <View style={styles.authField}><Text style={[styles.label, { color: colors.muted }]}>{label}</Text><View style={[styles.authInputWrap, { backgroundColor: colors.card, borderColor: colors.border }]}>{icon}<TextInput value={value} onChangeText={onChangeText} placeholder={placeholder} placeholderTextColor={colors.muted} style={[styles.inputBare, { color: colors.text }]} autoCapitalize="none" /></View></View>; }
 function PasswordField({ label, value, onChangeText, visible, toggle, colors }: { label: string; value: string; onChangeText: (value: string) => void; visible: boolean; toggle: () => void; colors: Colors }) { return <View style={styles.authField}><Text style={[styles.label, { color: colors.muted }]}>{label}</Text><View style={[styles.authInputWrap, { backgroundColor: colors.card, borderColor: colors.border }]}><LockKeyhole color={colors.muted} size={17} /><TextInput value={value} onChangeText={onChangeText} placeholder="8+ characters" placeholderTextColor={colors.muted} secureTextEntry={!visible} style={[styles.inputBare, { color: colors.text }]} /><Pressable onPress={toggle}>{visible ? <EyeOff color={colors.muted} size={18} /> : <Eye color={colors.muted} size={18} />}</Pressable></View></View>; }
 
 const buildStyles = () => StyleSheet.create({
-  safe: { flex: 1 }, shell: { flex: 1 }, content: { padding: 20, paddingBottom: 150 }, header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }, overline: { fontSize: 11, fontWeight: '800', letterSpacing: 2 }, title: { fontSize: 26, fontWeight: '800', marginTop: 6 }, iconButton: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center', borderWidth: 1 }, avatarText: { fontSize: 17, fontWeight: '800' }, heroCard: { borderRadius: 24, padding: 22, marginBottom: 24 }, heroLabel: { color: '#B9C9D7', fontSize: 10, fontWeight: '800', letterSpacing: 1.2 }, heroValue: { color: '#FFFFFF', fontSize: 38, fontWeight: '800', marginTop: 9 }, heroHint: { color: '#C8D5DF', fontSize: 12, lineHeight: 18, marginTop: 8 }, heroTitle: { color: '#FFFFFF', fontSize: 21, fontWeight: '800', marginTop: 14 }, metricRow: { flexDirection: 'row', alignItems: 'stretch', borderTopWidth: 1, borderTopColor: '#29405A', marginTop: 20, paddingTop: 16 }, metric: { flex: 1, minWidth: 0 }, metricDivider: { width: 1, backgroundColor: '#29405A', marginHorizontal: 14 }, metricLabelRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 6 }, metricLabel: { flex: 1, flexShrink: 1, lineHeight: 14, marginTop: 4 }, metricIcon: { width: 22, height: 22, borderRadius: 11, alignItems: 'center', justifyContent: 'center' }, metricValue: { fontSize: 18, fontWeight: '800', marginTop: 8 }, sectionHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 22, marginBottom: 12 }, sectionTitle: { fontSize: 18, fontWeight: '800' }, link: { color: palette.emerald, fontWeight: '800', fontSize: 13 }, actionRow: { flexDirection: 'row', gap: 12 }, actionButton: { flex: 1, minHeight: 76, borderRadius: 18, borderWidth: 1, padding: 14, flexDirection: 'row', alignItems: 'center', gap: 12, overflow: 'hidden' }, actionIcon: { width: 42, height: 42, borderRadius: 14, alignItems: 'center', justifyContent: 'center' }, actionLabel: { fontSize: 14, fontWeight: '800' }, actionHint: { fontSize: 11, marginTop: 3 }, card: { borderRadius: 18, borderWidth: 1, padding: 18 }, cardTitle: { fontSize: 15, fontWeight: '800' }, flowValue: { fontSize: 30, fontWeight: '800', marginTop: 8 }, flowHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 8 }, flowMonth: { fontSize: 12, fontWeight: '700' }, flowSplit: { flexDirection: 'row', gap: 16, marginTop: 12 }, flowItem: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 6 }, flowDot: { width: 8, height: 8, borderRadius: 4 }, flowItemLabel: { fontSize: 12, fontWeight: '600' }, flowItemValue: { fontSize: 13, fontWeight: '800', marginLeft: 'auto' }, progressTrack: { height: 7, borderRadius: 5, backgroundColor: '#DDE5EB', overflow: 'hidden', marginTop: 14 }, progressFill: { height: '100%', borderRadius: 5 }, caption: { fontSize: 12, lineHeight: 18, marginTop: 7 }, transactionRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 14, borderBottomWidth: 1 }, transactionIcon: { width: 42, height: 42, borderRadius: 14, alignItems: 'center', justifyContent: 'center', marginRight: 12 }, rowBody: { flex: 1 }, rowTitle: { fontSize: 15, fontWeight: '700' }, rowAmount: { fontSize: 14, fontWeight: '800' }, sourceLabel: { fontSize: 10, fontWeight: '800', marginTop: 3, textTransform: 'uppercase' }, searchBox: { minHeight: 48, borderRadius: 14, borderWidth: 1, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, gap: 9 }, searchInput: { flex: 1, fontSize: 14 }, filterRow: { flexDirection: 'row', gap: 8, marginTop: 14 }, filterChip: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 20, backgroundColor: '#E8EEF2' }, filterChipActive: { backgroundColor: palette.emeraldSoft }, filterChipText: { fontSize: 12, fontWeight: '800' }, categoryScroll: { marginTop: 10 }, chip: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 18, marginRight: 7, backgroundColor: '#EEF2F4' }, chipActive: { backgroundColor: palette.emeraldSoft }, chipText: { fontSize: 12, fontWeight: '700' }, chart: { height: 160, flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'center', gap: 18, paddingTop: 16 }, chartBar: { width: 46, borderRadius: 10 }, legend: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 12 }, budgetRow: { flexDirection: 'row', alignItems: 'center', gap: 14, marginBottom: 15 }, emptyCard: { borderRadius: 18, borderWidth: 1, padding: 20, alignItems: 'flex-start', gap: 7 }, emptyTitle: { fontSize: 16, fontWeight: '800' }, personRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 13, borderBottomWidth: 1 }, personAvatar: { width: 42, height: 42, borderRadius: 21, backgroundColor: palette.emeraldSoft, alignItems: 'center', justifyContent: 'center', marginRight: 12 }, personInitial: { color: palette.navy, fontSize: 16, fontWeight: '800' }, profileCard: { borderRadius: 20, borderWidth: 1, alignItems: 'center', padding: 22 }, profileAvatar: { width: 64, height: 64, borderRadius: 32, backgroundColor: palette.emeraldSoft, alignItems: 'center', justifyContent: 'center' }, profileInitial: { color: palette.navy, fontSize: 26, fontWeight: '800' }, profileName: { fontSize: 20, fontWeight: '800', marginTop: 12 }, settingRow: { minHeight: 66, flexDirection: 'row', alignItems: 'center', borderBottomWidth: 1, gap: 12 }, settingIcon: { width: 34, height: 34, borderRadius: 11, backgroundColor: palette.emeraldSoft, alignItems: 'center', justifyContent: 'center' }, logoutButton: { flexDirection: 'row', alignItems: 'center', gap: 9, paddingVertical: 20 }, fab: { position: 'absolute', right: 20, bottom: 90, width: 56, height: 56, borderRadius: 28, backgroundColor: palette.navy, borderWidth: 1, borderColor: 'rgba(255,255,255,0.14)', alignItems: 'center', justifyContent: 'center', elevation: 6, shadowColor: '#000', shadowOpacity: 0.28, shadowRadius: 8, shadowOffset: { width: 0, height: 3 } }, nav: { position: 'absolute', left: 0, right: 0, bottom: 0, height: 74, borderTopWidth: 1, flexDirection: 'row', justifyContent: 'space-around', paddingTop: 9 }, navItem: { flex: 1, alignItems: 'center', gap: 4 }, navPillWrap: { width: 56, height: 32, alignItems: 'center', justifyContent: 'center' }, navPill: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, borderRadius: 16 }, navLabel: { fontSize: 10 }, modalBackdrop: { flex: 1, backgroundColor: '#00000066', justifyContent: 'flex-end' }, modal: { borderTopLeftRadius: 26, borderTopRightRadius: 26, padding: 22, paddingBottom: 34 }, modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 18 }, modalTitle: { fontSize: 21, fontWeight: '800' }, label: { fontSize: 10, fontWeight: '800', letterSpacing: 1.1, marginTop: 15, marginBottom: 7 }, segment: { flexDirection: 'row', gap: 10 }, segmentItem: { flex: 1, minHeight: 45, borderRadius: 12, backgroundColor: '#EEF2F4', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7 }, segmentActive: { backgroundColor: palette.emeraldSoft }, segmentText: { fontSize: 13, fontWeight: '800' }, input: { minHeight: 48, borderWidth: 1, borderRadius: 12, paddingHorizontal: 13, fontSize: 15 }, amountBox: { minHeight: 60, borderRadius: 14, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, gap: 8 }, amountSymbol: { fontSize: 24, fontWeight: '800' }, amountInput: { flex: 1, fontSize: 26, fontWeight: '800', paddingVertical: 8 }, scanLink: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, marginTop: 18, paddingVertical: 12, borderRadius: 13, borderWidth: 1, borderStyle: 'dashed' }, primaryButton: { minHeight: 52, borderRadius: 13, backgroundColor: palette.emerald, alignItems: 'center', justifyContent: 'center', marginTop: 22 }, primaryButtonText: { color: '#062119', fontWeight: '800', fontSize: 15 }, outlineButton: { alignSelf: 'flex-start', paddingHorizontal: 15, paddingVertical: 10, borderRadius: 12, borderWidth: 1, borderColor: palette.emerald, marginTop: 18 }, outlineButtonText: { color: palette.emerald, fontWeight: '800' }, loading: { flex: 1, alignItems: 'center', justifyContent: 'center' }, brand: { color: palette.emerald, fontSize: 13, fontWeight: '900', letterSpacing: 3 }, welcome: { flexGrow: 1, justifyContent: 'center', padding: 26 }, logoMark: { width: 62, height: 62, borderRadius: 20, backgroundColor: '#173A4D', alignItems: 'center', justifyContent: 'center', marginBottom: 20 }, welcomeTitle: { color: '#FFFFFF', fontSize: 40, lineHeight: 46, fontWeight: '800', marginTop: 30 }, welcomeDescription: { color: '#D6E1E9', fontSize: 17, lineHeight: 25, marginTop: 18 }, productDescriptor: { color: palette.emerald, fontSize: 12, fontWeight: '800', marginTop: 22 }, secondaryButton: { minHeight: 52, borderRadius: 13, borderWidth: 1, borderColor: '#45617B', alignItems: 'center', justifyContent: 'center', marginTop: 12 }, secondaryButtonText: { color: '#FFFFFF', fontWeight: '800' }, formScreen: { padding: 24, paddingBottom: 50 }, authTitle: { fontSize: 30, fontWeight: '800', marginTop: 18 }, subtitle: { fontSize: 13, lineHeight: 20, marginBottom: 12 }, authField: { marginTop: 17 }, authInputWrap: { minHeight: 50, borderRadius: 12, borderWidth: 1, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 13, gap: 9 }, inputBare: { flex: 1, paddingVertical: 12, fontSize: 15 }, termsRow: { flexDirection: 'row', alignItems: 'center', gap: 9, marginTop: 18 }, checkbox: { width: 21, height: 21, borderRadius: 6, borderWidth: 1, borderColor: '#92A0AD', alignItems: 'center', justifyContent: 'center' }, checkboxActive: { backgroundColor: palette.emerald, borderColor: palette.emerald }, errorText: { color: palette.danger, fontSize: 13, marginTop: 15 }, noticeText: { color: palette.warning, fontSize: 13, marginTop: 15 },
+  safe: { flex: 1 }, shell: { flex: 1 }, content: { padding: 20, paddingBottom: 150 }, header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }, overline: { ...type.overline }, title: { ...type.display, marginTop: 6 }, iconButton: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center', borderWidth: 1 }, avatarText: { ...type.bodyStrong }, heroCard: { borderRadius: radius.xl, padding: 24, marginBottom: 24 }, heroLabel: { ...type.label, color: palette.onNavyMuted }, heroValue: { ...type.amountHero, color: palette.onNavy, marginTop: 8 }, heroHint: { ...type.caption, color: palette.onNavySoft, marginTop: 8 }, heroTitle: { ...type.heading, color: palette.onNavy, marginTop: 14 }, metricRow: { flexDirection: 'row', alignItems: 'stretch', borderTopWidth: 1, borderTopColor: palette.navyBorder, marginTop: 20, paddingTop: 16 }, metric: { flex: 1, minWidth: 0 }, metricDivider: { width: 1, backgroundColor: palette.navyBorder, marginHorizontal: 14 }, metricLabelRow: { flexDirection: 'row', alignItems: 'center', gap: 6 }, metricLabel: { flex: 1, flexShrink: 1 }, metricIcon: { width: 24, height: 24, borderRadius: 12, alignItems: 'center', justifyContent: 'center' }, metricValue: { ...type.amountMd, marginTop: 8 }, sectionHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 24, marginBottom: 12, minHeight: 28 }, sectionTitle: { ...type.section }, link: { ...type.link, color: palette.accentText, paddingVertical: 6 }, actionRow: { flexDirection: 'row', gap: 12 }, actionButton: { flex: 1, minHeight: 76, borderRadius: radius.lg, borderWidth: 1, padding: 14, flexDirection: 'row', alignItems: 'center', gap: 12, overflow: 'hidden' }, actionIcon: { width: 44, height: 44, borderRadius: radius.md, alignItems: 'center', justifyContent: 'center' }, actionLabel: { ...type.bodyStrong }, actionHint: { ...type.caption, marginTop: 3 }, card: { borderRadius: radius.lg, borderWidth: 1, padding: 18 }, cardTitle: { ...type.cardTitle }, flowValue: { ...type.amountLg, marginTop: 8 }, flowHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 8 }, flowMonth: { ...type.captionStrong }, flowSplit: { flexDirection: 'row', gap: 16, marginTop: 12 }, flowItem: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 6 }, flowDot: { width: 8, height: 8, borderRadius: 4 }, flowItemLabel: { ...type.caption }, flowItemValue: { ...type.amountSm, marginLeft: 'auto' }, progressTrack: { height: 8, borderRadius: 4, backgroundColor: palette.border, overflow: 'hidden', marginTop: 14 }, progressFill: { height: '100%', borderRadius: 4 }, caption: { ...type.caption, marginTop: 7 }, transactionRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 14, borderBottomWidth: 1 }, transactionIcon: { width: 44, height: 44, borderRadius: radius.md, alignItems: 'center', justifyContent: 'center', marginRight: 12 }, rowBody: { flex: 1 }, rowTitle: { ...type.cardTitle }, rowAmount: { ...type.amountSm }, sourceLabel: { ...type.label, marginTop: 3, textTransform: 'uppercase' }, searchBox: { minHeight: 48, borderRadius: 14, borderWidth: 1, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, gap: 9 }, searchInput: { ...type.body, flex: 1 }, filterRow: { flexDirection: 'row', gap: 8, marginTop: 14 }, filterChip: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 20, backgroundColor: '#E8EEF2' }, filterChipActive: { backgroundColor: palette.emeraldSoft }, filterChipText: { ...type.chip }, categoryScroll: { marginTop: 10 }, chip: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 18, marginRight: 7, backgroundColor: '#EEF2F4' }, chipActive: { backgroundColor: palette.emeraldSoft }, chipText: { ...type.chip }, chart: { height: 160, flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'center', gap: 18, paddingTop: 16 }, chartBar: { width: 46, borderRadius: 10 }, legend: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 12 }, budgetRow: { flexDirection: 'row', alignItems: 'center', gap: 14, marginBottom: 15 }, emptyCard: { borderRadius: 18, borderWidth: 1, padding: 20, alignItems: 'flex-start', gap: 7 }, emptyTitle: { ...type.cardTitle }, personRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 13, borderBottomWidth: 1 }, personAvatar: { width: 42, height: 42, borderRadius: 21, backgroundColor: palette.emeraldSoft, alignItems: 'center', justifyContent: 'center', marginRight: 12 }, personInitial: { ...type.cardTitle, color: palette.navy }, profileCard: { borderRadius: 20, borderWidth: 1, alignItems: 'center', padding: 22 }, profileAvatar: { width: 64, height: 64, borderRadius: 32, backgroundColor: palette.emeraldSoft, alignItems: 'center', justifyContent: 'center' }, profileInitial: { color: palette.navy, fontSize: 26, fontWeight: '700' }, profileName: { ...type.heading, marginTop: 12 }, settingRow: { minHeight: 66, flexDirection: 'row', alignItems: 'center', borderBottomWidth: 1, gap: 12 }, settingIcon: { width: 34, height: 34, borderRadius: 11, backgroundColor: palette.emeraldSoft, alignItems: 'center', justifyContent: 'center' }, logoutButton: { flexDirection: 'row', alignItems: 'center', gap: 9, paddingVertical: 20 }, fab: { position: 'absolute', right: 20, bottom: 98, width: 58, height: 58, borderRadius: 29, ...elevation.fab, backgroundColor: palette.navy, borderWidth: 1, borderColor: 'rgba(255,255,255,0.14)', alignItems: 'center', justifyContent: 'center', elevation: 6, shadowColor: '#000', shadowOpacity: 0.28, shadowRadius: 8, shadowOffset: { width: 0, height: 3 } }, nav: { position: 'absolute', left: 0, right: 0, bottom: 0, height: 78, borderTopWidth: 1, flexDirection: 'row', justifyContent: 'space-around', paddingTop: 9 }, navItem: { flex: 1, alignItems: 'center', gap: 4 }, navPillWrap: { width: 60, height: 32, alignItems: 'center', justifyContent: 'center' }, navPill: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, borderRadius: 16 }, navLabel: { ...type.nav }, modalBackdrop: { flex: 1, backgroundColor: '#00000066', justifyContent: 'flex-end' }, modal: { borderTopLeftRadius: 26, borderTopRightRadius: 26, padding: 22, paddingBottom: 34 }, modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 18 }, modalTitle: { ...type.heading }, label: { ...type.label, marginTop: 15, marginBottom: 7 }, segment: { flexDirection: 'row', gap: 10 }, segmentItem: { flex: 1, minHeight: 45, borderRadius: 12, backgroundColor: '#EEF2F4', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7 }, segmentActive: { backgroundColor: palette.emeraldSoft }, segmentText: { ...type.link }, input: { ...type.body, minHeight: 48, borderWidth: 1, borderRadius: 12, paddingHorizontal: 13 }, amountBox: { minHeight: 60, borderRadius: 14, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, gap: 8 }, amountSymbol: { ...type.amountLg }, amountInput: { ...type.amountInput, flex: 1, paddingVertical: 8 }, scanLink: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, marginTop: 18, paddingVertical: 12, borderRadius: 13, borderWidth: 1, borderStyle: 'dashed' }, primaryButton: { minHeight: 52, borderRadius: 14, backgroundColor: palette.emerald, alignItems: 'center', justifyContent: 'center', marginTop: 22 }, primaryButtonText: { ...type.button, color: '#062119' }, outlineButton: { alignSelf: 'flex-start', paddingHorizontal: 15, paddingVertical: 10, borderRadius: 12, borderWidth: 1, borderColor: palette.emerald, marginTop: 18 }, outlineButtonText: { ...type.button, color: palette.accentText }, loading: { flex: 1, alignItems: 'center', justifyContent: 'center' }, brand: { color: palette.accentText, fontSize: 13, fontWeight: '700', letterSpacing: 3 }, welcome: { flexGrow: 1, justifyContent: 'center', padding: 26 }, logoMark: { width: 62, height: 62, borderRadius: 20, backgroundColor: '#173A4D', alignItems: 'center', justifyContent: 'center', marginBottom: 20 }, welcomeTitle: { color: '#FFFFFF', fontSize: 40, lineHeight: 46, fontWeight: '700', marginTop: 30 }, welcomeDescription: { color: '#D6E1E9', fontSize: 17, lineHeight: 25, marginTop: 18 }, productDescriptor: { color: palette.accentText, fontSize: 12, fontWeight: '700', marginTop: 22 }, secondaryButton: { minHeight: 52, borderRadius: 13, borderWidth: 1, borderColor: '#45617B', alignItems: 'center', justifyContent: 'center', marginTop: 12 }, secondaryButtonText: { ...type.button, color: '#FFFFFF' }, formScreen: { padding: 24, paddingBottom: 50 }, authTitle: { ...type.title, marginTop: 18 }, subtitle: { ...type.body, marginBottom: 12 }, authField: { marginTop: 17 }, authInputWrap: { minHeight: 50, borderRadius: 12, borderWidth: 1, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 13, gap: 9 }, inputBare: { ...type.body, flex: 1, paddingVertical: 12 }, termsRow: { flexDirection: 'row', alignItems: 'center', gap: 9, marginTop: 18 }, checkbox: { width: 21, height: 21, borderRadius: 6, borderWidth: 1, borderColor: '#92A0AD', alignItems: 'center', justifyContent: 'center' }, checkboxActive: { backgroundColor: palette.emerald, borderColor: palette.emerald }, errorText: { ...type.caption, color: palette.expenseText, marginTop: 15 }, noticeText: { ...type.caption, color: palette.warning, marginTop: 15 },
 });
 
 let styles = buildStyles();

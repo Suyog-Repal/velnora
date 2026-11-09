@@ -34,12 +34,12 @@ export function CategoryManager({ visible, scope, colors, onClose, onChanged }: 
   return <>
     <Sheet visible={visible} onClose={onClose} title="Categories" colors={colors}>
       {(['expense', 'income'] as const).map((type) => <View key={type}>
-        <Text style={{ color: colors.muted, fontWeight: '800', fontSize: 12, marginVertical: 8 }}>{type === 'expense' ? 'EXPENSE' : 'INCOME'}</Text>
+        <Text style={{ color: colors.muted, fontWeight: '600', fontSize: 12, marginVertical: 8 }}>{type === 'expense' ? 'EXPENSE' : 'INCOME'}</Text>
         {cats.filter((c) => c.type === type).map((c) => <View key={c.id} style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: 8 }}>
           <CategoryIcon icon={c.icon} color={c.color} label={c.name} size={36} />
           <Text style={{ flex: 1, color: colors.text, marginLeft: 12, fontWeight: '600' }}>{c.name}</Text>
-          {c.isCustom ? <><Text onPress={() => { setError(''); setForm({ id: c.id, name: c.name, type: c.type, icon: c.icon, color: c.color }); }} style={{ color: palette.emerald, fontWeight: '700', marginRight: 16 }}>Edit</Text>
-            <Text onPress={() => void askDelete(c)} style={{ color: palette.danger, fontWeight: '700' }}>Delete</Text></> : <Text style={{ color: colors.muted, fontSize: 12 }}>Default</Text>}
+          {c.isCustom ? <><Text onPress={() => { setError(''); setForm({ id: c.id, name: c.name, type: c.type, icon: c.icon, color: c.color }); }} style={{ color: palette.accentText, fontWeight: '700', marginRight: 16 }}>Edit</Text>
+            <Text onPress={() => void askDelete(c)} style={{ color: palette.expenseText, fontWeight: '700' }}>Delete</Text></> : <Text style={{ color: colors.muted, fontSize: 12 }}>Default</Text>}
         </View>)}
       </View>)}
       <Button title="New category" onPress={() => { setError(''); setForm({ name: '', type: 'expense', icon: 'Tag', color: CATEGORY_COLORS[0] }); }} />
@@ -55,7 +55,7 @@ export function CategoryManager({ visible, scope, colors, onClose, onChanged }: 
           <CategoryIcon icon={ic} color={form?.color ?? palette.navy} label={ic} size={40} /></Pressable>)}</View></Labeled>
       <Labeled label="COLOR" colors={colors}><View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 10 }}>{CATEGORY_COLORS.map((c) =>
         <Pressable key={c} onPress={() => form && setForm({ ...form, color: c })} accessibilityRole="button" accessibilityLabel={`Color ${c}`} style={{ width: 36, height: 36, borderRadius: 18, backgroundColor: c, borderWidth: 3, borderColor: form?.color === c ? colors.text : 'transparent' }} />)}</View></Labeled>
-      {error ? <Text style={{ color: palette.danger, marginBottom: 8 }}>{error}</Text> : null}
+      {error ? <Text style={{ color: palette.expenseText, marginBottom: 8 }}>{error}</Text> : null}
       <Button title="Save category" onPress={() => void save()} />
     </Sheet>
 
@@ -78,7 +78,7 @@ export function MerchantNamesManager({ visible, userId, colors, onClose }: { vis
       : rows.map((r) => <View key={r.id} style={{ paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: colors.border }}>
         <Text style={{ color: colors.text, fontWeight: '700' }}>{r.original_text} → {r.display_name}</Text>
         <Text style={{ color: colors.muted, fontSize: 12 }}>{r.category ? `Category: ${r.category}` : 'No category saved'}</Text>
-        <Text onPress={() => { void removeAlias(getServiceDb(), userId, r.id).then(load); }} style={{ color: palette.danger, fontWeight: '700', marginTop: 4 }}>Remove</Text>
+        <Text onPress={() => { void removeAlias(getServiceDb(), userId, r.id).then(load); }} style={{ color: palette.expenseText, fontWeight: '700', marginTop: 4 }}>Remove</Text>
       </View>)}
   </Sheet>;
 }

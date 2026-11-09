@@ -9,7 +9,7 @@ Implements:
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from enum import Enum
-from typing import List, Optional
+from typing import List, Literal, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -34,6 +34,17 @@ PAISE_FACTOR = Decimal("100")
 PAISE_UNIT = Decimal("1")
 CLOCK_SKEW_TOLERANCE = timedelta(seconds=60)
 E164_RE = re.compile(r"\+[1-9]\d{7,14}")
+
+
+LEDGER_FIELDS = ("capture_source", "account_last4", "bank_name", "payment_app", "possible_duplicate_of", "confidence")
+
+
+def ledger_values(payload: "SyncItemPayload") -> dict:
+    """Ledger metadata for a new row. An older client that omits these gets the column defaults' meaning."""
+    values = {field: getattr(payload, field) for field in LEDGER_FIELDS}
+    values["txn_kind"] = payload.txn_kind or "payment"
+    values["verification_status"] = payload.verification_status or "verified"
+    return values
 
 
 def to_paise(amount: Decimal) -> int:
@@ -75,6 +86,15 @@ class SyncItemPayload(BaseModel):
     location_name: Optional[str] = Field(default=None, max_length=200)
     location_address: Optional[str] = None
     location_confirmed: Optional[bool] = None
+    # Unified ledger metadata (validated; only an account suffix is accepted)
+    txn_kind: Optional[Literal["payment", "refund", "reversal", "transfer", "cash_withdrawal"]] = None
+    verification_status: Optional[Literal["detected", "needs_review", "verified", "reconciled"]] = None
+    capture_source: Optional[Literal["manual", "sms", "notification", "csv_import"]] = None
+    account_last4: Optional[str] = Field(default=None, pattern=r"^\d{3,4}$")
+    bank_name: Optional[str] = Field(default=None, max_length=60)
+    payment_app: Optional[str] = Field(default=None, max_length=40)
+    possible_duplicate_of: Optional[UUID] = None
+    confidence: Optional[float] = Field(default=None, ge=0, le=1)
     # Budget / merchant alias payload fields
     amount_paise: Optional[int] = Field(default=None, gt=0)
     match_key: Optional[str] = Field(default=None, max_length=200)
@@ -142,6 +162,14 @@ class SyncPullTransaction(BaseModel):
     location_name: Optional[str] = None
     location_address: Optional[str] = None
     location_confirmed: bool = False
+    txn_kind: str = "payment"
+    verification_status: str = "verified"
+    capture_source: Optional[str] = None
+    account_last4: Optional[str] = None
+    bank_name: Optional[str] = None
+    payment_app: Optional[str] = None
+    possible_duplicate_of: Optional[UUID] = None
+    confidence: Optional[float] = None
 
 
 class SyncPushItemResult(BaseModel):
@@ -606,6 +634,7 @@ def sync_push(
                                 location_name=item.payload.location_name,
                                 location_address=item.payload.location_address,
                                 location_confirmed=bool(item.payload.location_confirmed),
+                                **ledger_values(item.payload),
                                 sync_status="synced",
                                 server_version=1,
                                 created_at=now,
@@ -654,6 +683,7 @@ def sync_push(
                                 location_name=item.payload.location_name,
                                 location_address=item.payload.location_address,
                                 location_confirmed=bool(item.payload.location_confirmed),
+                                **ledger_values(item.payload),
                                 sync_status="synced",
                                 server_version=1,
                                 created_at=now,
@@ -737,6 +767,13 @@ def sync_push(
                                     setattr(existing, _field, getattr(item.payload, _field))
                             if "location_confirmed" in item.payload.model_fields_set:
                                 existing.location_confirmed = bool(item.payload.location_confirmed)
+                            for _field in LEDGER_FIELDS:
+                                if _field in item.payload.model_fields_set:
+                                    setattr(existing, _field, getattr(item.payload, _field))
+                            if item.payload.txn_kind is not None:
+                                existing.txn_kind = item.payload.txn_kind
+                            if item.payload.verification_status is not None:
+                                existing.verification_status = item.payload.verification_status
 
                             existing.server_version += 1
                             existing.updated_at = now

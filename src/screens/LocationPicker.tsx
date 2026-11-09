@@ -85,7 +85,7 @@ export function LocationPicker({ visible, initial, colors, onCancel, onConfirm }
   return <Modal visible={visible} animationType="slide" onRequestClose={onCancel}>
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.canvas }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', padding: 16 }}>
-        <Text style={{ color: colors.text, fontSize: 18, fontWeight: '800' }}>Transaction location</Text>
+        <Text style={{ color: colors.text, fontSize: 18, fontWeight: '700' }}>Transaction location</Text>
         <Pressable onPress={onCancel} hitSlop={12} accessibilityLabel="Close"><X color={colors.muted} /></Pressable>
       </View>
       <View style={{ paddingHorizontal: 16 }}>

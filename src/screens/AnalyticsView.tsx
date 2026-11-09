@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Text, View } from 'react-native';
 import { palette } from '../../theme';
-import { Button, Chip, EmptyBlock, formatPaise, type Colors } from '../ui/common';
+import { type } from '../../typography';
+import { Button, Card, Chip, EmptyBlock, SectionLabel, formatPaise, type Colors } from '../ui/common';
 import { DateRangeFields } from '../ui/CalendarDatePicker';
 import { rangeToIsoInterval, validateRange } from '../services/dateUtils';
 import { CategoryPieChart, pct } from './PieChart';
@@ -35,26 +36,28 @@ export function AnalyticsView({ scope, colors, refreshKey, onDrill }: { scope: s
   const slice = data?.slices.find((s) => s.category === selected);
 
   return <View>
-    <View style={{ flexDirection: 'row', marginBottom: 12 }}>
+    <SectionLabel colors={colors} style={{ marginTop: 0 }}>Period</SectionLabel>
+    <View style={{ flexDirection: 'row', marginBottom: 14 }}>
       <Chip label="This month" active={period === 'this'} onPress={() => setPeriod('this')} colors={colors} />
       <Chip label="Last month" active={period === 'prev'} onPress={() => setPeriod('prev')} colors={colors} />
       <Chip label="Custom" active={period === 'custom'} onPress={() => setPeriod('custom')} colors={colors} />
     </View>
-    {period === 'custom' ? <View style={{ marginBottom: 12, padding: 14, borderRadius: 14, backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border }}>
-      <Text style={{ color: colors.text, fontWeight: '800', marginBottom: 10 }}>Custom date range</Text>
+    {period === 'custom' ? <Card colors={colors} style={{ marginBottom: 14 }}>
+      <Text style={{ ...type.cardTitle, color: colors.text, marginBottom: 12 }}>Custom date range</Text>
       <DateRangeFields from={from} to={to} colors={colors} onChange={(f, t) => { setFrom(f); setTo(t); setError(''); }} />
-      {error ? <Text style={{ color: palette.danger, marginTop: 6 }} accessibilityLiveRegion="polite">{error}</Text> : null}
+      {error ? <Text style={{ color: palette.expenseText, marginTop: 6 }} accessibilityLiveRegion="polite">{error}</Text> : null}
       <Button title="Apply" onPress={applyCustom} disabled={!from || !to || (from > to)} />
-    </View> : null}
+    </Card> : null}
     {!data || data.isEmpty
       ? <EmptyBlock title={period === 'custom' && !customRange ? 'Pick a date range' : 'No spending in this period'} text={period === 'custom' && !customRange ? 'Choose start and end dates to see where your money went.' : 'Add expenses and they will be grouped by category here.'} colors={colors} />
       : <View>
+        <SectionLabel colors={colors}>Spending by category</SectionLabel>
         <CategoryPieChart slices={data.slices} total={data.totalPaise} selected={selected} onSelect={setSelected} colors={colors} />
-        {slice ? <View style={{ marginTop: 10, padding: 14, borderRadius: 14, backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border }}>
-          <Text style={{ color: colors.text, fontWeight: '800', fontSize: 16 }}>{slice.category}</Text>
-          <Text style={{ color: colors.muted, marginTop: 2 }}>{formatPaise(slice.totalPaise)} · {pct(slice.percentTenths)} of spending</Text>
+        {slice ? <Card colors={colors} style={{ marginTop: 12 }}>
+          <Text style={{ ...type.cardTitle, color: colors.text }}>{slice.category}</Text>
+          <Text style={{ ...type.body, color: colors.muted, marginTop: 2, fontVariant: ['tabular-nums'] }}>{formatPaise(slice.totalPaise)} · {pct(slice.percentTenths)} of spending</Text>
           <Button title="View transactions" kind="ghost" onPress={() => onDrill(slice.category)} />
-        </View> : null}
+        </Card> : null}
       </View>}
   </View>;
 }

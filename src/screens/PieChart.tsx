@@ -1,6 +1,7 @@
 import { Pressable, Text, View } from 'react-native';
 import Svg, { Circle, G, Path } from 'react-native-svg';
-import { formatPaise, type Colors } from '../ui/common';
+import { Card, formatPaise, type Colors } from '../ui/common';
+import { type } from '../../typography';
 import type { CategorySlice } from '../services/analyticsService';
 
 const R = 80; const CX = 100; const CY = 100;
@@ -18,7 +19,7 @@ export const pct = (tenths: number) => `${(tenths / 10).toFixed(1)}%`;
 export function CategoryPieChart({ slices, total, selected, onSelect, colors }: { slices: CategorySlice[]; total: number; selected: string | null; onSelect: (c: string | null) => void; colors: Colors }) {
   let angle = -Math.PI / 2;
   const sum = slices.reduce((s, x) => s + x.totalPaise, 0) || 1;
-  return <View>
+  return <Card colors={colors}>
     <View style={{ alignItems: 'center' }}>
       <Svg width={220} height={220} viewBox="0 0 200 200" accessibilityLabel="Spending by category">
         {slices.length === 1
@@ -28,16 +29,16 @@ export function CategoryPieChart({ slices, total, selected, onSelect, colors }: 
             return <Path key={s.category} d={arc(start, angle - 0.004)} fill={s.color} opacity={selected && selected !== s.category ? 0.35 : 1} onPress={() => onSelect(selected === s.category ? null : s.category)} />;
           })}
       </Svg>
-      <View style={{ position: 'absolute', top: 88, alignItems: 'center' }} pointerEvents="none"><Text style={{ color: colors.muted, fontSize: 11 }}>Total spent</Text><Text style={{ color: colors.text, fontWeight: '800', fontSize: 15 }}>{formatPaise(total)}</Text></View>
+      <View style={{ position: 'absolute', top: 88, alignItems: 'center' }} pointerEvents="none"><Text style={{ ...type.caption, color: colors.muted }}>Total spent</Text><Text style={{ ...type.amountSm, color: colors.text }}>{formatPaise(total)}</Text></View>
     </View>
-    <View style={{ marginTop: 8 }}>
+    <View style={{ marginTop: 12 }}>
       {slices.map((s) => <Pressable key={s.category} onPress={() => onSelect(selected === s.category ? null : s.category)} accessibilityRole="button"
-        style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: 10, opacity: selected && selected !== s.category ? 0.5 : 1 }}>
+        style={{ flexDirection: 'row', alignItems: 'center', minHeight: 44, paddingVertical: 8, opacity: selected && selected !== s.category ? 0.5 : 1 }}>
         <View style={{ width: 12, height: 12, borderRadius: 6, backgroundColor: s.color, marginRight: 10 }} />
-        <Text style={{ flex: 1, color: colors.text, fontWeight: '600' }} numberOfLines={1}>{s.category}</Text>
-        <Text style={{ color: colors.muted, marginRight: 12 }}>{pct(s.percentTenths)}</Text>
-        <Text style={{ color: colors.text, fontWeight: '700' }}>{formatPaise(s.totalPaise)}</Text>
+        <Text style={{ ...type.body, flex: 1, color: colors.text, fontWeight: '500' }} numberOfLines={1}>{s.category}</Text>
+        <Text style={{ ...type.caption, color: colors.muted, marginRight: 12, fontVariant: ['tabular-nums'] }}>{pct(s.percentTenths)}</Text>
+        <Text style={{ ...type.amountSm, color: colors.text }}>{formatPaise(s.totalPaise)}</Text>
       </Pressable>)}
     </View>
-  </View>;
+  </Card>;
 }

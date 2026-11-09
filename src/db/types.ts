@@ -1,5 +1,11 @@
 export type Direction = 'income' | 'expense';
 export type TransactionSource = 'manual' | 'sms';
+/** Where an auto-detected bank event was observed. One transaction may be seen by several. */
+export type DetectionSource = 'sms' | 'truecaller_notification' | 'payment_notification' | 'csv_import';
+/** What the money movement was. Decides how it counts: see ledgerRules. */
+export type TransactionKind = 'payment' | 'refund' | 'reversal' | 'transfer' | 'cash_withdrawal';
+export type VerificationStatus = 'detected' | 'needs_review' | 'verified' | 'reconciled';
+export type CaptureSource = 'manual' | 'sms' | 'notification' | 'csv_import';
 export type SyncStatus = 'synced' | 'pending_create' | 'pending_update' | 'pending_delete' | 'failed';
 export type CategoryType = 'income' | 'expense' | 'both';
 export type SyncOperation = 'create' | 'update' | 'delete';
@@ -34,9 +40,32 @@ export interface TransactionEntity {
   location_name?: string | null;
   location_address?: string | null;
   location_confirmed?: number;
+  txn_kind?: TransactionKind;
+  verification_status?: VerificationStatus;
+  capture_source?: CaptureSource | null;
+  account_last4?: string | null;
+  bank_name?: string | null;
+  payment_app?: string | null;
+  /** Set while this row may be the same payment as another one; such rows are left out of totals until resolved. */
+  possible_duplicate_of?: string | null;
+  confidence?: number | null;
+  /** Detection channels that saw this transaction (debug/UI only; loaded by list queries, not a column). */
+  detected_via?: DetectionSource[];
 }
 
-export interface CreateTransactionInput {
+/** Ledger fields shared by create and update inputs and the server record. */
+export interface LedgerFields {
+  txn_kind?: TransactionKind;
+  verification_status?: VerificationStatus;
+  capture_source?: CaptureSource | null;
+  account_last4?: string | null;
+  bank_name?: string | null;
+  payment_app?: string | null;
+  possible_duplicate_of?: string | null;
+  confidence?: number | null;
+}
+
+export interface CreateTransactionInput extends LedgerFields {
   id?: string;
   user_id?: string | null;
   amount: number;
@@ -60,7 +89,7 @@ export interface CreateTransactionInput {
   location_confirmed?: number;
 }
 
-export interface UpdateTransactionInput {
+export interface UpdateTransactionInput extends LedgerFields {
   amount?: number;
   direction?: Direction;
   counterparty?: string;
@@ -113,7 +142,7 @@ export interface SyncQueueEntity {
   created_at: string;
 }
 
-export interface RemoteTransaction {
+export interface RemoteTransaction extends LedgerFields {
   id: string;
   user_id: string;
   amount: number | string;

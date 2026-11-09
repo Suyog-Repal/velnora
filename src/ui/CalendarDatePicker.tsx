@@ -66,10 +66,10 @@ export function DatePickerModal({ visible, title = 'Select date', value, min, ma
         <Text style={[s.dialogValue, { color: colors.text }]}>{draft ? formatDisplayDate(draft) : 'Select a date'}</Text>
         <CalendarDatePicker value={draft} onChange={setDraft} min={min} max={max} colors={colors} />
         <View style={s.actions}>
-          <Pressable onPress={() => setDraft(isWithin(localYmd(), min, max) ? localYmd() : draft)} accessibilityRole="button" style={s.textBtn}><Text style={{ color: palette.emerald, fontWeight: '800' }}>Today</Text></Pressable>
+          <Pressable onPress={() => setDraft(isWithin(localYmd(), min, max) ? localYmd() : draft)} accessibilityRole="button" style={s.textBtn}><Text style={{ color: palette.accentText, fontWeight: '700' }}>Today</Text></Pressable>
           <View style={{ flex: 1 }} />
-          <Pressable onPress={onCancel} accessibilityRole="button" style={s.textBtn}><Text style={{ color: colors.muted, fontWeight: '800' }}>Cancel</Text></Pressable>
-          <Pressable disabled={!draft} onPress={() => draft && onConfirm(draft)} accessibilityRole="button" style={[s.textBtn, { opacity: draft ? 1 : 0.4 }]}><Text style={{ color: palette.emerald, fontWeight: '800' }}>OK</Text></Pressable>
+          <Pressable onPress={onCancel} accessibilityRole="button" style={s.textBtn}><Text style={{ color: colors.muted, fontWeight: '700' }}>Cancel</Text></Pressable>
+          <Pressable disabled={!draft} onPress={() => draft && onConfirm(draft)} accessibilityRole="button" style={[s.textBtn, { opacity: draft ? 1 : 0.4 }]}><Text style={{ color: palette.accentText, fontWeight: '700' }}>OK</Text></Pressable>
         </View>
       </View>
     </View>
@@ -83,9 +83,9 @@ export function DateField({ value, onChange, min, max, colors, title, placeholde
   const [open, setOpen] = useState(false);
   return <>
     <Pressable onPress={() => setOpen(true)} accessibilityRole="button" accessibilityLabel={`${accessibilityLabel ?? title ?? 'Date'}: ${value ? formatDisplayDate(value) : placeholder}`}
-      style={[s.field, { backgroundColor: colors.card, borderColor: colors.border }]}>
-      <CalendarDays size={18} color={colors.muted} />
-      <Text numberOfLines={1} style={{ flex: 1, marginLeft: 10, color: value ? colors.text : colors.muted, fontSize: 15 }}>{value ? formatDisplayDate(value) : placeholder}</Text>
+      style={({ pressed }) => [s.field, { backgroundColor: colors.card, borderColor: pressed || open ? palette.emerald : colors.border, borderWidth: pressed || open ? 1.5 : 1 }]}>
+      <CalendarDays size={18} color={open ? palette.emerald : colors.muted} strokeWidth={2} />
+      <Text numberOfLines={1} style={{ flex: 1, marginLeft: 10, color: value ? colors.text : colors.muted, fontSize: 16 }}>{value ? formatDisplayDate(value) : placeholder}</Text>
     </Pressable>
     <DatePickerModal visible={open} title={title} value={value} min={min} max={max} colors={colors} onCancel={() => setOpen(false)} onConfirm={(v) => { setOpen(false); onChange(v); }} />
   </>;
@@ -110,25 +110,25 @@ export function DateRangeFields({ from, to, onChange, colors }: { from: Ymd | nu
           onChange={(v) => onChange(from, v)} />
       </View>
     </View>
-    {check && !check.ok ? <Text style={{ color: palette.danger, marginTop: 6, fontSize: 12 }} accessibilityLiveRegion="polite">{check.error}</Text> : null}
+    {check && !check.ok ? <Text style={{ color: palette.expenseText, marginTop: 6, fontSize: 12 }} accessibilityLiveRegion="polite">{check.error}</Text> : null}
   </View>;
 }
 
 const s = StyleSheet.create({
   header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 },
   nav: { width: 36, height: 36, borderRadius: 18, borderWidth: 1, alignItems: 'center', justifyContent: 'center' },
-  title: { fontSize: 16, fontWeight: '800' },
+  title: { fontSize: 16, fontWeight: '600' },
   row: { flexDirection: 'row' },
-  weekday: { width: `${100 / 7}%`, textAlign: 'center', fontSize: 11, fontWeight: '700', paddingVertical: 6 },
+  weekday: { width: `${100 / 7}%`, textAlign: 'center', fontSize: 12, fontWeight: '700', paddingVertical: 6 },
   grid: { flexDirection: 'row', flexWrap: 'wrap' },
   cell: { width: `${100 / 7}%`, aspectRatio: 1, alignItems: 'center', justifyContent: 'center' },
   day: { width: '86%', aspectRatio: 1, borderRadius: 999, alignItems: 'center', justifyContent: 'center' },
   backdrop: { flex: 1, backgroundColor: 'rgba(8,24,39,0.55)', alignItems: 'center', justifyContent: 'center', padding: 20 },
   dialog: { width: '100%', maxWidth: 380, borderRadius: 24, borderWidth: StyleSheet.hairlineWidth, padding: 18 },
-  dialogTitle: { fontSize: 11, fontWeight: '800', letterSpacing: 1 },
-  dialogValue: { fontSize: 22, fontWeight: '800', marginTop: 4, marginBottom: 12 },
+  dialogTitle: { fontSize: 12, fontWeight: '600', letterSpacing: 1 },
+  dialogValue: { fontSize: 22, fontWeight: '700', marginTop: 4, marginBottom: 12 },
   actions: { flexDirection: 'row', alignItems: 'center', marginTop: 8 },
   textBtn: { minHeight: 44, paddingHorizontal: 14, alignItems: 'center', justifyContent: 'center' },
-  field: { minHeight: 48, borderWidth: 1, borderRadius: 12, paddingHorizontal: 14, flexDirection: 'row', alignItems: 'center' },
-  fieldLabel: { fontSize: 11, fontWeight: '800', letterSpacing: 0.6, marginBottom: 6 },
+  field: { minHeight: 48, borderWidth: 1, borderRadius: 14, paddingHorizontal: 14, flexDirection: 'row', alignItems: 'center' },
+  fieldLabel: { fontSize: 12, fontWeight: '600', letterSpacing: 0.6, marginBottom: 6 },
 });

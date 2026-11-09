@@ -29,7 +29,7 @@ const lastQueued = async (db: IDatabase, id: string) => {
 async function emptyHistory() {
   const db = await fresh();
   const s = await getCashFlowSummary(db, null);
-  assert.deepEqual(s, { monthIncomePaise: 0, monthExpensePaise: 0, netPaise: 0, balancePaise: 0, expenseRatioPercent: null }, 'empty history is all zero, no ratio');
+  assert.deepEqual(s, { monthIncomePaise: 0, monthExpensePaise: 0, netPaise: 0, balancePaise: 0, expenseRatioPercent: null, monthRefundPaise: 0 }, 'empty history is all zero, no ratio');
 }
 
 async function expenseStaysExpense() {

@@ -230,6 +230,118 @@ export const MIGRATIONS = [
       CREATE UNIQUE INDEX IF NOT EXISTS uq_sync_queue_entity ON sync_queue(entity_type, entity_id);
     `,
   },
+  {
+    version: 6,
+    description: 'Cross-source (SMS + Truecaller) detection: unique identity keys and per-source detection metadata',
+    up: `
+      -- One row per identity key of a detected transaction. UNIQUE(scope, key) is the database-level arbiter: the
+      -- same bank event can never be attached to two transactions, even under concurrent or retried processing.
+      -- Keys: 'ref:<bank reference>' (authoritative), 'fp:<legacy fingerprint>', 'ev:<cross-source event key>'.
+      CREATE TABLE IF NOT EXISTS transaction_keys (
+        scope TEXT NOT NULL,
+        key TEXT NOT NULL,
+        transaction_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (scope, key),
+        FOREIGN KEY (transaction_id) REFERENCES transactions(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_transaction_keys_txn ON transaction_keys(transaction_id);
+
+      -- Which detection sources saw a transaction. Local-only debug metadata; never holds a raw message body.
+      CREATE TABLE IF NOT EXISTS transaction_sources (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        transaction_id TEXT NOT NULL,
+        source TEXT NOT NULL CHECK(source IN ('sms', 'truecaller_notification')),
+        detected_at TEXT NOT NULL,
+        processed_at TEXT NOT NULL,
+        seen_count INTEGER NOT NULL DEFAULT 1,
+        metadata TEXT NOT NULL DEFAULT '{}',
+        UNIQUE (transaction_id, source),
+        FOREIGN KEY (transaction_id) REFERENCES transactions(id) ON DELETE CASCADE
+      );
+
+      -- Existing auto-detected transactions keep working: register their identity keys.
+      -- OR IGNORE: legacy data containing duplicates must never fail the migration.
+      INSERT OR IGNORE INTO transaction_keys (scope, key, transaction_id, created_at)
+        SELECT COALESCE(user_id, ''), 'ref:' || reference_id, id, created_at FROM transactions
+        WHERE deleted_at IS NULL AND reference_id IS NOT NULL AND reference_id != '';
+      INSERT OR IGNORE INTO transaction_keys (scope, key, transaction_id, created_at)
+        SELECT COALESCE(user_id, ''), 'fp:' || fingerprint, id, created_at FROM transactions
+        WHERE deleted_at IS NULL AND source = 'sms' AND fingerprint IS NOT NULL AND fingerprint != ''
+          AND (reference_id IS NULL OR reference_id = '');
+      INSERT OR IGNORE INTO transaction_sources (transaction_id, source, detected_at, processed_at, metadata)
+        SELECT id, 'sms', created_at, created_at, '{"backfilled":true}' FROM transactions
+        WHERE source = 'sms' AND deleted_at IS NULL;
+    `,
+  },
+  {
+    version: 7,
+    description: 'Unified ledger: transaction kind, verification, capture source, account evidence, possible duplicates, account profiles',
+    up: `
+      -- Additive only. Existing rows keep every value; defaults describe what they already were.
+      ALTER TABLE transactions ADD COLUMN txn_kind TEXT NOT NULL DEFAULT 'payment';
+      ALTER TABLE transactions ADD COLUMN verification_status TEXT NOT NULL DEFAULT 'verified';
+      ALTER TABLE transactions ADD COLUMN capture_source TEXT;
+      ALTER TABLE transactions ADD COLUMN account_last4 TEXT;
+      ALTER TABLE transactions ADD COLUMN bank_name TEXT;
+      ALTER TABLE transactions ADD COLUMN payment_app TEXT;
+      ALTER TABLE transactions ADD COLUMN possible_duplicate_of TEXT;
+      ALTER TABLE transactions ADD COLUMN confidence REAL;
+
+      UPDATE transactions SET capture_source = 'manual' WHERE source = 'manual';
+      UPDATE transactions SET capture_source = 'sms', verification_status = 'detected' WHERE source = 'sms';
+      UPDATE transactions SET capture_source = 'notification'
+        WHERE source = 'sms' AND NOT EXISTS (SELECT 1 FROM transaction_sources s WHERE s.transaction_id = transactions.id AND s.source = 'sms')
+          AND EXISTS (SELECT 1 FROM transaction_sources s WHERE s.transaction_id = transactions.id);
+      CREATE INDEX IF NOT EXISTS idx_transactions_review ON transactions(user_id, verification_status);
+
+      -- transaction_sources CHECK cannot be altered in place: copy -> drop -> rename (data preserved).
+      CREATE TABLE transaction_sources_v7 (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        transaction_id TEXT NOT NULL,
+        source TEXT NOT NULL CHECK(source IN ('sms', 'truecaller_notification', 'payment_notification', 'csv_import')),
+        detected_at TEXT NOT NULL,
+        processed_at TEXT NOT NULL,
+        seen_count INTEGER NOT NULL DEFAULT 1,
+        metadata TEXT NOT NULL DEFAULT '{}',
+        UNIQUE (transaction_id, source),
+        FOREIGN KEY (transaction_id) REFERENCES transactions(id) ON DELETE CASCADE
+      );
+      INSERT INTO transaction_sources_v7 (id, transaction_id, source, detected_at, processed_at, seen_count, metadata)
+        SELECT id, transaction_id, source, detected_at, processed_at, seen_count, metadata FROM transaction_sources;
+      DROP TABLE transaction_sources;
+      ALTER TABLE transaction_sources_v7 RENAME TO transaction_sources;
+
+      -- Bank accounts discovered from evidence (never connected). Only a suffix is stored, never a full number.
+      CREATE TABLE IF NOT EXISTS account_profiles (
+        id TEXT PRIMARY KEY,
+        user_id TEXT,
+        bank_name TEXT,
+        last4 TEXT,
+        label TEXT,
+        status TEXT NOT NULL DEFAULT 'suggested' CHECK(status IN ('suggested', 'confirmed')),
+        merged_into TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_account_profile
+        ON account_profiles(COALESCE(user_id, ''), COALESCE(bank_name, ''), COALESCE(last4, '')) WHERE merged_into IS NULL;
+    `,
+  },
+  {
+    version: 8,
+    description: 'Review notification state: which transactions have been announced on this device',
+    up: `
+      -- Device-local and never synced. Deliberately no foreign key: a row must outlive its transaction just long enough
+      -- for the notification of a deleted transaction to be cancelled.
+      CREATE TABLE IF NOT EXISTS review_notifications (
+        transaction_id TEXT PRIMARY KEY,
+        state TEXT NOT NULL CHECK(state IN ('posted', 'summarized')),
+        reason TEXT NOT NULL DEFAULT '',
+        notified_at TEXT NOT NULL
+      );
+    `,
+  },
 ];
 
 export const DEFAULT_CATEGORIES = [

@@ -1,0 +1,51 @@
+import type { CaptureSource, DetectionSource, TransactionKind, VerificationStatus } from '../db/types.ts';
+
+/**
+ * The one definition of how a ledger row counts towards money totals. SQL and in-memory versions must stay equivalent:
+ * - possible duplicates count nowhere until the person resolves them
+ * - internal transfers are neither income nor expense
+ * - refunds and reversals are money back, not income
+ * - cash withdrawals count as spending (money left the bank for cash)
+ * Failed and pending bank messages never become rows at all (see the parser).
+ */
+const NOT_DUPLICATE = 'possible_duplicate_of IS NULL';
+const KIND = "COALESCE(txn_kind, 'payment')";
+
+export const SQL_COUNTS_AS_EXPENSE = `(direction = 'expense' AND ${KIND} != 'transfer' AND ${NOT_DUPLICATE})`;
+export const SQL_COUNTS_AS_INCOME = `(direction = 'income' AND ${KIND} NOT IN ('transfer', 'refund', 'reversal') AND ${NOT_DUPLICATE})`;
+export const SQL_COUNTS_AS_REFUND = `(direction = 'income' AND ${KIND} IN ('refund', 'reversal') AND ${NOT_DUPLICATE})`;
+
+type Countable = { direction: string; txn_kind?: TransactionKind; possible_duplicate_of?: string | null };
+
+export function countsAsExpense(t: Countable): boolean {
+  return t.direction === 'expense' && (t.txn_kind ?? 'payment') !== 'transfer' && !t.possible_duplicate_of;
+}
+
+export function countsAsIncome(t: Countable): boolean {
+  return t.direction === 'income' && !['transfer', 'refund', 'reversal'].includes(t.txn_kind ?? 'payment') && !t.possible_duplicate_of;
+}
+
+export const KIND_LABELS: Record<TransactionKind, string> = {
+  payment: 'Payment', refund: 'Refund', reversal: 'Reversal', transfer: 'Own transfer', cash_withdrawal: 'Cash withdrawal',
+};
+
+export const VERIFICATION_LABELS: Record<VerificationStatus, string> = {
+  detected: 'Detected', needs_review: 'Needs review', verified: 'Verified', reconciled: 'Reconciled',
+};
+
+const CAPTURE_LABELS: Record<CaptureSource, string> = {
+  manual: 'Manual', sms: 'SMS', notification: 'Notification', csv_import: 'Statement',
+};
+
+/** Short uppercase origin for list rows: where the row came from, plus the other channels that confirmed it. */
+export function sourceLabel(t: { source: string; capture_source?: CaptureSource | null; detected_via?: DetectionSource[]; payment_app?: string | null }): string {
+  if (t.source === 'manual' && !t.detected_via?.length) return 'MANUAL';
+  const via = t.detected_via ?? [];
+  const parts: string[] = [];
+  if (via.includes('sms')) parts.push('SMS');
+  if (via.includes('truecaller_notification')) parts.push('TRUECALLER');
+  if (via.includes('payment_notification')) parts.push((t.payment_app ?? 'APP').toUpperCase());
+  if (via.includes('csv_import')) parts.push('STATEMENT');
+  if (parts.length) return parts.join(' + ');
+  return CAPTURE_LABELS[t.capture_source ?? (t.source === 'sms' ? 'sms' : 'manual')].toUpperCase();
+}

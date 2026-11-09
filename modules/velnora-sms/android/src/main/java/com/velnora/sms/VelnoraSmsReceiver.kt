@@ -52,7 +52,12 @@ object VelnoraSmsReceiverState {
     synchronized(lock) { if (senderPatterns.isEmpty()) configureFromManifest(context) }
     synchronized(lock) { if (senderPatterns.none { it.matches(sender) }) return false }
 
-    return VelnoraSmsStagingStore.get(context).stage(sender, body, timestamp, partCount) > 0
+    // Authentication codes are never written to disk, not even briefly.
+    if (VelnoraBankAlerts.isOtp(body)) return false
+
+    val staged = VelnoraSmsStagingStore.get(context).stage(sender, body, timestamp, partCount) > 0
+    if (staged && VelnoraBankAlerts.looksLikeTransaction(body)) VelnoraBankAlerts.wakeCapture(context)
+    return staged
   }
 
   private object PackageManagerFlags {

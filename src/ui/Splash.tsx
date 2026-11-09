@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Animated, Dimensions, Easing, StyleSheet, Text } from 'react-native';
 import { palette } from '../../theme';
+import { type } from '../../typography';
 import { VelnoraLogo } from './VelnoraLogo';
 
 const LOGO_SIZE = 112; // on-screen width of the chevron symbol
@@ -49,7 +50,7 @@ export function Splash({ onFinish }: { onFinish?: () => void }) {
     }}>
       {/* The Velnora chevron symbol only (no tile), shared with the login screens. */}
       <VelnoraLogo size={LOGO_SIZE} onLoad={layerLoaded} />
-      <Text style={{ color: '#FFFFFF', fontSize: 22, fontWeight: '800', letterSpacing: 6, marginTop: 18 }}>VELNORA</Text>
+      <Text style={{ ...type.title, color: palette.onNavy, letterSpacing: 6, marginTop: 18 }}>VELNORA</Text>
     </Animated.View>
   </Animated.View>;
 }

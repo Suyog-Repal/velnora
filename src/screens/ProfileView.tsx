@@ -1,10 +1,14 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Alert, Animated, Easing, Pressable, Text, View } from 'react-native';
 import { ACCENTS, palette, type AccentId, type ThemeMode } from '../../theme';
-import { Check, ChevronRight, LogOut, MessageSquare, Settings, Sliders, TagIcon as Tag, UserRound, WifiOff } from '../../icons';
+import { Bell, Check, ChevronRight, LogOut, MessageSquare, ReceiptIcon, Settings, Sliders, TagIcon as Tag, UserRound, WalletCards, WifiOff } from '../../icons';
 import { currencySymbol, formatPaise, type Colors } from '../ui/common';
 import { useSmsPermission } from '../ui/useSmsPermission';
-import { smsPermissionLabel } from '../services/smsPermissionPolicy';
+import { useCapturePermissions } from '../ui/useCapturePermissions';
+import { countsAsExpense } from '../services/ledgerRules';
+import { getServiceDb } from '../services/transactionService';
+import { getReviewPref, reviewPrefLabel, runReviewPass, setReviewPref, type ReviewNotificationPref } from '../services/reviewNotifications';
+import { appNotificationsLabel, notificationAccessLabel, smsPermissionLabel } from '../services/smsPermissionPolicy';
 import type { Session, TransactionEntity } from '../db/types';
 
 /** Fades + lifts a block in; blocks are staggered by `index` so the page assembles instead of popping in. */
@@ -25,7 +29,7 @@ export function Tap({ onPress, children, disabled, style, label }: { onPress?: (
 
 export function Group({ title, colors, children }: { title: string; colors: Colors; children: ReactNode }) {
   return <View style={{ marginTop: 22 }}>
-    <Text style={{ color: colors.muted, fontSize: 12, fontWeight: '800', letterSpacing: 0.8, marginBottom: 8, marginLeft: 4 }}>{title.toUpperCase()}</Text>
+    <Text style={{ color: colors.muted, fontSize: 12, fontWeight: '600', letterSpacing: 0.8, marginBottom: 8, marginLeft: 4 }}>{title.toUpperCase()}</Text>
     <View style={{ backgroundColor: colors.card, borderColor: colors.border, borderWidth: 1, borderRadius: 20, overflow: 'hidden' }}>{children}</View>
   </View>;
 }
@@ -35,7 +39,7 @@ export function Row({ icon, title, value, colors, onPress, last, tone }: { icon:
   return <Tap onPress={onPress} label={title} style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, paddingVertical: 13, borderBottomWidth: last ? 0 : 1, borderBottomColor: colors.border }}>
     <View style={{ width: 38, height: 38, borderRadius: 12, backgroundColor: `${tint}1F`, alignItems: 'center', justifyContent: 'center' }}>{icon}</View>
     <View style={{ flex: 1, marginLeft: 12 }}>
-      <Text style={{ color: tone === 'danger' ? palette.danger : colors.text, fontWeight: '700', fontSize: 15 }}>{title}</Text>
+      <Text style={{ color: tone === 'danger' ? palette.expenseText : colors.text, fontWeight: '700', fontSize: 15 }}>{title}</Text>
       {value ? <Text style={{ color: colors.muted, fontSize: 12, marginTop: 2 }}>{value}</Text> : null}
     </View>
     {onPress ? <ChevronRight size={18} color={colors.muted} /> : null}
@@ -53,7 +57,7 @@ export function ModeSwitch({ mode, setMode, colors }: { mode: ThemeMode; setMode
   return <View onLayout={(e) => setWidth(e.nativeEvent.layout.width)} style={{ flexDirection: 'row', backgroundColor: colors.canvas, borderRadius: 14, padding: 4, borderWidth: 1, borderColor: colors.border }}>
     {inner > 0 ? <Animated.View pointerEvents="none" style={{ position: 'absolute', top: 4, left: 4, width: inner / MODES.length, bottom: 4, borderRadius: 11, backgroundColor: palette.emerald, transform: [{ translateX: x }] }} /> : null}
     {MODES.map((m) => <Pressable key={m.id} onPress={() => setMode(m.id)} accessibilityRole="button" accessibilityState={{ selected: mode === m.id }} style={{ flex: 1, minHeight: 40, alignItems: 'center', justifyContent: 'center' }}>
-      <Text style={{ fontWeight: '800', fontSize: 13, color: mode === m.id ? '#FFFFFF' : colors.muted }}>{m.label}</Text>
+      <Text style={{ fontWeight: '600', fontSize: 13, color: mode === m.id ? '#FFFFFF' : colors.muted }}>{m.label}</Text>
     </Pressable>)}
   </View>;
 }
@@ -65,14 +69,14 @@ export function Swatch({ id, main, label, active, onPress, colors }: { id: Accen
     <Animated.View style={{ width: 44, height: 44, borderRadius: 22, backgroundColor: main, alignItems: 'center', justifyContent: 'center', transform: [{ scale: s.interpolate({ inputRange: [0, 1], outputRange: [1, 1.14] }) }], borderWidth: 3, borderColor: active ? colors.text : 'transparent' }}>
       <Animated.View style={{ opacity: s }}><Check size={18} color="#FFFFFF" /></Animated.View>
     </Animated.View>
-    <Text style={{ color: active ? colors.text : colors.muted, fontSize: 11, fontWeight: '700', marginTop: 6 }}>{label}</Text>
+    <Text style={{ color: active ? colors.text : colors.muted, fontSize: 12, fontWeight: '700', marginTop: 6 }}>{label}</Text>
   </Pressable>;
 }
 
 function Stat({ label, value, colors }: { label: string; value: string; colors: Colors }) {
   return <View style={{ flex: 1, backgroundColor: 'rgba(255,255,255,0.08)', borderRadius: 14, paddingVertical: 10, paddingHorizontal: 12 }}>
-    <Text style={{ color: '#B9C9D7', fontSize: 10, fontWeight: '800', letterSpacing: 0.6 }}>{label}</Text>
-    <Text style={{ color: '#FFFFFF', fontSize: 16, fontWeight: '800', marginTop: 4 }} numberOfLines={1} adjustsFontSizeToFit>{value}</Text>
+    <Text style={{ color: '#B9C9D7', fontSize: 12, fontWeight: '600', letterSpacing: 0.6 }}>{label}</Text>
+    <Text style={{ color: '#FFFFFF', fontSize: 16, fontWeight: '600', marginTop: 4 }} numberOfLines={1} adjustsFontSizeToFit>{value}</Text>
   </View>;
 }
 
@@ -94,14 +98,14 @@ export function profileStats(transactions: TransactionEntity[], now = new Date()
     count += 1;
     if (t.sync_status !== 'synced' && t.user_id) pending += 1;
     const d = new Date(t.transaction_date);
-    if (t.direction === 'expense' && d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth()) spentPaise += t.amount_paise;
+    if (countsAsExpense(t) && d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth()) spentPaise += t.amount_paise;
   }
   return { count, spentPaise, pending };
 }
 
-export function ProfileView({ session, colors, mode, accent, transactions, online, onOpenSettings, onOpenCurrency, currencyLabel, onOpenCategories, onOpenAliases, onSignIn, onCreate, onLogout, accountSections }: {
+export function ProfileView({ session, colors, mode, accent, transactions, online, onOpenSettings, onOpenCurrency, currencyLabel, onOpenCategories, onOpenAliases, onOpenReview, onOpenAccounts, onOpenImport, reviewCount, onSignIn, onCreate, onLogout, accountSections }: {
   session: Session | null; colors: Colors; mode: ThemeMode; accent: AccentId;
-  transactions: TransactionEntity[]; online: boolean; onOpenSettings: () => void; onOpenCurrency: () => void; currencyLabel: string; onOpenCategories: () => void; onOpenAliases: () => void; onSignIn: () => void; onCreate: () => void; onLogout: () => void;
+  transactions: TransactionEntity[]; online: boolean; onOpenSettings: () => void; onOpenCurrency: () => void; currencyLabel: string; onOpenCategories: () => void; onOpenAliases: () => void; onOpenReview: () => void; onOpenAccounts: () => void; onOpenImport: () => void; reviewCount: number; onSignIn: () => void; onCreate: () => void; onLogout: () => void;
   /** Real, existing account controls (delete local data, SMS status) rendered inside the Privacy card. */
   accountSections?: ReactNode;
 }) {
@@ -112,6 +116,14 @@ export function ProfileView({ session, colors, mode, accent, transactions, onlin
   useEffect(() => { Animated.timing(avatarPulse, { toValue: 1, duration: 700, delay: 120, easing: Easing.out(Easing.back(1.6)), useNativeDriver: true }).start(); }, [avatarPulse]);
   let i = 0;
   const sms = useSmsPermission();
+  const capture = useCapturePermissions();
+  const [reviewPref, setReviewPrefState] = useState<ReviewNotificationPref>('all');
+  useEffect(() => { void getReviewPref(getServiceDb()).then(setReviewPrefState).catch(() => undefined); }, []);
+  const cycleReviewPref = () => {
+    const next: ReviewNotificationPref = reviewPref === 'all' ? 'duplicates' : reviewPref === 'duplicates' ? 'off' : 'all';
+    setReviewPrefState(next);
+    void setReviewPref(getServiceDb(), next).then(() => runReviewPass(getServiceDb(), session?.user.id ?? null)).catch(() => undefined);
+  };
   // Granted → open Android's permission page to manage it. Not granted → ask; if that does not work, explain and offer Settings.
   const onSmsPress = () => {
     if (!sms.available) return;
@@ -125,10 +137,10 @@ export function ProfileView({ session, colors, mode, accent, transactions, onlin
         <View style={{ position: 'absolute', right: -40, top: -50, width: 180, height: 180, borderRadius: 90, backgroundColor: palette.emerald, opacity: 0.22 }} />
         <View style={{ flexDirection: 'row', alignItems: 'center' }}>
           <Animated.View style={{ width: 68, height: 68, borderRadius: 34, backgroundColor: palette.emerald, alignItems: 'center', justifyContent: 'center', borderWidth: 3, borderColor: 'rgba(255,255,255,0.35)', transform: [{ scale: avatarPulse.interpolate({ inputRange: [0, 1], outputRange: [0.6, 1] }) }], opacity: avatarPulse }}>
-            {session ? <Text style={{ color: '#FFFFFF', fontSize: 28, fontWeight: '800' }}>{name.charAt(0).toUpperCase()}</Text> : <UserRound size={30} color="#FFFFFF" />}
+            {session ? <Text style={{ color: '#FFFFFF', fontSize: 28, fontWeight: '700' }}>{name.charAt(0).toUpperCase()}</Text> : <UserRound size={30} color="#FFFFFF" />}
           </Animated.View>
           <View style={{ flex: 1, marginLeft: 14 }}>
-            <Text style={{ color: '#FFFFFF', fontSize: 22, fontWeight: '800' }} numberOfLines={1}>{name}</Text>
+            <Text style={{ color: '#FFFFFF', fontSize: 22, fontWeight: '700' }} numberOfLines={1}>{name}</Text>
             <Text style={{ color: '#C8D5DF', fontSize: 13, marginTop: 2 }} numberOfLines={1}>{session?.user.email ?? 'Not signed in'}</Text>
           </View>
         </View>
@@ -145,17 +157,20 @@ export function ProfileView({ session, colors, mode, accent, transactions, onlin
 
     {!session ? <Reveal index={i++}>
       <View style={{ marginTop: 16, backgroundColor: colors.card, borderColor: colors.border, borderWidth: 1, borderRadius: 20, padding: 16 }}>
-        <Text style={{ color: colors.text, fontWeight: '800', fontSize: 16 }}>Sync across devices</Text>
+        <Text style={{ color: colors.text, fontWeight: '600', fontSize: 16 }}>Sync across devices</Text>
         <Text style={{ color: colors.muted, marginTop: 4, marginBottom: 12 }}>Your data is stored only on this device. Create a free account to back it up and sync. You choose what to import.</Text>
-        <Tap onPress={onCreate} style={{ backgroundColor: palette.emerald, borderRadius: 14, minHeight: 48, alignItems: 'center', justifyContent: 'center' }}><Text style={{ color: '#FFFFFF', fontWeight: '800' }}>Create an account</Text></Tap>
-        <Tap onPress={onSignIn} style={{ minHeight: 44, alignItems: 'center', justifyContent: 'center', marginTop: 4 }}><Text style={{ color: palette.emerald, fontWeight: '800' }}>I already have an account</Text></Tap>
+        <Tap onPress={onCreate} style={{ backgroundColor: palette.emerald, borderRadius: 14, minHeight: 48, alignItems: 'center', justifyContent: 'center' }}><Text style={{ color: '#FFFFFF', fontWeight: '700' }}>Create an account</Text></Tap>
+        <Tap onPress={onSignIn} style={{ minHeight: 44, alignItems: 'center', justifyContent: 'center', marginTop: 4 }}><Text style={{ color: palette.accentText, fontWeight: '700' }}>I already have an account</Text></Tap>
       </View>
     </Reveal> : null}
 
     <Reveal index={i++}>
       <Group title="Your data" colors={colors}>
         <Row icon={<Tag size={18} color={palette.emerald} />} title="Categories" value="Create, edit and organise" colors={colors} onPress={onOpenCategories} />
-        <Row icon={<Sliders size={18} color={palette.emerald} />} title="Merchant names" value={session ? 'Corrections Velnora remembers' : 'Sign in to use'} colors={colors} onPress={onOpenAliases} last />
+        <Row icon={<Sliders size={18} color={palette.emerald} />} title="Merchant names" value={session ? 'Corrections Velnora remembers' : 'Sign in to use'} colors={colors} onPress={onOpenAliases} />
+        <Row icon={<Check size={18} color={palette.emerald} />} title="Review transactions" value={reviewCount > 0 ? `${reviewCount} waiting for you` : 'Nothing to review'} colors={colors} onPress={onOpenReview} />
+        <Row icon={<WalletCards size={18} color={palette.emerald} />} title="Accounts" value="Found from your bank messages" colors={colors} onPress={onOpenAccounts} />
+        <Row icon={<ReceiptIcon size={18} color={palette.emerald} />} title="Import statement" value="Add or match from a CSV file" colors={colors} onPress={onOpenImport} last />
       </Group>
     </Reveal>
 
@@ -163,7 +178,10 @@ export function ProfileView({ session, colors, mode, accent, transactions, onlin
       <Group title="Preferences" colors={colors}>
         <Row icon={<Settings size={18} color={palette.emerald} />} title="Settings" value={`Theme · ${mode === 'system' ? 'System' : mode === 'dark' ? 'Dark' : 'Light'}, ${ACCENTS.find((x) => x.id === accent)?.label ?? ''} accent`} colors={colors} onPress={onOpenSettings} />
         <Row icon={<MessageSquare size={18} color={palette.emerald} />} title="Bank SMS detection" value={smsPermissionLabel(sms)} colors={colors} onPress={sms.available ? onSmsPress : undefined} />
-        <Row icon={<Text style={{ color: palette.emerald, fontWeight: '800', fontSize: 16 }}>{currencySymbol()}</Text>} title="Currency" value={currencyLabel} colors={colors} onPress={onOpenCurrency} last />
+        <Row icon={<WalletCards size={18} color={palette.emerald} />} title="Payment-app alerts" value={notificationAccessLabel({ available: capture.accessAvailable, granted: capture.access })} colors={colors} onPress={capture.accessAvailable ? () => { capture.openAccessSettings(); } : undefined} />
+        <Row icon={<Bell size={18} color={palette.emerald} />} title="Velnora notifications" value={appNotificationsLabel({ available: capture.appNotificationsAvailable, granted: capture.appNotifications })} colors={colors} onPress={capture.appNotificationsAvailable ? () => { void capture.toggleAppNotifications(); } : undefined} />
+        <Row icon={<Check size={18} color={palette.emerald} />} title="Review reminders" value={reviewPrefLabel(reviewPref)} colors={colors} onPress={cycleReviewPref} />
+        <Row icon={<Text style={{ color: palette.accentText, fontWeight: '600', fontSize: 16 }}>{currencySymbol()}</Text>} title="Currency" value={currencyLabel} colors={colors} onPress={onOpenCurrency} last />
       </Group>
     </Reveal>
 
@@ -173,7 +191,7 @@ export function ProfileView({ session, colors, mode, accent, transactions, onlin
       <View style={{ marginTop: 22 }}>
         <Tap onPress={() => Alert.alert('Sign out?', 'Your data stays on this device and syncs again when you sign back in.', [{ text: 'Cancel', style: 'cancel' }, { text: 'Sign out', style: 'destructive', onPress: onLogout }])}
           label="Sign out" style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', minHeight: 52, borderRadius: 16, borderWidth: 1, borderColor: `${palette.danger}66`, backgroundColor: `${palette.danger}10` }}>
-          <LogOut size={18} color={palette.danger} /><Text style={{ color: palette.danger, fontWeight: '800', marginLeft: 8 }}>Sign out</Text>
+          <LogOut size={18} color={palette.danger} /><Text style={{ color: palette.expenseText, fontWeight: '700', marginLeft: 8 }}>Sign out</Text>
         </Tap>
       </View>
     </Reveal> : null}

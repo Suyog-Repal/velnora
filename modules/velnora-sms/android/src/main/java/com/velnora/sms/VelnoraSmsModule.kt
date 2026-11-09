@@ -20,6 +20,59 @@ class VelnoraSmsModule : Module() {
         PackageManager.PERMISSION_GRANTED
     }
 
+    /** Notification access is a special grant (Settings > Notification access), not a runtime permission. */
+    Function("isNotificationAccessGranted") {
+      val context = appContext.reactContext ?: return@Function false
+      val enabled = android.provider.Settings.Secure.getString(context.contentResolver, "enabled_notification_listeners")
+      return@Function enabled?.split(":")?.any {
+        android.content.ComponentName.unflattenFromString(it)?.packageName == context.packageName
+      } ?: false
+    }
+
+    Function("openNotificationAccessSettings") {
+      val context = appContext.reactContext ?: return@Function false
+      val intent = android.content.Intent(android.provider.Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
+        .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+      context.startActivity(intent)
+      return@Function true
+    }
+
+    /** Whether Android lets Velnora post its own notifications (POST_NOTIFICATIONS on 13+, the app toggle before that). */
+    Function("areNotificationsEnabled") {
+      val context = appContext.reactContext ?: return@Function false
+      val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+      return@Function android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.N || manager.areNotificationsEnabled()
+    }
+
+    Function("openAppNotificationSettings") {
+      val context = appContext.reactContext ?: return@Function false
+      val intent = android.content.Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+        .putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, context.packageName)
+        .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+      context.startActivity(intent)
+      return@Function true
+    }
+
+    Function("postReviewNotification") { transactionId: String, title: String, body: String ->
+      val context = appContext.reactContext ?: return@Function false
+      return@Function VelnoraBankAlerts.postReview(context, transactionId, title, body)
+    }
+
+    Function("postReviewSummary") { count: Int ->
+      val context = appContext.reactContext ?: return@Function false
+      return@Function VelnoraBankAlerts.postReviewSummary(context, count)
+    }
+
+    Function("cancelReviewNotification") { transactionId: String ->
+      appContext.reactContext?.let { VelnoraBankAlerts.cancelReview(it, transactionId) }
+      return@Function null
+    }
+
+    Function("cancelReviewSummary") {
+      appContext.reactContext?.let { VelnoraBankAlerts.cancelReviewSummary(it) }
+      return@Function null
+    }
+
     AsyncFunction("setOwnerHint") { userId: String -> store().setOwnerHint(userId) }
 
     AsyncFunction("clearOwnerHint") { store().clearOwnerHint() }

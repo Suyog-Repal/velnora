@@ -65,7 +65,7 @@ async function drainOnce(
       let result: SmsProcessResult;
       try {
         result = await processor(
-          { sender: item.sender, receivedAt: item.receivedAt, partCount: item.partCount, body: item.body },
+          { sender: item.sender, receivedAt: item.receivedAt, partCount: item.partCount, body: item.body, source: item.source ?? 'sms', sourceApp: item.sourceApp ?? undefined },
           session,
           rules,
         );

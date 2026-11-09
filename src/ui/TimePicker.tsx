@@ -54,7 +54,7 @@ export function TimePickerModal({ visible, value, colors, onCancel, onConfirm, t
   const knobLabel = mode === 'hour' ? String(hour12) : minute % 5 === 0 ? pad(minute) : '';
 
   const seg = (label: string, active: boolean, onPress: () => void, a11y: string) => <Pressable onPress={onPress} accessibilityRole="button" accessibilityLabel={a11y} accessibilityState={{ selected: active }}
-    style={[s.segBtn, { backgroundColor: active ? accent : colors.card, borderColor: active ? accent : colors.border }]}><Text style={{ color: active ? onAccent : colors.text, fontWeight: '800', fontSize: 13 }}>{label}</Text></Pressable>;
+    style={[s.segBtn, { backgroundColor: active ? accent : colors.card, borderColor: active ? accent : colors.border }]}><Text style={{ color: active ? onAccent : colors.text, fontWeight: '600', fontSize: 13 }}>{label}</Text></Pressable>;
 
   return <Modal visible={visible} transparent animationType="fade" statusBarTranslucent onRequestClose={onCancel}>
     <View style={s.backdrop}>
@@ -84,14 +84,14 @@ export function TimePickerModal({ visible, value, colors, onCancel, onConfirm, t
             </View>;
           })}
           <View pointerEvents="none" style={{ position: 'absolute', left: knobX - KNOB / 2, top: knobY - KNOB / 2, width: KNOB, height: KNOB, borderRadius: KNOB / 2, backgroundColor: accent, alignItems: 'center', justifyContent: 'center' }}>
-            {knobLabel ? <Text style={{ color: onAccent, fontWeight: '800', fontSize: 15 }}>{knobLabel}</Text> : <View style={{ width: 4, height: 4, borderRadius: 2, backgroundColor: onAccent }} />}
+            {knobLabel ? <Text style={{ color: onAccent, fontWeight: '600', fontSize: 15 }}>{knobLabel}</Text> : <View style={{ width: 4, height: 4, borderRadius: 2, backgroundColor: onAccent }} />}
           </View>
         </View>
 
         <View style={s.actions}>
           <Text style={{ color: colors.muted, flex: 1, fontSize: 12 }}>{mode === 'hour' ? 'Tap or drag to pick the hour' : 'Drag to pick the minute'}</Text>
-          <Pressable onPress={onCancel} accessibilityRole="button" style={s.textBtn}><Text style={{ color: colors.muted, fontWeight: '800' }}>Cancel</Text></Pressable>
-          <Pressable onPress={() => onConfirm(toHm(hour24, minute))} accessibilityRole="button" style={s.textBtn}><Text style={{ color: accent, fontWeight: '800' }}>OK</Text></Pressable>
+          <Pressable onPress={onCancel} accessibilityRole="button" style={s.textBtn}><Text style={{ color: colors.muted, fontWeight: '700' }}>Cancel</Text></Pressable>
+          <Pressable onPress={() => onConfirm(toHm(hour24, minute))} accessibilityRole="button" style={s.textBtn}><Text style={{ color: accent, fontWeight: '700' }}>OK</Text></Pressable>
         </View>
       </View>
     </View>
@@ -103,9 +103,9 @@ export function TimeField({ value, onChange, colors, title, accessibilityLabel }
   const [open, setOpen] = useState(false);
   return <>
     <Pressable onPress={() => setOpen(true)} accessibilityRole="button" accessibilityLabel={`${accessibilityLabel ?? 'Time'}: ${formatDisplayTime(value)}`}
-      style={[s.field, { backgroundColor: colors.card, borderColor: colors.border }]}>
-      <Clock size={18} color={colors.muted} />
-      <Text numberOfLines={1} style={{ flex: 1, marginLeft: 10, color: colors.text, fontSize: 15 }}>{formatDisplayTime(value) || 'Select time'}</Text>
+      style={({ pressed }) => [s.field, { backgroundColor: colors.card, borderColor: pressed || open ? palette.emerald : colors.border, borderWidth: pressed || open ? 1.5 : 1 }]}>
+      <Clock size={18} color={open ? palette.emerald : colors.muted} strokeWidth={2} />
+      <Text numberOfLines={1} style={{ flex: 1, marginLeft: 10, color: colors.text, fontSize: 16 }}>{formatDisplayTime(value) || 'Select time'}</Text>
     </Pressable>
     <TimePickerModal visible={open} value={value} title={title} colors={colors} onCancel={() => setOpen(false)} onConfirm={(v) => { setOpen(false); onChange(v); }} />
   </>;
@@ -114,14 +114,14 @@ export function TimeField({ value, onChange, colors, title, accessibilityLabel }
 const s = StyleSheet.create({
   backdrop: { flex: 1, backgroundColor: 'rgba(8,24,39,0.55)', alignItems: 'center', justifyContent: 'center', padding: 20 },
   dialog: { width: '100%', maxWidth: 340, borderRadius: 24, borderWidth: StyleSheet.hairlineWidth, padding: 18, alignItems: 'center' },
-  dialogTitle: { fontSize: 11, fontWeight: '800', letterSpacing: 1, alignSelf: 'flex-start' },
+  dialogTitle: { fontSize: 12, fontWeight: '600', letterSpacing: 1, alignSelf: 'flex-start' },
   readout: { flexDirection: 'row', alignItems: 'center', marginTop: 10, marginBottom: 16 },
   digits: { minWidth: 76, height: 64, borderRadius: 14, alignItems: 'center', justifyContent: 'center' },
-  digitText: { fontSize: 40, fontWeight: '800' },
+  digitText: { fontSize: 40, fontWeight: '700' },
   segBtn: { width: 52, height: 30, borderRadius: 10, borderWidth: 1, alignItems: 'center', justifyContent: 'center' },
   dial: { width: SIZE, height: SIZE, borderRadius: SIZE / 2, borderWidth: 1 },
   dialNum: { width: 32, height: 32, textAlign: 'center', textAlignVertical: 'center', lineHeight: 32, fontSize: 15, fontWeight: '600' },
   actions: { flexDirection: 'row', alignItems: 'center', alignSelf: 'stretch', marginTop: 12 },
   textBtn: { minHeight: 44, paddingHorizontal: 14, alignItems: 'center', justifyContent: 'center' },
-  field: { minHeight: 48, borderWidth: 1, borderRadius: 12, paddingHorizontal: 14, flexDirection: 'row', alignItems: 'center' },
+  field: { minHeight: 48, borderWidth: 1, borderRadius: 14, paddingHorizontal: 14, flexDirection: 'row', alignItems: 'center' },
 });

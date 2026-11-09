@@ -14,10 +14,10 @@ async function runAllDatabaseTests() {
     console.log('Test 1: Running schema migrations...');
     const adapter = new NodeSqliteAdapter();
     const appliedCount = await runMigrations(adapter);
-    assert.equal(appliedCount, 5, 'Initial migration should apply 5 versions');
+    assert.equal(appliedCount, 8, 'Initial migration should apply 8 versions');
 
     const version = await getCurrentSchemaVersion(adapter);
-    assert.equal(version, 5, 'Current schema version should be 5');
+    assert.equal(version, 8, 'Current schema version should be 8');
 
     // Run again, should be idempotent
     const rerunCount = await runMigrations(adapter);
@@ -367,7 +367,7 @@ async function runAllDatabaseTests() {
 
     // Run migration 2
     const newlyApplied = await runMigrations(adapter);
-    assert.equal(newlyApplied, 4, 'Migrations 2-5 should be applied');
+    assert.equal(newlyApplied, 7, 'Migrations 2-8 should be applied');
 
     // Verify amount_paise was populated correctly by backfill
     const row = await adapter.getFirstAsync<{ amount: number; amount_paise: number }>(

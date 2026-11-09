@@ -2,6 +2,7 @@ import { withWriteLock } from '../db/writeLock.ts';
 import { SyncQueueRepository, generateUUID } from '../db/repositories/syncQueueRepository.ts';
 import type { IDatabase } from '../db/types.ts';
 import type { Scope } from './categoryService.ts';
+import { SQL_COUNTS_AS_EXPENSE } from './ledgerRules.ts';
 
 export interface Budget { id: string; user_id: string | null; category: string | null; amount_paise: number; created_at: string; updated_at: string }
 export type BudgetState = 'within' | 'near' | 'exceeded';
@@ -89,7 +90,7 @@ export async function spentPaise(db: IDatabase, scope: Scope, month: string, cat
   const { start, end } = monthRange(month);
   const row = await db.getFirstAsync<{ total: number | null }>(
     `SELECT SUM(COALESCE(amount_paise, CAST(ROUND(amount * 100) AS INTEGER))) AS total FROM transactions
-     WHERE direction = 'expense' AND deleted_at IS NULL AND amount > 0 AND ${scopeWhere}
+     WHERE ${SQL_COUNTS_AS_EXPENSE} AND deleted_at IS NULL AND amount > 0 AND ${scopeWhere}
        AND transaction_date >= ? AND transaction_date < ?
        AND (? IS NULL OR category = ? COLLATE NOCASE)`,
     scope, scope, start, end, category, category);

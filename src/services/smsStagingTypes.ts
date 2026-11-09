@@ -8,6 +8,10 @@ export interface StagedSms {
   receivedAt: number;
   partCount: number;
   attempts: number;
+  /** Channel that produced the event; absent on older native builds = 'sms'. For notifications `sender` is the title. */
+  source?: 'sms' | 'truecaller_notification' | 'payment_notification';
+  /** Display name of the app that posted a notification ("Google Pay"); absent for SMS. */
+  sourceApp?: string | null;
 }
 
 export interface StagingCounts {

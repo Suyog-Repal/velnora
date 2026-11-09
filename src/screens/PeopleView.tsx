@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Alert, Pressable, ScrollView, Text, View } from 'react-native';
-import { palette } from '../../theme';
+import { palette, radius } from '../../theme';
+import { typo } from '../../typography';
 import { ArrowDownLeft, ArrowUpRight } from '../../icons';
-import { Button, CategoryIcon, Chip, EmptyBlock, Initial, Input, Labeled, Sheet, currencySymbol, formatPaise, type Colors } from '../ui/common';
+import { Button, CategoryIcon, Chip, EmptyBlock, Initial, Input, Labeled, SearchField, Sheet, currencySymbol, formatPaise, type Colors } from '../ui/common';
 import { Reveal, Tap } from './ProfileView';
 import { TransactionCard } from './TransactionsView';
 import { aggregatePeople, personTransactions, totalsOf, type PersonAggregate } from '../services/peopleService';
@@ -19,10 +20,10 @@ const fmtDate = (iso: string) => new Date(iso).toLocaleDateString('en-IN', { day
 const fmtDue = (d: string) => fmtDate(`${d}T12:00:00`);
 
 function Tile({ label, value, sub, color, colors }: { label: string; value: string; sub?: string; color?: string; colors: Colors }) {
-  return <View style={{ flex: 1, minWidth: '47%', backgroundColor: colors.card, borderColor: colors.border, borderWidth: 1, borderRadius: 16, padding: 12 }}>
-    <Text style={{ color: colors.muted, fontSize: 10, fontWeight: '800', letterSpacing: 0.6 }}>{label}</Text>
-    <Text style={{ color: color ?? colors.text, fontSize: 18, fontWeight: '800', marginTop: 4 }} numberOfLines={1} adjustsFontSizeToFit>{value}</Text>
-    {sub ? <Text style={{ color: colors.muted, fontSize: 11, marginTop: 2 }}>{sub}</Text> : null}
+  return <View style={{ flex: 1, minWidth: '47%', backgroundColor: colors.card, borderColor: colors.border, borderWidth: 1, borderRadius: radius.lg, padding: 14 }}>
+    <Text style={{ color: colors.muted, ...typo.label }}>{label}</Text>
+    <Text style={{ color: color ?? colors.text, ...typo.amountMd, marginTop: 4 }} numberOfLines={1} adjustsFontSizeToFit>{value}</Text>
+    {sub ? <Text style={{ ...typo.caption, color: colors.muted, marginTop: 2 }}>{sub}</Text> : null}
   </View>;
 }
 
@@ -62,19 +63,19 @@ export function PeopleView({ transactions, categories, session, colors, refreshK
         <Tile label="NET" value={formatPaise(all.netPaise)} sub={`${people.length} ${people.length === 1 ? 'person' : 'people'}`} colors={colors} />
         <Tile label="TRANSACTIONS" value={String(all.count)} sub="all time" colors={colors} />
       </View></Reveal>
-      <Input colors={colors} value={query} onChangeText={setQuery} placeholder="Search people" accessibilityLabel="Search people" style={{ marginBottom: 12 }} />
-      {people.length === 0 ? <View><EmptyBlock title="No people yet" text="People appear here from the merchants and names on your transactions." colors={colors} /><Pressable onPress={onAddTransaction}><Text style={{ color: palette.emerald, fontWeight: '800', textAlign: 'center' }}>Add transaction</Text></Pressable></View>
+      <SearchField colors={colors} value={query} onChangeText={setQuery} placeholder="Search people" accessibilityLabel="Search people" />
+      {people.length === 0 ? <View><EmptyBlock title="No people yet" text="People appear here from the merchants and names on your transactions." colors={colors} /><Pressable onPress={onAddTransaction}><Text style={{ color: palette.accentText, fontWeight: '700', textAlign: 'center' }}>Add transaction</Text></Pressable></View>
         : shown.length === 0 ? <EmptyBlock title="No match" text="No one matches that search." colors={colors} />
         : shown.map((p, i) => <Reveal key={p.key} index={Math.min(i, 8) + 1}><Tap onPress={() => setPersonKey(p.key)} label={p.name}
-          style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: colors.card, borderColor: colors.border, borderWidth: 1, borderRadius: 16, padding: 12, marginBottom: 8 }}>
+          style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: colors.card, borderColor: colors.border, borderWidth: 1, borderRadius: radius.lg, padding: 14, marginBottom: 10 }}>
           <Initial label={p.name} color={palette.emerald} />
           <View style={{ flex: 1, marginHorizontal: 12 }}>
-            <Text numberOfLines={1} style={{ color: colors.text, fontWeight: '700', fontSize: 15 }}>{p.name}</Text>
-            <Text style={{ color: colors.muted, fontSize: 12, marginTop: 2 }}>{p.count} transaction{p.count === 1 ? '' : 's'} · last {fmtDate(p.lastAt)}</Text>
+            <Text numberOfLines={1} style={{ ...typo.cardTitle, color: colors.text }}>{p.name}</Text>
+            <Text style={{ ...typo.caption, color: colors.muted, marginTop: 2 }}>{p.count} transaction{p.count === 1 ? '' : 's'} · last {fmtDate(p.lastAt)}</Text>
           </View>
           <View style={{ alignItems: 'flex-end' }}>
-            {p.incomingPaise > 0 ? <Text style={{ color: palette.emerald, fontWeight: '800', fontSize: 13 }}>+{formatPaise(p.incomingPaise)}</Text> : null}
-            {p.outgoingPaise > 0 ? <Text style={{ color: palette.danger, fontWeight: '800', fontSize: 13 }}>-{formatPaise(p.outgoingPaise)}</Text> : null}
+            {p.incomingPaise > 0 ? <Text style={{ color: palette.accentText, ...typo.amountSm, fontSize: 14 }}>+{formatPaise(p.incomingPaise)}</Text> : null}
+            {p.outgoingPaise > 0 ? <Text style={{ color: palette.expenseText, ...typo.amountSm, fontSize: 14 }}>-{formatPaise(p.outgoingPaise)}</Text> : null}
           </View>
         </Tap></Reveal>)}
     </View> : <ExpectedTab expected={expected} summary={summary} colors={colors} onAdd={() => setForm({})} onOpen={(e) => setDetailId(e.id)} />}
@@ -108,15 +109,15 @@ function ExpectedTab({ expected, summary, colors, onAdd, onOpen }: { expected: E
           <View style={{ flexDirection: 'row', alignItems: 'center' }}>
             <Initial label={e.person} color={recv ? palette.emerald : palette.danger} size={36} />
             <View style={{ flex: 1, marginHorizontal: 10 }}>
-              <Text numberOfLines={1} style={{ color: colors.text, fontWeight: '800' }}>{e.person}</Text>
-              <Text numberOfLines={1} style={{ color: colors.muted, fontSize: 12 }}>{recv ? 'Will pay you' : 'You will pay'}{e.note ? ` · ${e.note}` : ''}</Text>
+              <Text numberOfLines={1} style={{ color: colors.text, fontWeight: '700' }}>{e.person}</Text>
+              <Text numberOfLines={1} style={{ ...typo.caption, color: colors.muted }}>{recv ? 'Will pay you' : 'You will pay'}{e.note ? ` · ${e.note}` : ''}</Text>
             </View>
             <View style={{ alignItems: 'flex-end' }}>
-              <Text style={{ color: e.status === 'settled' ? colors.muted : recv ? palette.emerald : palette.danger, fontWeight: '800' }}>{formatPaise(e.status === 'settled' ? e.amount_paise : outstandingPaise(e))}</Text>
-              <Text style={{ color: over ? palette.danger : colors.muted, fontSize: 11, fontWeight: over ? '800' : '500' }}>{e.status === 'settled' ? `Settled ${e.settled_at ? fmtDate(e.settled_at) : ''}` : over ? `Overdue · ${fmtDue(e.due_date!)}` : e.due_date ? `Due ${fmtDue(e.due_date)}` : 'No due date'}</Text>
+              <Text style={{ color: e.status === 'settled' ? colors.muted : recv ? palette.accentText : palette.expenseText, fontWeight: '700', fontVariant: ['tabular-nums'] }}>{formatPaise(e.status === 'settled' ? e.amount_paise : outstandingPaise(e))}</Text>
+              <Text style={{ color: over ? palette.expenseText : colors.muted, ...typo.caption, fontWeight: over ? '700' : '500' }}>{e.status === 'settled' ? `Settled ${e.settled_at ? fmtDate(e.settled_at) : ''}` : over ? `Overdue · ${fmtDue(e.due_date!)}` : e.due_date ? `Due ${fmtDue(e.due_date)}` : 'No due date'}</Text>
             </View>
           </View>
-          {e.status === 'pending' && e.paid_paise > 0 ? <View style={{ marginTop: 10 }}><View style={{ height: 6, borderRadius: 3, backgroundColor: `${palette.emerald}22`, overflow: 'hidden' }}><View style={{ width: `${pct}%`, height: 6, backgroundColor: palette.emerald }} /></View><Text style={{ color: colors.muted, fontSize: 11, marginTop: 4 }}>{formatPaise(e.paid_paise)} of {formatPaise(e.amount_paise)} paid</Text></View> : null}
+          {e.status === 'pending' && e.paid_paise > 0 ? <View style={{ marginTop: 10 }}><View style={{ height: 6, borderRadius: 3, backgroundColor: `${palette.emerald}22`, overflow: 'hidden' }}><View style={{ width: `${pct}%`, height: 6, backgroundColor: palette.emerald }} /></View><Text style={{ color: colors.muted, fontSize: 12, marginTop: 4, fontVariant: ['tabular-nums'] }}>{formatPaise(e.paid_paise)} of {formatPaise(e.amount_paise)} paid</Text></View> : null}
         </Tap></Reveal>;
       })}
   </View>;
@@ -157,16 +158,16 @@ function PersonSheet({ person, transactions, categories, expected, colors, onClo
       <Tile label="TOTAL" value={String(totals.count)} sub="transactions" colors={colors} />
     </View>
 
-    <Text style={{ color: colors.muted, fontSize: 12, fontWeight: '800', letterSpacing: 0.8, marginTop: 6, marginBottom: 8 }}>EXPECTED PAYMENTS</Text>
-    {owesMe > 0 ? <Text style={{ color: palette.emerald, fontWeight: '800', marginBottom: 6 }}>{person.name} still owes you {formatPaise(owesMe)}</Text> : null}
-    {iOwe > 0 ? <Text style={{ color: palette.danger, fontWeight: '800', marginBottom: 6 }}>You still owe {person.name} {formatPaise(iOwe)}</Text> : null}
+    <Text style={{ color: colors.muted, ...typo.label, marginTop: 6, marginBottom: 8 }}>EXPECTED PAYMENTS</Text>
+    {owesMe > 0 ? <Text style={{ color: palette.accentText, fontWeight: '700', marginBottom: 6, fontVariant: ['tabular-nums'] }}>{person.name} still owes you {formatPaise(owesMe)}</Text> : null}
+    {iOwe > 0 ? <Text style={{ color: palette.expenseText, fontWeight: '700', marginBottom: 6, fontVariant: ['tabular-nums'] }}>You still owe {person.name} {formatPaise(iOwe)}</Text> : null}
     {theirs.length === 0 ? <Text style={{ color: colors.muted, marginBottom: 8 }}>Nothing expected from or to {person.name}.</Text> : theirs.map((e) => <Tap key={e.id} onPress={() => onOpenExpected(e)} label={e.person}
       style={{ flexDirection: 'row', justifyContent: 'space-between', backgroundColor: colors.card, borderColor: colors.border, borderWidth: 1, borderRadius: 14, padding: 12, marginBottom: 8 }}>
-      <View style={{ flex: 1 }}><Text style={{ color: colors.text, fontWeight: '700' }} numberOfLines={1}>{e.note || (e.direction === 'receive' ? 'Will pay you' : 'You will pay')}</Text><Text style={{ color: isOverdue(e) ? palette.danger : colors.muted, fontSize: 12 }}>{e.status === 'settled' ? 'Settled' : e.due_date ? `${isOverdue(e) ? 'Overdue' : 'Due'} ${fmtDue(e.due_date)}` : 'No due date'}</Text></View>
-      <Text style={{ color: e.status === 'settled' ? colors.muted : e.direction === 'receive' ? palette.emerald : palette.danger, fontWeight: '800' }}>{formatPaise(e.status === 'settled' ? e.amount_paise : outstandingPaise(e))}</Text></Tap>)}
+      <View style={{ flex: 1 }}><Text style={{ color: colors.text, fontWeight: '700' }} numberOfLines={1}>{e.note || (e.direction === 'receive' ? 'Will pay you' : 'You will pay')}</Text><Text style={{ color: isOverdue(e) ? palette.expenseText : colors.muted, fontSize: 12 }}>{e.status === 'settled' ? 'Settled' : e.due_date ? `${isOverdue(e) ? 'Overdue' : 'Due'} ${fmtDue(e.due_date)}` : 'No due date'}</Text></View>
+      <Text style={{ color: e.status === 'settled' ? colors.muted : e.direction === 'receive' ? palette.accentText : palette.expenseText, fontWeight: '700', fontVariant: ['tabular-nums'] }}>{formatPaise(e.status === 'settled' ? e.amount_paise : outstandingPaise(e))}</Text></Tap>)}
     <Button title="Add expected payment" kind="ghost" onPress={() => onAddExpected(person.name)} />
 
-    <Text style={{ color: colors.muted, fontSize: 12, fontWeight: '800', letterSpacing: 0.8, marginTop: 14, marginBottom: 8 }}>HISTORY</Text>
+    <Text style={{ color: colors.muted, ...typo.label, marginTop: 14, marginBottom: 8 }}>HISTORY</Text>
     <View style={{ flexDirection: 'row', marginBottom: 8 }}>
       <Chip label="All" active={dir === 'all'} onPress={() => setDir('all')} colors={colors} />
       <Chip label="Incoming" active={dir === 'income'} onPress={() => setDir('income')} colors={colors} color={palette.emerald} />
@@ -212,7 +213,7 @@ function ExpectedForm({ state, people, scope, colors, onClose, onSaved }: {
     <Labeled label={`AMOUNT (${currencySymbol()})`} colors={colors}><Input colors={colors} value={amount} onChangeText={setAmount} keyboardType="decimal-pad" placeholder="0.00" /></Labeled>
     <Labeled label="REASON / NOTE (OPTIONAL)" colors={colors}><Input colors={colors} value={note} onChangeText={setNote} placeholder="e.g. Dinner split, loan, rent share" maxLength={200} /></Labeled>
     <Labeled label="EXPECTED BY (OPTIONAL)" colors={colors} hint="Format YYYY-MM-DD. Leave empty if there's no date."><Input colors={colors} value={due} onChangeText={setDue} placeholder="YYYY-MM-DD" autoCapitalize="none" /></Labeled>
-    {error ? <Text style={{ color: palette.danger, marginBottom: 8 }}>{error}</Text> : null}
+    {error ? <Text style={{ color: palette.expenseText, marginBottom: 8 }}>{error}</Text> : null}
     <Button title={edit ? 'Save changes' : 'Add'} onPress={() => void save()} busy={busy} />
   </Sheet>;
 }
@@ -229,27 +230,27 @@ function ExpectedDetail({ item, scope, colors, onClose, onChanged, onEdit }: { i
     if (asTx) await recordPaymentWithTransaction(db, scope, item.id, { amountPaise: paise }); else await recordPayment(db, scope, item.id, { amountPaise: paise });
   });
   return <Sheet visible onClose={onClose} title={item.person} colors={colors}>
-    <Text style={{ fontSize: 30, fontWeight: '800', color: item.status === 'settled' ? colors.muted : recv ? palette.emerald : palette.danger }}>{formatPaise(item.status === 'settled' ? item.amount_paise : left)}</Text>
+    <Text style={{ ...typo.amountLg, fontSize: 30, color: item.status === 'settled' ? colors.muted : recv ? palette.accentText : palette.expenseText, fontVariant: ['tabular-nums'] }}>{formatPaise(item.status === 'settled' ? item.amount_paise : left)}</Text>
     <Text style={{ color: colors.muted, marginBottom: 12 }}>{item.status === 'settled' ? `Settled${item.settled_at ? ` on ${fmtDate(item.settled_at)}` : ''}` : recv ? `still to receive from ${item.person}` : `still to pay to ${item.person}`}</Text>
-    {item.note ? <View style={{ backgroundColor: colors.card, borderColor: colors.border, borderWidth: 1, borderRadius: 14, padding: 12, marginBottom: 12 }}><Text style={{ color: colors.muted, fontSize: 11, fontWeight: '800' }}>REASON</Text><Text style={{ color: colors.text, marginTop: 4 }}>{item.note}</Text></View> : null}
-    <Text style={{ color: colors.muted, marginBottom: 4 }}>Total {formatPaise(item.amount_paise)} · paid {formatPaise(item.paid_paise)}</Text>
-    <Text style={{ color: over ? palette.danger : colors.muted, fontWeight: over ? '800' : '500', marginBottom: 12 }}>{item.due_date ? `${over ? 'Overdue since' : 'Expected by'} ${fmtDue(item.due_date)}` : 'No due date'}</Text>
+    {item.note ? <View style={{ backgroundColor: colors.card, borderColor: colors.border, borderWidth: 1, borderRadius: 14, padding: 12, marginBottom: 12 }}><Text style={{ color: colors.muted, fontSize: 12, fontWeight: '600' }}>REASON</Text><Text style={{ color: colors.text, marginTop: 4 }}>{item.note}</Text></View> : null}
+    <Text style={{ color: colors.muted, marginBottom: 4, fontVariant: ['tabular-nums'] }}>Total {formatPaise(item.amount_paise)} · paid {formatPaise(item.paid_paise)}</Text>
+    <Text style={{ color: over ? palette.expenseText : colors.muted, fontWeight: over ? '700' : '500', marginBottom: 12 }}>{item.due_date ? `${over ? 'Overdue since' : 'Expected by'} ${fmtDue(item.due_date)}` : 'No due date'}</Text>
 
     {item.status === 'pending' ? <View style={{ marginBottom: 8 }}>
       <Labeled label={recv ? 'RECORD A PAYMENT RECEIVED' : 'RECORD A PAYMENT MADE'} colors={colors}><Input colors={colors} value={amount} onChangeText={setAmount} keyboardType="decimal-pad" /></Labeled>
       <Pressable onPress={() => setAsTx(!asTx)} accessibilityRole="checkbox" accessibilityState={{ checked: asTx }} style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
-        <View style={{ width: 22, height: 22, borderRadius: 6, borderWidth: 2, borderColor: palette.emerald, backgroundColor: asTx ? palette.emerald : 'transparent', alignItems: 'center', justifyContent: 'center', marginRight: 10 }}>{asTx ? <Text style={{ color: '#FFFFFF', fontWeight: '800' }}>✓</Text> : null}</View>
+        <View style={{ width: 22, height: 22, borderRadius: 6, borderWidth: 2, borderColor: palette.emerald, backgroundColor: asTx ? palette.emerald : 'transparent', alignItems: 'center', justifyContent: 'center', marginRight: 10 }}>{asTx ? <Text style={{ color: '#FFFFFF', fontWeight: '700' }}>✓</Text> : null}</View>
         <Text style={{ color: colors.text, flex: 1 }}>Also add it as a {recv ? 'income' : 'expense'} transaction</Text></Pressable>
       <Button title="Record payment" onPress={() => void pay()} busy={busy} />
       <Button title="Mark as fully paid" kind="ghost" onPress={() => void run(() => markSettled(getServiceDb(), scope, item.id))} disabled={busy} />
     </View> : null}
-    {error ? <Text style={{ color: palette.danger, marginBottom: 8 }}>{error}</Text> : null}
+    {error ? <Text style={{ color: palette.expenseText, marginBottom: 8 }}>{error}</Text> : null}
 
-    {item.payments.length ? <View style={{ marginTop: 8 }}><Text style={{ color: colors.muted, fontSize: 12, fontWeight: '800', letterSpacing: 0.8, marginBottom: 6 }}>PAYMENTS</Text>
+    {item.payments.length ? <View style={{ marginTop: 8 }}><Text style={{ color: colors.muted, ...typo.label, marginBottom: 6 }}>PAYMENTS</Text>
       {item.payments.map((p, i) => <View key={i} style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: colors.border }}>
         {recv ? <ArrowDownLeft size={16} color={palette.emerald} /> : <ArrowUpRight size={16} color={palette.danger} />}
         <Text style={{ flex: 1, color: colors.text, marginLeft: 8 }}>{fmtDate(p.at)}{p.transaction_id ? ' · linked to a transaction' : ' · recorded by hand'}</Text>
-        <Text style={{ color: colors.text, fontWeight: '800' }}>{formatPaise(p.amount_paise)}</Text></View>)}</View> : null}
+        <Text style={{ color: colors.text, fontWeight: '700', fontVariant: ['tabular-nums'] }}>{formatPaise(p.amount_paise)}</Text></View>)}</View> : null}
 
     <Button title="Edit" kind="ghost" onPress={() => onEdit(item)} />
     <Button title="Delete" kind="danger" onPress={() => Alert.alert('Delete this?', 'Linked transactions are not deleted.', [{ text: 'Cancel', style: 'cancel' }, { text: 'Delete', style: 'destructive', onPress: () => { void run(async () => { await deleteExpected(getServiceDb(), scope, item.id); onClose(); }); } }])} />

@@ -1,11 +1,20 @@
 import { PermissionsAndroid, Platform } from 'react-native';
 import { requireOptionalNativeModule, type EventSubscription } from 'expo-modules-core';
 import type { SmsStagingStore } from './src/services/smsStagingTypes';
+import type { ReviewNotifierPort } from './src/services/reviewNotifications';
 
 type VelnoraSmsNativeModule = {
   addListener: (eventName: 'onSmsStaged', listener: () => void) => EventSubscription;
   isReceiveSmsPermissionGranted: () => boolean;
   setSupportedSenderPatterns: (patterns: string[]) => void;
+  isNotificationAccessGranted?: () => boolean;
+  openNotificationAccessSettings?: () => boolean;
+  areNotificationsEnabled?: () => boolean;
+  openAppNotificationSettings?: () => boolean;
+  postReviewNotification?: (transactionId: string, title: string, body: string) => boolean;
+  postReviewSummary?: (count: number) => boolean;
+  cancelReviewNotification?: (transactionId: string) => void;
+  cancelReviewSummary?: () => void;
 } & SmsStagingStore;
 
 const nativeModule = requireOptionalNativeModule<VelnoraSmsNativeModule>('VelnoraSms');
@@ -39,6 +48,56 @@ export async function requestSmsPermission(): Promise<boolean> {
 
 export function configureSupportedSenderPatterns(patterns: string[]): void {
   nativeModule?.setSupportedSenderPatterns(patterns);
+}
+
+/** Truecaller notification detection needs the special 'Notification access' grant (older native builds: false). */
+export function isNotificationAccessGranted(): boolean {
+  return Platform.OS === 'android' ? nativeModule?.isNotificationAccessGranted?.() ?? false : false;
+}
+
+export function openNotificationAccessSettings(): boolean {
+  return Platform.OS === 'android' ? nativeModule?.openNotificationAccessSettings?.() ?? false : false;
+}
+
+/** False on an installed build older than this code: it cannot read the notification state or show the dialog. */
+export function canManageAppNotifications(): boolean {
+  return Platform.OS === 'android' && typeof nativeModule?.areNotificationsEnabled === 'function';
+}
+
+export function canUseNotificationAccess(): boolean {
+  return Platform.OS === 'android' && typeof nativeModule?.isNotificationAccessGranted === 'function';
+}
+
+/** Can Velnora post its own notifications? */
+export function areAppNotificationsEnabled(): boolean {
+  return Platform.OS === 'android' ? nativeModule?.areNotificationsEnabled?.() ?? false : false;
+}
+
+export function openAppNotificationSettings(): boolean {
+  return Platform.OS === 'android' ? nativeModule?.openAppNotificationSettings?.() ?? false : false;
+}
+
+/** Shows Android's "Allow Velnora to send you notifications?" dialog (Android 13+; earlier versions have no dialog). */
+export async function requestAppNotifications(): Promise<SmsPermissionResult> {
+  if (!canManageAppNotifications()) return 'unavailable';
+  if (areAppNotificationsEnabled()) return 'granted';
+  if (typeof Platform.Version === 'number' && Platform.Version < 33) return 'blocked'; // switched off in Settings; there is no dialog
+  const result = await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS);
+  if (result === PermissionsAndroid.RESULTS.GRANTED || areAppNotificationsEnabled()) return 'granted';
+  return result === PermissionsAndroid.RESULTS.NEVER_ASK_AGAIN ? 'blocked' : 'denied';
+}
+
+/** Null on an installed build older than this code or off Android: review then stays in the in-app queue. */
+export function getNativeReviewNotifier(): ReviewNotifierPort | null {
+  const native = nativeModule;
+  if (Platform.OS !== 'android' || !native?.postReviewNotification) return null;
+  return {
+    canNotify: () => native.areNotificationsEnabled?.() ?? false,
+    post: (n) => native.postReviewNotification?.(n.transactionId, n.title, n.body) ?? false,
+    postSummary: (count) => native.postReviewSummary?.(count) ?? false,
+    cancel: (id) => native.cancelReviewNotification?.(id),
+    cancelSummary: () => native.cancelReviewSummary?.(),
+  };
 }
 
 export function isSmsPermissionGranted(): boolean {

@@ -1,3 +1,5 @@
+import { suggestCategory, type KindForCategory } from './src/services/transactionClassifier.ts';
+
 export type SmsTransactionStatus = 'success' | 'pending' | 'failed' | 'ambiguous';
 export type SmsDirection = 'income' | 'expense';
 
@@ -21,6 +23,10 @@ export type SmsReceivedPayload = {
   receivedAt: number;
   partCount: number;
   body: string;
+  /** Which channel observed it; absent = plain SMS. For notifications `sender` is the notification title. */
+  source?: 'sms' | 'truecaller_notification' | 'payment_notification';
+  /** Display name of the payment app that posted the notification ("Google Pay"). Says nothing about the bank. */
+  sourceApp?: string;
 };
 
 export type ParsedPaymentMethod = 'UPI' | 'Card' | 'Cash' | 'Net banking';
@@ -35,10 +41,26 @@ export type ParsedSmsTransaction = {
   /** Bank reference / UTR when the SMS carries one; '' when it does not (many alerts have none). */
   referenceId: string;
   fingerprint: string;
+  /**
+   * Source-independent identity of the bank event (no sender label, which differs between the raw SMS "AX-HDFCBK-S"
+   * and Truecaller's "HDFC Bank"). Present only when the message itself pins the event down (a stated time, or a
+   * date plus balance); '' otherwise. Used to recognise the same event arriving via SMS and via a notification.
+   */
+  eventKey: string;
+  /** Epoch ms the message reached the device; the basis for matching events that carry no stated time. */
+  receivedAt: number;
   /** Extras read from the message (no schema change; shown in the description / payment method). */
   accountLast4?: string;
   balance?: number;
   paymentMethod?: ParsedPaymentMethod;
+  kind: KindForCategory;
+  /** Default-category suggestion for this message. */
+  category: string;
+  /** Only set when the sender or the text names a bank. A payment app is never treated as a bank. */
+  bankName?: string;
+  paymentApp?: string;
+  /** 0..1: how much of the transaction the message actually pinned down. */
+  confidence: number;
 };
 
 const AMOUNT = '(?:\\bINR|\\bRs\\.?|\\u20B9)\\s*([\\d,]+(?:\\.\\d{1,2})?)|([\\d,]+(?:\\.\\d{1,2})?)\\s*(?:INR|Rs\\.?|\\u20B9)';
@@ -67,8 +89,73 @@ export const DEFAULT_SMS_RULE: SmsParsingRule = {
     '\\bpayment (?:request|link|reminder)\\b',
     '\\brequested? (?:you )?(?:to pay|money)\\b',
     '\\bpre-?approved\\b',
+    '\\brequest(?:ed|ing|s)?\\b[^.]{0,30}(?:\\u20B9|\\bRs\\.?|\\bINR)',
+    // Promised, not yet received: the credit message that follows is the transaction.
+    '\\bwill be (?:credited|refunded|reversed)\\b',
+    '\\brefund\\b[^.]{0,30}\\b(?:initiated|requested)\\b',
   ],
 };
+
+// ───────────────────────── messages that are never transactions ─────────────────────────
+
+const SAFETY_ADVICE = /\b(?:never|do not|don'?t|dont)\s+share\b[^.]*/gi;
+const OTP_WORD = '(?:otp|one[- ]time[- ](?:password|pin)|verification code|security code|passcode)';
+const OTP_MESSAGES = [
+  new RegExp(`\\b${OTP_WORD}\\b[^.]{0,40}?\\b\\d{4,8}\\b`, 'i'),
+  new RegExp(`\\b\\d{4,8}\\b[^.]{0,30}?\\b${OTP_WORD}\\b`, 'i'),
+  new RegExp(`\\b(?:use|enter)\\b[^.]{0,20}\\b${OTP_WORD}\\b`, 'i'),
+];
+
+/** An authentication code. Alerts that merely add "never share your OTP" as advice are not one. */
+export function isOtpMessage(body: string): boolean {
+  const text = body.replace(SAFETY_ADVICE, ' ');
+  return OTP_MESSAGES.some((pattern) => pattern.test(text));
+}
+
+const PROMO = /\b(?:apply now|click here|t&c|tnc|limited (?:period|time)|offer|win|won|voucher|coupon|upgrade|eligible|flat \d+%|\d+% off|up to (?:₹|rs\.?|inr)|upto (?:₹|rs\.?|inr)|loan of|instant loan|get (?:₹|rs\.?|inr|flat|up))\b/i;
+const COMPLETED_ON_ACCOUNT = /\b(?:a\/c|acct?|account|card)\b[^.]{0,40}\b(?:is |has been |was )?(?:debited|credited)\b|\b(?:debited|credited)\b[^.]{0,40}\b(?:a\/c|acct?|account|card)\b/i;
+
+/** Marketing that borrows transaction words. A message stating a completed movement on an account is not rejected. */
+export function isPromotionalMessage(body: string): boolean {
+  return PROMO.test(body) && !COMPLETED_ON_ACCOUNT.test(body);
+}
+
+// ───────────────────────── bank / app evidence ─────────────────────────
+
+const BANK_SENDERS: [RegExp, string][] = [
+  [/HDFC/i, 'HDFC Bank'], [/^SBI|SBIINB|SBIUPI|SBIPSG|ATMSBI|CBSSBI/i, 'SBI'], [/ICICI/i, 'ICICI Bank'], [/AXIS/i, 'Axis Bank'],
+  [/KOTAK/i, 'Kotak Bank'], [/^PNB|PNBSMS/i, 'PNB'], [/BOBTXN|BOBSMS|^BOB/i, 'Bank of Baroda'], [/CANBNK|CANARA/i, 'Canara Bank'],
+  [/IDFC/i, 'IDFC First Bank'], [/YESBNK|YESBANK/i, 'Yes Bank'], [/UNIONB/i, 'Union Bank'], [/INDUSB/i, 'IndusInd Bank'], [/FEDBNK|FEDERAL/i, 'Federal Bank'],
+];
+const BANK_IN_TEXT: [RegExp, string][] = [
+  [/\bHDFC\b/i, 'HDFC Bank'], [/\bSBI\b|State Bank of India/i, 'SBI'], [/\bICICI\b/i, 'ICICI Bank'], [/\bAxis Bank\b/i, 'Axis Bank'],
+  [/\bKotak\b/i, 'Kotak Bank'], [/\bPNB\b|Punjab National/i, 'PNB'], [/Bank of Baroda/i, 'Bank of Baroda'], [/Canara Bank/i, 'Canara Bank'],
+  [/\bIDFC\b/i, 'IDFC First Bank'], [/\bYes Bank\b/i, 'Yes Bank'], [/Union Bank/i, 'Union Bank'], [/IndusInd/i, 'IndusInd Bank'], [/Federal Bank/i, 'Federal Bank'],
+];
+
+function identifyBank(sender: string, body: string, source: SmsReceivedPayload['source']): string | undefined {
+  // A notification's sender label is an app or a free-text title, so only the wording can name a bank there.
+  if (source !== 'payment_notification') {
+    const fromSender = BANK_SENDERS.find(([pattern]) => pattern.test(cleanSenderLabel(sender)));
+    if (fromSender) return fromSender[1];
+  }
+  return BANK_IN_TEXT.find(([pattern]) => pattern.test(body))?.[1];
+}
+
+const REVERSAL_DONE = /\b(?:reversed|reversal)\b/i;
+const REVERSAL_FUTURE = /\bwill be\b[^.]{0,30}\b(?:reversed|refunded|credited)\b|\breversal (?:is )?(?:pending|initiated)\b/i;
+const CREDIT_TO_YOU = /\b(?:paid|sent|transferred)\s+you\b|\byou(?:'ve| have)?\s+received\b/i;
+const OWN_TRANSFER = /\b(?:self[- ]transfer|to self|own account|between your accounts)\b/i;
+const REFUND = /\brefund(?:ed)?\b/i;
+const CASH = /\bATM\b|\bcash withdrawal\b|\bwithdrawn\b/i;
+
+function detectKind(body: string, isReversal: boolean): KindForCategory {
+  if (isReversal) return 'reversal';
+  if (REFUND.test(body)) return 'refund';
+  if (OWN_TRANSFER.test(body)) return 'transfer';
+  if (CASH.test(body)) return 'cash_withdrawal';
+  return 'payment';
+}
 
 const escapeForFingerprint = (value: string): string => value.toLowerCase().replace(/\s+/g, ' ').trim();
 
@@ -200,7 +287,7 @@ function resolveTransactionDate(body: string, receivedAt: number, rule: SmsParsi
 
 // ───────────────────────── reference, account, balance, payment method ─────────────────────────
 
-function extractReference(body: string, rule: SmsParsingRule): string {
+export function extractReference(body: string, rule: SmsParsingRule = DEFAULT_SMS_RULE): string {
   if (rule.referencePattern !== DEFAULT_REFERENCE) return firstMatch(body, rule.referencePattern) ?? '';
   const candidates = [
     /\bUPI[/-](?:DR|CR|P2A|P2M|P2P)?[/-]?(\d{9,})/i,
@@ -289,6 +376,13 @@ function extractCounterparty(body: string, direction: SmsDirection, sender: stri
   const vpa = direction === 'expense' ? vpaTo : vpaFrom;
   if (vpa) return nameFromVpa(vpa[1]);
 
+  // Payment-app wording: "Asha Rao paid you ₹500".
+  if (direction === 'income') {
+    const payer = /^\s*([A-Za-z][A-Za-z .'&-]{1,40}?)\s+(?:paid|sent|transferred)\s+you\b/i.exec(body);
+    const name = payer ? cleanName(payer[1]) : null;
+    if (name) return name;
+  }
+
   // Path-style narrations: UPI/P2M/412345678901/AMAZON, UPI-412345678901-RAHUL KUMAR-ICIC0001, NEFT-N123456789-ACME CORP LTD-SALARY
   const narration =
     /\bUPI\/(?:DR|CR|P2A|P2M|P2P)?\/?\d{6,}\/([A-Za-z][^/,;\n]{1,40})/i.exec(body) ??
@@ -338,6 +432,24 @@ function fingerprint(
   return `sms-${(hash >>> 0).toString(16)}`;
 }
 
+function eventKey(
+  input: Pick<ParsedSmsTransaction, 'amount' | 'direction' | 'merchant' | 'transactionDate' | 'accountLast4' | 'balance'>,
+  when: { precision: 'time' | 'day' | 'arrival'; day: string },
+): string {
+  const strong = when.precision === 'time' || (when.precision === 'day' && input.balance !== undefined);
+  if (!strong) return '';
+  const dateKey = when.precision === 'time' ? input.transactionDate.slice(0, 16) : `day:${when.day}`;
+  const value = [input.amount.toFixed(2), input.direction, input.merchant, dateKey, input.accountLast4 ?? '', input.balance?.toFixed(2) ?? '']
+    .map(escapeForFingerprint)
+    .join('|');
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `ev-${(hash >>> 0).toString(16)}`;
+}
+
 export function parseSmsTransaction(
   sms: SmsReceivedPayload,
   rules: SmsParsingRule[] = [DEFAULT_SMS_RULE],
@@ -347,14 +459,23 @@ export function parseSmsTransaction(
   const body = sms.body.replace(/\s+/g, ' ').trim();
   if (!body) return null;
 
-  const status = classifySmsStatus(body, rule);
+  if (isOtpMessage(body) || isPromotionalMessage(body)) return null;
+
+  // Money that already came back is a completed credit, even though the wording overlaps with failed payments.
+  const isReversal = REVERSAL_DONE.test(body) && !REVERSAL_FUTURE.test(body);
+  const status: SmsTransactionStatus = isReversal ? 'success' : classifySmsStatus(body, rule);
   if (status !== 'success') return null;
   if (rule.ignorePatterns && includesPattern(body, rule.ignorePatterns)) return null;
 
   // Direction = whichever of the debit / credit words appears FIRST ("credited ... sent by X" is a credit).
   const debitAt = earliestIndex(body, rule.debitPatterns);
   const creditAt = earliestIndex(body, rule.creditPatterns);
-  const direction: SmsDirection | null = debitAt === -1 && creditAt === -1 ? null : creditAt === -1 || (debitAt !== -1 && debitAt < creditAt) ? 'expense' : 'income';
+  const forcedCredit = isReversal || REFUND.test(body) || CREDIT_TO_YOU.test(body);
+  // "Payment of ₹250 to Swiggy successful" (payment apps) names no debit word, but it is money going out.
+  const paymentOut = /\bpayment\b[^.]{0,40}\bsuccessful(?:ly)?\b/i.test(body);
+  const direction: SmsDirection | null = forcedCredit ? 'income'
+    : debitAt === -1 && creditAt === -1 ? (paymentOut ? 'expense' : null)
+      : creditAt === -1 || (debitAt !== -1 && debitAt < creditAt) ? 'expense' : 'income';
 
   const amounts = extractAmounts(body, rule);
   const amount = (amounts.find((a) => a.kind === 'txn') ?? { value: NaN }).value;
@@ -367,10 +488,21 @@ export function parseSmsTransaction(
   const when = resolveTransactionDate(body, sms.receivedAt, rule);
   const paymentMethod = detectPaymentMethod(body);
 
-  const parsed: ParsedSmsTransaction = { status, direction, amount, merchant, transactionDate: when.iso, bankSender: sms.sender, referenceId, fingerprint: '' };
+  const kind = detectKind(body, isReversal);
+  const bankName = identifyBank(sms.sender, body, sms.source);
+  const namedMerchant = !/^(?:upi payment|upi credit|card payment|atm withdrawal|.+ (?:debit|credit))$/i.test(merchant);
+  const confidence = Math.min(1, 0.4 + (referenceId ? 0.2 : 0) + (accountLast4 ? 0.15 : 0) + (when.precision !== 'arrival' ? 0.15 : 0) + (namedMerchant ? 0.1 : 0));
+
+  const parsed: ParsedSmsTransaction = {
+    status, direction, amount, merchant, transactionDate: when.iso, bankSender: sms.sender, referenceId, fingerprint: '', eventKey: '', receivedAt: sms.receivedAt,
+    kind, category: suggestCategory({ merchant, body, direction, kind }), confidence,
+  };
+  if (bankName) parsed.bankName = bankName;
+  if (sms.sourceApp) parsed.paymentApp = sms.sourceApp;
   if (accountLast4) parsed.accountLast4 = accountLast4;
   if (balance !== undefined) parsed.balance = balance;
   if (paymentMethod) parsed.paymentMethod = paymentMethod;
   parsed.fingerprint = fingerprint(parsed, when);
+  parsed.eventKey = eventKey(parsed, when);
   return parsed;
 }

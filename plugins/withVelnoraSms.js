@@ -4,6 +4,11 @@ const pkg = require('../package.json');
 const RECEIVER_NAME = 'com.velnora.sms.VelnoraSmsReceiver';
 const PATTERNS_METADATA_NAME = 'com.velnora.sms.SUPPORTED_SENDER_PATTERNS';
 const RECEIVE_SMS = 'android.permission.RECEIVE_SMS';
+const POST_NOTIFICATIONS = 'android.permission.POST_NOTIFICATIONS';
+// Keeps the CPU awake for the few seconds the background capture task runs. A normal permission: no prompt.
+const WAKE_LOCK = 'android.permission.WAKE_LOCK';
+const CAPTURE_SERVICE_NAME = 'com.velnora.sms.VelnoraCaptureService';
+const LISTENER_NAME = 'com.velnora.sms.VelnoraNotificationListener';
 
 function normalizePatterns(patterns) {
   if (!Array.isArray(patterns)) {
@@ -25,8 +30,10 @@ function withVelnoraSms(config, { supportedSenderPatterns = [] } = {}) {
     const mainApplication = AndroidConfig.Manifest.getMainApplicationOrThrow(manifest);
 
     manifest.manifest['uses-permission'] ??= [];
-    if (!manifest.manifest['uses-permission'].some((permission) => permission.$['android:name'] === RECEIVE_SMS)) {
-      manifest.manifest['uses-permission'].push({ $: { 'android:name': RECEIVE_SMS } });
+    for (const name of [RECEIVE_SMS, POST_NOTIFICATIONS, WAKE_LOCK]) {
+      if (!manifest.manifest['uses-permission'].some((permission) => permission.$['android:name'] === name)) {
+        manifest.manifest['uses-permission'].push({ $: { 'android:name': name } });
+      }
     }
 
     mainApplication.receiver ??= [];
@@ -52,6 +59,24 @@ function withVelnoraSms(config, { supportedSenderPatterns = [] } = {}) {
     }
     if (!existingReceiver) {
       mainApplication.receiver.push(receiver);
+    }
+
+    // Truecaller / payment-app notification source: bound by the system once the user grants Notification access (no activity needed).
+    mainApplication.service ??= [];
+    if (!mainApplication.service.some((service) => service.$['android:name'] === LISTENER_NAME)) {
+      mainApplication.service.push({
+        $: {
+          'android:name': LISTENER_NAME,
+          'android:exported': 'true',
+          'android:label': 'Velnora bank alerts',
+          'android:permission': 'android.permission.BIND_NOTIFICATION_LISTENER_SERVICE',
+        },
+        'intent-filter': [{ action: [{ $: { 'android:name': 'android.service.notification.NotificationListenerService' } }] }],
+      });
+    }
+
+    if (!mainApplication.service.some((service) => service.$['android:name'] === CAPTURE_SERVICE_NAME)) {
+      mainApplication.service.push({ $: { 'android:name': CAPTURE_SERVICE_NAME, 'android:exported': 'false' } });
     }
 
     mainApplication['meta-data'] ??= [];
