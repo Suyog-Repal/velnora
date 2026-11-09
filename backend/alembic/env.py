@@ -5,17 +5,18 @@ from pathlib import Path
 from alembic import context
 from sqlalchemy import pool
 
-# Add repository root to Python path so backend modules can be imported
-BASE_DIR = Path(__file__).resolve().parent.parent.parent
-sys.path.insert(0, str(BASE_DIR))
+# Add backend directory to Python path so app modules can be imported
+BACKEND_DIR = Path(__file__).resolve().parent.parent
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
 
 # Import application database session and models
-from backend.app.db.session import (
+from app.db.session import (
     Base,
     get_direct_database_url,
     get_direct_engine,
 )
-import backend.app.db.models  # Ensure all models are registered on Base.metadata
+import app.db.models  # Ensure all models are registered on Base.metadata
 
 # Alembic Config object
 config = context.config

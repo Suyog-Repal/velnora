@@ -11,8 +11,8 @@ import pytest
 from argon2 import PasswordHasher
 from sqlalchemy import select, and_
 
-from backend.app.db.session import get_session_factory, get_runtime_engine
-from backend.app.db.models import (
+from app.db.session import get_session_factory, get_runtime_engine
+from app.db.models import (
     User,
     UserProfile,
     Category,
@@ -22,23 +22,6 @@ from backend.app.db.models import (
 )
 
 password_hasher = PasswordHasher()
-
-def check_neon_available() -> bool:
-    """Check if Neon PostgreSQL is reachable over network."""
-    try:
-        engine = get_runtime_engine()
-        with engine.connect() as conn:
-            conn.exec_driver_sql("SELECT 1")
-        return True
-    except Exception:
-        return False
-
-neon_available = check_neon_available()
-pytestmark = pytest.mark.skipif(
-    not neon_available,
-    reason="Neon PostgreSQL cloud database is unreachable (offline or sandboxed execution environment)"
-)
-
 
 @pytest.fixture(scope="module")
 def db_session():

@@ -8,7 +8,7 @@ database connection and never contain a real secret.
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.app.config import (
+from app.config import (
     DEV_DATABASE_URL,
     DEV_JWT_SECRET,
     ConfigError,
@@ -16,6 +16,12 @@ from backend.app.config import (
     load_settings,
     normalize_database_url,
 )
+
+
+@pytest.fixture(autouse=True)
+def cleanup_fixed_test_users():
+    """Overrides the database cleanup fixture: nothing in this module touches a database."""
+    yield
 
 STRONG_SECRET = "test-only-secret-" + "x" * 32          # placeholder value for tests, not a real credential
 PROD_DB = "postgresql://appuser:test-password@db.example.test/velnora"
@@ -126,7 +132,7 @@ def test_direct_url_for_migrations():
 # ── application: health, CORS, JWT ───────────────────────────────────────────
 @pytest.fixture()
 def client():
-    from backend.app.main import app
+    from app.main import app
     with TestClient(app) as c:
         yield c
     app.dependency_overrides.clear()
@@ -149,8 +155,8 @@ class _FakeDb:
 
 
 def test_readiness_reports_ok_or_a_generic_503(client):
-    from backend.app.db.session import get_db
-    from backend.app.main import app
+    from app.db.session import get_db
+    from app.main import app
     app.dependency_overrides[get_db] = lambda: _FakeDb(fail=False)
     ok = client.get("/api/v1/health/ready")
     assert ok.status_code == 200 and ok.json() == {"status": "ok", "database": "ok"}
@@ -212,8 +218,8 @@ def test_jwt_uses_the_configured_secret_and_lifetimes():
     from uuid import uuid4
     from datetime import timedelta
     import jwt
-    from backend.app import auth
-    from backend.app.config import get_settings
+    from app import auth
+    from app.config import get_settings
     s = get_settings()
     assert auth.JWT_SECRET == s.jwt_secret_key
     assert (auth.ACCESS_TOKEN_MINUTES, auth.REFRESH_TOKEN_DAYS) == (s.jwt_access_token_expire_minutes, s.jwt_refresh_token_expire_days)
@@ -225,7 +231,7 @@ def test_jwt_uses_the_configured_secret_and_lifetimes():
 
 
 def test_start_command_module_path_exists():
-    # `uvicorn backend.app.main:app` is the Render start command, so this exact import path must resolve.
+    # `uvicorn app.main:app` is the Render start command, so this exact import path must resolve.
     import importlib
-    module = importlib.import_module("backend.app.main")
+    module = importlib.import_module("app.main")
     assert module.app.title == "Velnora API"

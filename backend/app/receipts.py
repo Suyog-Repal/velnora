@@ -12,11 +12,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from backend.app.auth import current_user
-from backend.app.db.models import Receipt as ReceiptModel
-from backend.app.db.models import Transaction as TransactionModel
-from backend.app.db.models import User as UserModel
-from backend.app.db.session import get_db
+from app.auth import current_user
+from app.db.models import Receipt as ReceiptModel
+from app.db.models import Transaction as TransactionModel
+from app.db.models import User as UserModel
+from app.db.session import get_db
 
 router = APIRouter(prefix="/api/v1/receipts", tags=["receipts"])
 

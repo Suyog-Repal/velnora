@@ -19,9 +19,9 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select, and_, or_, text
 from sqlalchemy.orm import Session
 
-from backend.app.config import configure_logging, get_settings
-from backend.app.db.session import get_db
-from backend.app.db.models import (
+from app.config import configure_logging, get_settings
+from app.db.session import get_db
+from app.db.models import (
     User as UserModel,
     UserProfile as UserProfileModel,
     Transaction as TransactionModel,
@@ -54,8 +54,8 @@ def to_paise(amount: Decimal) -> int:
     return int((amount * PAISE_FACTOR).quantize(PAISE_UNIT, rounding=ROUND_HALF_UP))
 
 
-from backend.app.sync import router as sync_router
-from backend.app.receipts import router as receipts_router
+from app.sync import router as sync_router
+from app.receipts import router as receipts_router
 
 settings = get_settings()
 configure_logging(settings)

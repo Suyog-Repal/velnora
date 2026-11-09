@@ -19,14 +19,14 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import func, or_, select, text
 from sqlalchemy.orm import Session
 
-from backend.app.auth import current_user
-from backend.app.db.models import Transaction as TransactionModel
-from backend.app.db.models import Category as CategoryModel
-from backend.app.db.models import User as UserModel
-from backend.app.db.models import Budget as BudgetModel
-from backend.app.db.models import MerchantAlias as MerchantAliasModel
-from backend.app.db.models import ExpectedPayment as ExpectedPaymentModel
-from backend.app.db.session import get_db
+from app.auth import current_user
+from app.db.models import Transaction as TransactionModel
+from app.db.models import Category as CategoryModel
+from app.db.models import User as UserModel
+from app.db.models import Budget as BudgetModel
+from app.db.models import MerchantAlias as MerchantAliasModel
+from app.db.models import ExpectedPayment as ExpectedPaymentModel
+from app.db.session import get_db
 
 router = APIRouter(prefix="/api/v1/sync", tags=["sync"])
 

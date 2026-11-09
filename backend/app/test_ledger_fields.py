@@ -4,8 +4,8 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
-from backend.app.db.models import Transaction
-from backend.app.sync import SyncItemPayload, SyncPullTransaction, ledger_values
+from app.db.models import Transaction
+from app.sync import SyncItemPayload, SyncPullTransaction, ledger_values
 
 
 @pytest.fixture(autouse=True)

@@ -8,9 +8,9 @@ from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.app.main import app
-from backend.app.db.session import get_session_factory
-from backend.app.db.models import User, Transaction, Category
+from app.main import app
+from app.db.session import get_session_factory
+from app.db.models import User, Transaction, Category
 
 client = TestClient(app)
 
@@ -373,7 +373,7 @@ def test_13_persistence_across_true_os_process_restart():
     # Step 2: Spawn completely isolated Python OS process
     code = f"""
 from fastapi.testclient import TestClient
-from backend.app.main import app
+from app.main import app
 
 fresh_client = TestClient(app)
 resp = fresh_client.get('/api/v1/transactions/{target_id}', headers={{'Authorization': 'Bearer {token}'}})

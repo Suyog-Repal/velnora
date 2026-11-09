@@ -19,9 +19,9 @@ from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import select, and_
 from sqlalchemy.orm import Session
 
-from backend.app.config import get_settings
-from backend.app.db.session import get_db, get_session_factory
-from backend.app.db.models import User, UserProfile, RefreshToken
+from app.config import get_settings
+from app.db.session import get_db, get_session_factory
+from app.db.models import User, UserProfile, RefreshToken
 
 password_hasher = PasswordHasher()
 bearer_scheme = HTTPBearer(auto_error=False)

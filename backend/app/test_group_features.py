@@ -5,9 +5,9 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from backend.app.main import app
-from backend.app.db.session import get_session_factory
-from backend.app.db.models import User
+from app.main import app
+from app.db.session import get_session_factory
+from app.db.models import User
 
 client = TestClient(app)
 created = []

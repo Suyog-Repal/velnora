@@ -10,7 +10,7 @@ from sqlalchemy import create_engine, Engine
 from sqlalchemy.orm import sessionmaker, Session, declarative_base
 
 # All environment handling (including loading backend/.env for local development) lives in config.py.
-from backend.app.config import get_settings, normalize_database_url  # noqa: F401  (normalize re-exported for backend.app.db)
+from app.config import get_settings, normalize_database_url  # noqa: F401  (normalize re-exported for app.db)
 
 
 def get_pooled_database_url() -> str:
