@@ -17,7 +17,7 @@ import { CategoryRepository } from '../db/repositories/categoryRepository.ts';
 import { MetadataRepository } from '../db/repositories/metadataRepository.ts';
 import { SyncQueueRepository } from '../db/repositories/syncQueueRepository.ts';
 import { TransactionRepository } from '../db/repositories/transactionRepository.ts';
-import type { IDatabase, RemoteTransaction, TransactionEntity } from '../db/types.ts';
+import type { IDatabase, RemoteTransaction, SyncQueueEntity, TransactionEntity } from '../db/types.ts';
 
 export interface SyncEngineState {
   isSyncing: boolean;
@@ -306,6 +306,29 @@ export class SyncEngine {
   }
 
   /**
+   * Gives one more chance to items parked as permanently failed only because of a whole-batch rejection or an exhausted
+   * retry budget (older builds failed every item in a batch when one was bad). It runs ONCE per account on this device
+   * (tracked in app metadata): an item that is genuinely invalid is then isolated and failed individually, and is never
+   * requeued again, so this cannot loop.
+   */
+  private async requeueStrandedFailures(userId?: string | null): Promise<void> {
+    const { syncQueueRepo, txRepo, metadataRepo } = await this.getRepos();
+    const markerKey = `sync_requeue_stranded_v1_${userId ?? 'none'}`;
+    if (await metadataRepo.get(markerKey)) return;
+    const parked = await syncQueueRepo.peek(200, userId);
+    for (const item of parked) {
+      if (item.next_retry_at !== PERMANENT_FAILURE_DATE) continue;
+      const code = item.error_code ?? '';
+      if (code !== 'MAX_RETRIES_EXCEEDED' && code !== 'PERMANENT_ERROR_422' && code !== 'PERMANENT_ERROR_400') continue;
+      await syncQueueRepo.resetRetry(item.id);
+      if (item.entity_type === 'transaction') {
+        await txRepo.updateSyncStatus(item.entity_id, item.operation === 'create' ? 'pending_create' : item.operation === 'delete' ? 'pending_delete' : 'pending_update');
+      }
+    }
+    await metadataRepo.set(markerKey, new Date().toISOString());
+  }
+
+  /**
    * Push pending transactions from sync_queue to cloud.
    * Differentiates HTTP 401, 422/400 (permanent rejection), and 5xx/network (exponential backoff).
    */
@@ -313,7 +336,8 @@ export class SyncEngine {
     session: SyncSession,
     apiBaseUrl?: string,
   ): Promise<{ pushed: number; conflicts: number; errors: string[] }> {
-    const { db, syncQueueRepo, txRepo } = await this.getRepos();
+    const { syncQueueRepo, txRepo } = await this.getRepos();
+    await this.requeueStrandedFailures(session.user?.id);
     const pendingItems = await syncQueueRepo.peekEligible(50, session.user?.id);
 
     if (pendingItems.length === 0) {
@@ -422,6 +446,23 @@ export class SyncEngine {
       return { pushed: 0, conflicts: 0, errors: [] };
     }
 
+    return this.sendAndAcknowledge(session, pendingItems, pushItems, apiBaseUrl);
+  }
+
+  /**
+   * Sends one batch and applies the server's per-item acknowledgements. Local state is keyed by the QUEUE item the ack's
+   * operation_id refers to, never by ack.entity_id: for a fingerprint/reference duplicate the server answers with the id
+   * of the row it already holds, which is not the local row's id.
+   */
+  private async sendAndAcknowledge(
+    session: SyncSession,
+    pendingItems: SyncQueueEntity[],
+    pushItems: Array<{ operation_id: string }>,
+    apiBaseUrl?: string,
+  ): Promise<{ pushed: number; conflicts: number; errors: string[] }> {
+    const { db, syncQueueRepo, txRepo } = await this.getRepos();
+    const sentIds = new Set(pushItems.map((p) => p.operation_id));
+    const sent = pendingItems.filter((p) => sentIds.has(p.id));
     let serverResp: SyncPushServerResponse;
     try {
       serverResp = await pushSync<SyncPushServerResponse>(
@@ -439,7 +480,27 @@ export class SyncEngine {
 
         // 422 / 400 Permanent Validation Rejection: Do NOT retry indefinitely
         if (err.status === 422 || err.status === 400) {
-          for (const item of pendingItems) {
+          if (pushItems.length > 1) {
+            // One malformed item must not condemn the others: resend each alone so only the rejected one fails.
+            const total = { pushed: 0, conflicts: 0, errors: [] as string[] };
+            for (const single of pushItems) {
+              const one = sent.filter((p) => p.id === single.operation_id);
+              try {
+                const r = await this.sendAndAcknowledge(session, one, [single], apiBaseUrl);
+                total.pushed += r.pushed;
+                total.conflicts += r.conflicts;
+                total.errors.push(...r.errors);
+              } catch (inner) {
+                if (inner instanceof SyncApiError && (inner.status === 422 || inner.status === 400)) {
+                  total.errors.push(`${one[0]?.entity_id}: rejected by server (${inner.status})`);
+                  continue;
+                }
+                throw inner; // 401 / transient: already handled and recorded for the remaining items
+              }
+            }
+            return total;
+          }
+          for (const item of sent) {
             await syncQueueRepo.markFailed(item.id, `PERMANENT_ERROR_${err.status}`, PERMANENT_FAILURE_DATE);
             await txRepo.updateSyncStatus(item.entity_id, 'failed');
           }
@@ -448,8 +509,8 @@ export class SyncEngine {
         }
       }
 
-      // Temporary server failure (5xx) or network interruption: apply exponential backoff
-      for (const item of pendingItems) {
+      // Temporary server failure (5xx), 429 or network interruption: apply exponential backoff
+      for (const item of sent) {
         const nextRetryCount = item.retry_count + 1;
         if (nextRetryCount >= MAX_RETRY_ATTEMPTS) {
           // Reached retry limit -> dead-letter / mark failed
@@ -472,8 +533,21 @@ export class SyncEngine {
     let conflicts = 0;
     const errors: string[] = [];
 
+    // A response that is not the documented shape acknowledges nothing: keep everything pending and back off.
+    if (!serverResp || !Array.isArray(serverResp.results)) {
+      for (const item of sent) {
+        await syncQueueRepo.markFailed(item.id, 'INVALID_RESPONSE', new Date(Date.now() + 30000).toISOString());
+      }
+      throw new SyncApiError('Synchronization server returned an invalid response.', 'server');
+    }
+
     // Process server acknowledgements
+    const acknowledged = new Set<string>();
     for (const ack of serverResp.results) {
+      const ackedFor = sent.find((p) => p.id === ack.operation_id);
+      if (!ackedFor) continue; // not an operation we sent: never trust it to change local state
+      acknowledged.add(ack.operation_id);
+      const localId = ackedFor.entity_id;
       if (ack.status === 'synced' || ack.status === 'conflict_resolved') {
         if (ack.status === 'conflict_resolved') {
           conflicts++;
@@ -485,32 +559,39 @@ export class SyncEngine {
         }
         pushed++;
         // Queue items are removed ONLY upon confirmed server acknowledgement
-        await txRepo.updateSyncStatus(ack.entity_id, 'synced', ack.server_version);
-        const ackedItem = pendingItems.find((p) => p.id === ack.operation_id);
+        await txRepo.updateSyncStatus(localId, 'synced', ack.server_version);
+        const ackedItem = ackedFor;
         if (ackedItem?.entity_type === 'budget') {
-          await db.runAsync("UPDATE budgets SET sync_status = 'synced' WHERE id = ?", ack.entity_id);
+          await db.runAsync("UPDATE budgets SET sync_status = 'synced' WHERE id = ?", localId);
         } else if (ackedItem?.entity_type === 'merchant_alias') {
-          await db.runAsync("UPDATE merchant_aliases SET sync_status = 'synced' WHERE id = ?", ack.entity_id);
+          await db.runAsync("UPDATE merchant_aliases SET sync_status = 'synced' WHERE id = ?", localId);
         } else if (ackedItem?.entity_type === 'expected_payment') {
-          await db.runAsync("UPDATE expected_payments SET sync_status = 'synced' WHERE id = ?", ack.entity_id);
+          await db.runAsync("UPDATE expected_payments SET sync_status = 'synced' WHERE id = ?", localId);
         }
         await syncQueueRepo.dequeue(ack.operation_id);
       } else {
         const errorMsg = ack.error || 'Server rejected item';
-        errors.push(`${ack.entity_id}: ${errorMsg}`);
-        const item = pendingItems.find((p) => p.id === ack.operation_id);
+        errors.push(`${localId}: ${errorMsg}`);
+        const item = ackedFor;
         const retryCount = item ? item.retry_count + 1 : 1;
 
         if (errorMsg.includes('Missing required') || errorMsg.includes('Forbidden') || retryCount >= MAX_RETRY_ATTEMPTS) {
           // Permanent failure
           await syncQueueRepo.markFailed(ack.operation_id, errorMsg, PERMANENT_FAILURE_DATE);
-          await txRepo.updateSyncStatus(ack.entity_id, 'failed');
+          await txRepo.updateSyncStatus(localId, 'failed');
         } else {
           const backoffMs = Math.min(300000, Math.pow(2, retryCount) * 1000 + Math.random() * 500);
           const nextRetry = new Date(Date.now() + backoffMs).toISOString();
           await syncQueueRepo.markFailed(ack.operation_id, errorMsg, nextRetry);
         }
       }
+    }
+
+    // Sent but not acknowledged (partial response): stays queued and pending, retried with backoff.
+    for (const item of sent) {
+      if (acknowledged.has(item.id)) continue;
+      await syncQueueRepo.markFailed(item.id, 'NO_ACK', new Date(Date.now() + Math.min(300000, Math.pow(2, item.retry_count) * 1000)).toISOString());
+      errors.push(`${item.entity_id}: not acknowledged by server`);
     }
 
     return { pushed, conflicts, errors };
