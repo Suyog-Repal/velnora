@@ -25,6 +25,11 @@ export function countsAsIncome(t: Countable): boolean {
   return t.direction === 'income' && !['transfer', 'refund', 'reversal'].includes(t.txn_kind ?? 'payment') && !t.possible_duplicate_of;
 }
 
+/** Refunds and reversals: money back. Not income, but included in net cash flow (mirrors SQL_COUNTS_AS_REFUND). */
+export function countsAsRefund(t: Countable): boolean {
+  return t.direction === 'income' && ['refund', 'reversal'].includes(t.txn_kind ?? 'payment') && !t.possible_duplicate_of;
+}
+
 export const KIND_LABELS: Record<TransactionKind, string> = {
   payment: 'Payment', refund: 'Refund', reversal: 'Reversal', transfer: 'Own transfer', cash_withdrawal: 'Cash withdrawal',
 };

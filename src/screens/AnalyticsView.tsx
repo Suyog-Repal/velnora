@@ -9,8 +9,10 @@ import { CategoryPieChart, pct } from './PieChart';
 import { categoryBreakdown, previousMonth, type CategoryBreakdown } from '../services/analyticsService';
 import { currentMonth, monthRange } from '../services/budgetService';
 import { getServiceDb } from '../services/transactionService';
+import { MonthlyReportView } from './MonthlyReportView';
 
 export function AnalyticsView({ scope, colors, refreshKey, onDrill }: { scope: string | null; colors: Colors; refreshKey: number; onDrill: (category: string) => void }) {
+  const [section, setSection] = useState<'spending' | 'report'>('spending');
   const [period, setPeriod] = useState<'this' | 'prev' | 'custom'>('this');
   const [from, setFrom] = useState<string | null>(null); const [to, setTo] = useState<string | null>(null);
   const [customRange, setCustomRange] = useState<{ start: string; end: string } | null>(null);
@@ -35,7 +37,14 @@ export function AnalyticsView({ scope, colors, refreshKey, onDrill }: { scope: s
   };
   const slice = data?.slices.find((s) => s.category === selected);
 
+  const switcher = <View style={{ flexDirection: 'row', marginBottom: 14 }}>
+    <Chip label="Spending" active={section === 'spending'} onPress={() => setSection('spending')} colors={colors} />
+    <Chip label="Monthly report" active={section === 'report'} onPress={() => setSection('report')} colors={colors} />
+  </View>;
+  if (section === 'report') return <View>{switcher}<MonthlyReportView scope={scope} colors={colors} refreshKey={refreshKey} /></View>;
+
   return <View>
+    {switcher}
     <SectionLabel colors={colors} style={{ marginTop: 0 }}>Period</SectionLabel>
     <View style={{ flexDirection: 'row', marginBottom: 14 }}>
       <Chip label="This month" active={period === 'this'} onPress={() => setPeriod('this')} colors={colors} />
