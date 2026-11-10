@@ -11,8 +11,9 @@ import type { CategoryView } from '../services/categoryService';
 import { confirmAccount, createAccount, listAccounts, mergeAccounts, type AccountView } from '../services/accountService';
 import { MAX_STATEMENT_BYTES, applyStatement, defaultExcludedLines, displayName, flagStatementOverlaps, parseStatementCsv, previewStatement, type ImportSummary, type PreviewRow, type PreviewStatus } from '../services/statementImport';
 import { categorizeRows } from '../services/statementCategorizer';
-import { readPdfStatement } from '../services/pdfStatementImport';
-import type { PdfStatementMeta } from '../services/pdfStatementParser';
+import { readPdfStatement, type PdfPageIssue } from '../services/pdfStatementImport';
+import { withheldToRow, type PdfStatementMeta, type WithheldRecord } from '../services/pdfStatementParser';
+import type { Reconciliation } from '../services/upiStatementParser';
 import { expoPdfExtractPort, removeTempFile } from '../services/pdfStatementFiles';
 import { rememberAlias } from '../services/merchantAliasService';
 import { getBaseApiUrl } from '../services/syncApi';
@@ -202,8 +203,12 @@ export function StatementImportSheet({ visible, mode, scope, session, categories
   const [error, setError] = useState('');
   const [stage, setStage] = useState('');
   const [busy, setBusy] = useState(false);
+  const [read, setRead] = useState<{ pageCount: number; pagesProcessed: number; pageIssues: PdfPageIssue[]; incomplete: boolean; withheld: WithheldRecord[]; reconciliation: Reconciliation | null; recordsDetected: number } | null>(null);
+  const [chosen, setChosen] = useState<Map<number, 'income' | 'expense'>>(new Map()); // direction the person picked for a withheld record
+  const [showEvidence, setShowEvidence] = useState<number | null>(null);
+  const [acceptIncomplete, setAcceptIncomplete] = useState(false);
 
-  useEffect(() => { if (visible) { setPreview(null); setSummary(null); setError(''); setSkipped(new Set()); setEdited(new Map()); setEditing(null); setMeta(null); setStage(''); } }, [visible]);
+  useEffect(() => { if (visible) { setPreview(null); setSummary(null); setError(''); setSkipped(new Set()); setEdited(new Map()); setEditing(null); setMeta(null); setStage(''); setRead(null); setChosen(new Map()); setShowEvidence(null); setAcceptIncomplete(false); } }, [visible]);
 
   const pickCsv = async () => {
     const res = await DocumentPicker.getDocumentAsync({ type: ['text/csv', 'text/comma-separated-values', 'application/csv', 'application/vnd.ms-excel', 'text/plain'], copyToCacheDirectory: true, multiple: false });
@@ -226,15 +231,17 @@ export function StatementImportSheet({ visible, mode, scope, session, categories
     const asset = res.assets[0];
     try {
       setStage('Reading your statement…');
-      const read = await readPdfStatement({ uri: asset.uri, name: asset.name ?? '', mimeType: asset.mimeType, size: asset.size }, session, expoPdfExtractPort(getBaseApiUrl()), refreshSession);
-      if (!read.ok) { setError(read.message); return; }
-      setStage('Checking for duplicates…');
+      const result = await readPdfStatement({ uri: asset.uri, name: asset.name ?? '', mimeType: asset.mimeType, size: asset.size }, session, expoPdfExtractPort(getBaseApiUrl()), refreshSession,
+        (step, page, total) => setStage(step === 'reading' ? 'Statement read. Checking each transaction...' : `Checking page ${page} of ${total}...`));
+      if (!result.ok) { setError(result.message); return; }
+      setStage('Comparing with your ledger...');
       const db = getServiceDb();
-      const rows = await categorizeRows(db, scope, read.rows);
+      const rows = await categorizeRows(db, scope, result.rows);
       const checked = await flagStatementOverlaps(db, scope, await previewStatement(db, scope, rows));
-      setParseErrors(read.errors.length);
+      setParseErrors(result.errors.length);
       setFileName(asset.name ?? '');
-      setMeta(read.meta);
+      setMeta(result.meta);
+      setRead({ pageCount: result.pageCount, pagesProcessed: result.pagesProcessed, pageIssues: result.pageIssues, incomplete: result.incomplete, withheld: result.withheld, reconciliation: result.reconciliation, recordsDetected: result.recordsDetected });
       setSkipped(defaultExcludedLines(checked)); // a possible duplicate is added only if the person says so
       setPreview(checked);
     } finally { await removeTempFile(asset.uri); }
@@ -255,9 +262,15 @@ export function StatementImportSheet({ visible, mode, scope, session, categories
     if (!preview || busy) return;
     setBusy(true); setError('');
     try {
-      const final = withEdits(preview);
+      let final = withEdits(preview);
+      // Records the reader would not import on its own become rows only because the person chose their direction; saved as "needs review".
+      const extra = (read?.withheld ?? []).flatMap((w) => { const d = chosen.get(w.index); const row = d ? withheldToRow(w, d) : null; return row ? [row] : []; });
+      if (extra.length) {
+        const db = getServiceDb();
+        final = [...final, ...(await flagStatementOverlaps(db, scope, await previewStatement(db, scope, await categorizeRows(db, scope, extra))))];
+      }
       const included = (p: PreviewRow) => !skipped.has(p.row.line);
-      const done = await applyStatement(getServiceDb(), scope, final, included, parseErrors);
+      const done = await applyStatement(getServiceDb(), scope, final, included, Math.max(0, parseErrors - extra.length));
       const needsCategory = final.filter((p) => p.status === 'new' && included(p) && p.row.needsReview).length;
       if (remember && session && edited.size) {
         // Only what the person chose, and only because they left the box ticked.
@@ -275,13 +288,23 @@ export function StatementImportSheet({ visible, mode, scope, session, categories
   const toggle = (line: number) => setSkipped((prev) => { const next = new Set(prev); if (!next.delete(line)) next.add(line); return next; });
   const count = (status: PreviewStatus) => preview?.filter((p) => p.status === status).length ?? 0;
   const importable = preview?.filter((p) => (p.status === 'new' || p.status === 'possible') && !skipped.has(p.row.line)) ?? [];
-  const totalIn = preview?.filter((p) => p.row.direction === 'income').reduce((s, p) => s + p.row.amount, 0) ?? 0;
-  const totalOut = preview?.filter((p) => p.row.direction === 'expense').reduce((s, p) => s + p.row.amount, 0) ?? 0;
+  // Totals follow the ledger's own rules (transfers are neither income nor expense; refunds are money back, not income), in whole paise.
+  const sumPaise = (test: (p: PreviewRow) => boolean) => (preview ?? []).filter(test).reduce((sum, p) => sum + Math.round(p.row.amount * 100), 0);
+  const isKind = (p: PreviewRow, ...kinds: string[]) => kinds.includes(p.row.kind);
+  const totalIn = sumPaise((p) => p.row.direction === 'income' && !isKind(p, 'transfer', 'refund', 'reversal'));
+  const totalOut = sumPaise((p) => p.row.direction === 'expense' && !isKind(p, 'transfer'));
+  const totalRefund = sumPaise((p) => p.row.direction === 'income' && isKind(p, 'refund', 'reversal'));
+  const totalTransfer = sumPaise((p) => isKind(p, 'transfer'));
+  const flaggedRows = (preview ?? []).filter((p) => p.row.reviewReasons?.length).length;
+  const withheldCount = read?.withheld.length ?? 0;
+  const undecided = (read?.withheld ?? []).filter((w) => !chosen.has(w.index)).length;
+  const rec = read?.reconciliation ?? null;
+  const blockedByIncomplete = !!read?.incomplete && !acceptIncomplete;
   const toCheck = preview?.filter((p) => p.status === 'new' && p.row.needsReview && !edited.has(p.row.line)).length ?? 0;
   const title = pdf ? 'Import PDF Statement' : 'Import CSV';
 
   const footer = preview ? <View>
-    <Button title={importable.length ? `Import ${importable.length} transaction${importable.length === 1 ? '' : 's'}` : 'Confirm import'} onPress={() => void confirm()} busy={busy} />
+    <Button title={importable.length ? `Import ${importable.length} transaction${importable.length === 1 ? '' : 's'}` : 'Confirm import'} onPress={() => (blockedByIncomplete ? setError('Some pages could not be read. Choose "Import only what was read" to continue, or cancel and try again.') : void confirm())} busy={busy} />
     <Text onPress={busy ? undefined : onClose} accessibilityRole="button" style={{ color: colors.muted, textAlign: 'center', paddingTop: 12 }}>Cancel and import nothing</Text>
   </View> : undefined;
 
@@ -297,7 +320,33 @@ export function StatementImportSheet({ visible, mode, scope, session, categories
       {pdf ? <View style={{ marginBottom: 10 }}>
         <Text style={{ color: colors.text, fontWeight: '700' }} numberOfLines={1}>{fileName}</Text>
         <Text style={{ color: colors.muted, marginTop: 2 }}>{[meta?.bankName, meta?.periodStart ? `${dayLabel(meta.periodStart)} to ${dayLabel(meta.periodEnd)}` : null].filter(Boolean).join(' · ') || 'Statement period not found'}</Text>
-        <Text style={{ color: colors.muted, marginTop: 2 }}>Income {formatPaise(Math.round(totalIn * 100))} · Expenses {formatPaise(Math.round(totalOut * 100))}</Text>
+        {read ? <Text style={{ color: read.incomplete ? palette.expenseText : colors.muted, marginTop: 2 }}>
+          Pages read: {read.pagesProcessed} of {read.pageCount}{read.incomplete ? ` - INCOMPLETE${read.pageIssues.length ? ` (page ${read.pageIssues.map((i) => i.page).join(', ')} could not be read)` : ''}` : ''}
+        </Text> : null}
+        {read ? <Text style={{ color: colors.muted, marginTop: 2 }}>
+          Records found {read.recordsDetected} - read confidently {preview.length - flaggedRows} - to review {flaggedRows} - not imported {withheldCount}
+        </Text> : null}
+        <Text style={{ color: colors.muted, marginTop: 2 }}>Money in {formatPaise(totalIn)} - Money out {formatPaise(totalOut)}{totalRefund ? ` - Refunds ${formatPaise(totalRefund)}` : ''}{totalTransfer ? ` - Own transfers ${formatPaise(totalTransfer)} (not counted)` : ''}</Text>
+        {rec ? <Text style={{ color: rec.status === 'matched' ? colors.text : palette.expenseText, marginTop: 2 }}>
+          {rec.status === 'matched' ? 'Checked against the statement: ' : rec.status === 'mismatch' ? 'DOES NOT MATCH the statement: ' : ''}
+          {rec.stated.sentPaise !== null ? `it states sent ${formatPaise(rec.stated.sentPaise)}, received ${formatPaise(rec.stated.receivedPaise ?? 0)}. ` : ''}{rec.note}
+          {rec.status === 'mismatch' && rec.sentDifferencePaise ? ` Sent differs by ${formatPaise(Math.abs(rec.sentDifferencePaise))}.` : ''}{rec.status === 'mismatch' && rec.receivedDifferencePaise ? ` Received differs by ${formatPaise(Math.abs(rec.receivedDifferencePaise))}.` : ''}
+        </Text> : null}
+        {read?.incomplete ? <View style={{ marginTop: 6 }}><Chip label={acceptIncomplete ? 'Importing only what was read' : 'Import only what was read'} active={acceptIncomplete} onPress={() => setAcceptIncomplete((v) => !v)} colors={colors} /></View> : null}
+      </View> : null}
+      {withheldCount ? <View style={{ marginBottom: 10, borderWidth: 1, borderColor: palette.expenseText, borderRadius: 10, padding: 10 }}>
+        <Text style={{ color: palette.expenseText, fontWeight: '700' }}>{withheldCount} record{withheldCount === 1 ? '' : 's'} not imported: Velnora could not be sure</Text>
+        {read?.withheld.map((w) => <View key={w.index} style={{ marginTop: 8 }}>
+          <Text style={{ color: colors.text }} numberOfLines={2}>{[w.dateText, w.timeText, w.description || 'Unreadable description', w.amountText].filter(Boolean).join(' - ')}</Text>
+          <Text style={{ color: colors.muted, fontSize: 12 }}>Page {w.page} - {w.reasons.join(', ')}</Text>
+          <Text onPress={() => setShowEvidence(showEvidence === w.index ? null : w.index)} accessibilityRole="button" style={{ color: palette.accentText, fontSize: 12, paddingVertical: 3 }}>{showEvidence === w.index ? 'Hide original lines' : 'Show original lines'}</Text>
+          {showEvidence === w.index ? w.original.map((line, i) => <Text key={i} style={{ color: colors.muted, fontSize: 12 }}>{line}</Text>) : null}
+          {w.choosable ? <View style={{ flexDirection: 'row', gap: 6, paddingTop: 2 }}>
+            {(['income', 'expense'] as const).map((d) => <Chip key={d} label={d === 'income' ? 'Money in' : 'Money out'} active={chosen.get(w.index) === d} colors={colors}
+              onPress={() => setChosen((prev) => { const next = new Map(prev); if (next.get(w.index) === d) next.delete(w.index); else next.set(w.index, d); return next; })} />)}
+          </View> : <Text style={{ color: colors.muted, fontSize: 12 }}>Needs a date and amount that can be read before it can be added.</Text>}
+        </View>)}
+        {undecided ? <Text style={{ color: colors.muted, marginTop: 8, fontSize: 12 }}>Records you do not choose are left out and are not counted anywhere.</Text> : null}
       </View> : null}
       <Text style={{ color: colors.muted, marginBottom: 8 }}>{preview.length} found · {count('new')} new · {count('matched')} already recorded · {count('possible')} possible duplicates · {count('already_imported')} imported before{toCheck ? ` · ${toCheck} to check` : ''}{parseErrors ? ` · ${parseErrors} lines not understood` : ''}. Tap a line to leave it out{pdf ? ', or its category to change it' : ''}.</Text>
       {pdf && session ? <View style={{ marginBottom: 8 }}><Chip label={remember ? 'Remember my category choices' : 'Do not remember my choices'} active={remember} onPress={() => setRemember((v) => !v)} colors={colors} /></View> : null}
@@ -307,10 +356,13 @@ export function StatementImportSheet({ visible, mode, scope, session, categories
         const category = edited.get(p.row.line) ?? p.row.category;
         const flagged = p.status === 'new' && p.row.needsReview && !edited.has(p.row.line);
         return <View key={p.row.line} style={{ borderBottomWidth: 1, borderBottomColor: colors.border, paddingVertical: 8, opacity: off ? 0.45 : 1 }}>
-          <Text onPress={toggleable ? () => toggle(p.row.line) : undefined} style={{ color: colors.text }} numberOfLines={1}>{when(p.row.date)} · {p.row.direction === 'income' ? '+' : '-'}{formatPaise(Math.round(p.row.amount * 100))} · {p.row.narration}</Text>
+          <Text onPress={toggleable ? () => toggle(p.row.line) : undefined} style={{ color: colors.text }} numberOfLines={1}>{when(p.row.date)}{p.row.timeText ? ` ${p.row.timeText}` : ''} · {p.row.direction === 'income' ? '+' : '-'}{formatPaise(Math.round(p.row.amount * 100))} · {p.row.narration}</Text>
           <Text style={{ color: flagged ? palette.expenseText : colors.muted, fontSize: 12 }}>
-            {off ? 'Left out' : STATUS_TEXT[p.status]}{p.matchLabel ? ` · ${p.matchLabel}` : ''}{p.status === 'new' && category ? ` · ${p.row.direction === 'income' ? 'Income' : 'Expense'} · ${category}` : ''}{flagged ? ' · Check category' : ''}
+            {off ? 'Left out' : STATUS_TEXT[p.status]}{p.matchLabel ? ` · ${p.matchLabel}` : ''}{p.status === 'new' && category ? ` · ${p.row.kind === 'transfer' ? 'Own transfer' : p.row.kind === 'refund' || p.row.kind === 'reversal' ? 'Refund' : p.row.direction === 'income' ? 'Income' : 'Expense'} · ${category}` : ''}{flagged ? ' · Check category' : ''}{pdf && p.row.referenceId ? ` · ref ...${p.row.referenceId.slice(-6)}` : ''}
           </Text>
+          {p.row.reviewReasons?.length ? <Text style={{ color: palette.expenseText, fontSize: 12 }}>Review: {p.row.reviewReasons.join(', ')}</Text> : null}
+          {pdf && p.row.original?.length ? <Text onPress={() => setShowEvidence(showEvidence === -p.row.line ? null : -p.row.line)} accessibilityRole="button" style={{ color: palette.accentText, fontSize: 12, paddingVertical: 3 }}>{showEvidence === -p.row.line ? 'Hide original lines' : 'Show original lines'}</Text> : null}
+          {showEvidence === -p.row.line ? <View>{p.row.original?.map((line, i) => <Text key={i} style={{ color: colors.muted, fontSize: 12 }}>{line}</Text>)}<Text style={{ color: colors.muted, fontSize: 12 }}>Direction: {p.row.directionConfidence ?? 'n/a'} confidence - {(p.row.directionEvidence ?? []).join('; ')}</Text></View> : null}
           {pdf && p.status === 'new' && !off ? <Text onPress={() => setEditing(editing === p.row.line ? null : p.row.line)} accessibilityRole="button" style={{ color: palette.accentText, fontSize: 12, paddingVertical: 4 }}>{editing === p.row.line ? 'Close' : 'Change category'}</Text> : null}
           {editing === p.row.line ? <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, paddingTop: 4 }}>
             {categories.filter((c) => c.type === p.row.direction).map((c) => <Chip key={c.id} label={c.name} active={category === c.name} colors={colors} onPress={() => { setEdited((prev) => new Map(prev).set(p.row.line, c.name)); setEditing(null); }} />)}

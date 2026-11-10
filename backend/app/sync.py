@@ -794,6 +794,46 @@ def sync_push(
                 # DELETE OPERATION
                 # --------------------------------------------------------------
                 elif item.operation == SyncOperationType.delete:
+                    # A create that was acknowledged against an existing row (same reference or fingerprint) answered with THAT row's
+                    # id, so the device's own id is unknown here. The delete then names the same payment by its identity keys, and
+                    # deletes only this user's active row carrying that reference/fingerprint, so it cannot stay active on the server.
+                    if not existing:
+                        reference = (item.payload.reference_id or "").strip()
+                        fingerprint = (item.payload.fingerprint or "").strip()
+                        twin = None
+                        if reference:
+                            twin = db.scalar(
+                                select(TransactionModel).where(
+                                    TransactionModel.user_id == user.id,
+                                    TransactionModel.reference_id == reference,
+                                    TransactionModel.deleted_at.is_(None),
+                                ).with_for_update()
+                            )
+                        if twin is None and fingerprint and not reference:
+                            twin = db.scalar(
+                                select(TransactionModel).where(
+                                    TransactionModel.user_id == user.id,
+                                    TransactionModel.fingerprint == fingerprint,
+                                    TransactionModel.deleted_at.is_(None),
+                                ).with_for_update()
+                            )
+                        if twin is not None:
+                            twin.deleted_at = now
+                            twin.server_version += 1
+                            twin.updated_at = now
+                            twin.sync_revision = db.scalar(text("SELECT nextval('sync_revision_seq')"))
+                            db.flush()
+                            results.append(
+                                SyncPushItemResult(
+                                    operation_id=item.operation_id,
+                                    entity_id=twin.id,
+                                    operation=item.operation,
+                                    status="synced",
+                                    server_version=twin.server_version,
+                                    updated_at=twin.updated_at,
+                                )
+                            )
+                            continue
                     if not existing:
                         # Idempotent delete: record doesn't exist
                         results.append(

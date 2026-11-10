@@ -1198,3 +1198,48 @@ def test_real_neon_concurrency_lock_and_isolation():
 
 
 
+
+
+def _push(headers, operation, entity_id, payload):
+    return client.post(
+        "/api/v1/sync/push",
+        headers=headers,
+        json={"items": [{"operation_id": str(uuid4()), "entity_type": "transaction", "entity_id": entity_id, "operation": operation, "client_version": 1, "payload": payload}]},
+    )
+
+
+def test_scenario_k_delete_reaches_a_row_that_a_create_was_acknowledged_against():
+    """
+    A create whose reference already exists is acknowledged against the EXISTING row (a different id). The device's own id is then
+    unknown to the server, so its later delete must find the payment by reference, or the server copy stays active, is pulled back
+    and the deleted transaction reappears.
+    """
+    data, headers, _ = create_sync_user()
+    first_id, second_id = str(uuid4()), str(uuid4())
+    body = {"amount": "43.00", "direction": "expense", "counterparty": "Night canteen", "category": "Food", "reference_id": "627425966121"}
+    assert _push(headers, "create", first_id, body).json()["results"][0]["status"] == "synced"
+    dup = _push(headers, "create", second_id, body).json()["results"][0]
+    assert dup["status"] == "synced" and dup["entity_id"] == first_id  # acknowledged against the existing row
+
+    deleted = _push(headers, "delete", second_id, {"deleted_at": datetime.now(timezone.utc).isoformat(), "reference_id": "627425966121"}).json()["results"][0]
+    assert deleted["status"] == "synced" and deleted["entity_id"] == first_id
+    pulled = client.get("/api/v1/sync/pull?include_deleted=true", headers=headers).json()["transactions"]
+    assert next(t for t in pulled if t["id"] == first_id)["deleted_at"] is not None
+    # retrying the same delete changes nothing and creates nothing
+    again = _push(headers, "delete", second_id, {"deleted_at": datetime.now(timezone.utc).isoformat(), "reference_id": "627425966121"}).json()["results"][0]
+    assert again["status"] == "synced"
+    assert len(client.get("/api/v1/sync/pull?include_deleted=true", headers=headers).json()["transactions"]) == 1
+    # after the deletion the same reference can be imported again as a new, active row
+    reimport = _push(headers, "create", str(uuid4()), body).json()["results"][0]
+    assert reimport["status"] == "synced" and reimport["entity_id"] != first_id
+
+
+def test_scenario_l_delete_by_reference_never_touches_another_users_transactions():
+    owner, owner_headers, _ = create_sync_user()
+    other, other_headers, _ = create_sync_user()
+    mine = str(uuid4())
+    assert _push(owner_headers, "create", mine, {"amount": "43.00", "direction": "expense", "counterparty": "Night canteen", "category": "Food", "reference_id": "R-SHARED-1"}).status_code == 200
+    # another account sends a delete naming the same reference: it must not delete the owner's row
+    _push(other_headers, "delete", str(uuid4()), {"deleted_at": datetime.now(timezone.utc).isoformat(), "reference_id": "R-SHARED-1"})
+    pulled = client.get("/api/v1/sync/pull?include_deleted=true", headers=owner_headers).json()["transactions"]
+    assert next(t for t in pulled if t["id"] == mine)["deleted_at"] is None

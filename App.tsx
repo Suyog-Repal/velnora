@@ -2,7 +2,7 @@ import { StatusBar } from 'expo-status-bar';
 import { Alert, Animated, AppState, Easing, Keyboard, KeyboardAvoidingView, Linking, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View, useWindowDimensions } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { clearSession, loadSession, login, logout, refreshSession, register, requestPasswordReset, saveSession, type Session } from './auth';
+import { clearSession, loadSession, login, logout, refreshSessionShared as refreshSession, register, requestPasswordReset, saveSession, type Session } from './auth';
 import { restoreSession } from './src/services/sessionRestore';
 import { getGuestDataSummary, importGuestData, isGuestModeChosen, setGuestModeChosen } from './src/services/guestModeService';
 import { addSmsStagedListener, configureSupportedSenderPatterns, getNativeReviewNotifier } from './sms';
@@ -34,7 +34,7 @@ import { getServiceDb, onSyncResult, setPostSyncHook } from './src/services/tran
 import { listCategories, type CategoryView } from './src/services/categoryService';
 import { uploadPendingReceipts } from './src/services/receiptService';
 import { expoReceiptFs, expoReceiptUploader } from './src/services/receiptFiles';
-import { setSyncSessionRefresher, triggerSync } from './src/services/syncEngine';
+import { setSyncSessionRefresher, startSyncEngine, stopSyncEngine, triggerSync } from './src/services/syncEngine';
 import { createSessionRefresher } from './src/services/sessionRefresh';
 import { API_URL } from './auth';
 import { Chip, Input, Sheet, TypeToggle, currencySymbol, readableOn, useOnline } from './src/ui/common';
@@ -181,6 +181,14 @@ function AppInner() {
     return () => setPostSyncHook(null);
   }, []);
 
+  // The server definitively rejected the refresh token: this is "sign in again", never a silent switch to guest mode. The persisted
+  // guest choice is cleared too, otherwise an earlier "continue without an account" would turn this into guest mode on its own.
+  const endSessionToSignIn = () => {
+    setAuthNotice('Your session has ended. Sign in again; your data on this device is preserved.');
+    void setGuestModeChosen(false).catch(() => undefined);
+    setGuestMode(false); setAuthScreen('signin'); setShowAuth(true);
+  };
+
   // A sync rejected with 401 (15-minute access token expired) refreshes the session once, then retries; see sessionRefresh.ts.
   useEffect(() => {
     const refresher = createSessionRefresher<Session>({
@@ -190,7 +198,7 @@ function AppInner() {
       onRejected: (rejected) => {
         void clearSession();
         setSession((current) => (current?.user.id === rejected.user.id ? null : current));
-        setAuthNotice('Your session has ended. Sign in again; your data on this device is preserved.');
+        endSessionToSignIn();
       },
     });
     sessionRefresher.current = refresher;
@@ -202,12 +210,13 @@ function AppInner() {
   // Only an explicit server rejection of the refresh token ends the session; local data is never touched.
   useEffect(() => {
     // The first screen comes from local data at once; the refresh runs behind it, so a slow or sleeping server never delays launch.
-    loadSession().then((stored) => {
+    // A keystore that is not ready yet throws; that is not "no session". Look twice before treating it as signed out.
+    loadSession().catch(() => new Promise<Session | null>((resolve) => setTimeout(() => loadSession().then(resolve, () => resolve(null)), 600))).then((stored) => {
       if (stored) setSession(stored);
       setAuthReady(true);
       if (!stored) return;
       void restoreSession(stored, refreshSession).then(async (result) => {
-        if (result.status === 'expired') { await clearSession(); setAuthNotice('Your session has ended. Sign in again; your data on this device is preserved.'); }
+        if (result.status === 'expired') { await clearSession(); endSessionToSignIn(); }
         // Only apply this to the session it was started for (the person may have signed out meanwhile).
         setSession((current) => (current?.refresh_token === stored.refresh_token ? result.session : current));
         setSessionStale(result.status === 'offline');
@@ -309,7 +318,7 @@ function AppInner() {
         const status = (err as { status?: number })?.status;
         if (!cancelled && (status === 400 || status === 401 || status === 403 || status === 422)) {
           await clearSession(); setSession(null); setSessionStale(false);
-          setAuthNotice('Your session has ended. Sign in again; your data on this device is preserved.');
+          endSessionToSignIn();
         }
       }
     };
@@ -317,6 +326,16 @@ function AppInner() {
     const sub = AppState.addEventListener('change', (state) => { if (state === 'active') void retry(); });
     return () => { cancelled = true; sub.remove(); };
   }, [session, sessionStale]);
+
+  // The sync engine watches the network itself (NetInfo): when connectivity returns it runs a cycle without the person doing anything.
+  // It asks for the CURRENT session each time, so a refreshed token is used and a signed-out app syncs nothing.
+  const latestSession = useRef<Session | null>(null);
+  latestSession.current = session;
+  useEffect(() => {
+    if (!session?.user.id) return;
+    void startSyncEngine(async () => latestSession.current).catch(() => undefined);
+    return () => stopSyncEngine();
+  }, [session?.user.id]);
 
   useEffect(() => {
     if (!session) return;
@@ -371,6 +390,7 @@ function AppInner() {
       // Guest data is never attached silently: ask first, and only if there is something to import.
       const guest = await getGuestDataSummary().catch(() => ({ transactionCount: 0, budgetCount: 0, categoryCount: 0, expectedCount: 0 }));
       setSession(next); setSessionStale(false); setShowAuth(false); setPassword(''); setConfirmPassword('');
+      setGuestMode(false); void setGuestModeChosen(false).catch(() => undefined); // an account session replaces the guest choice
       if (guest.transactionCount + guest.budgetCount + guest.categoryCount + guest.expectedCount > 0) setImportPrompt({ count: guest.transactionCount }); } catch (caught) { setAuthError(caught instanceof Error ? caught.message : 'Authentication failed. Try again.'); } finally { setAuthBusy(false); }
   };
   const submitForgot = async () => { setAuthBusy(true); setAuthError(''); try { await requestPasswordReset(email.trim().toLowerCase()); setAuthNotice('Password reset delivery is not configured in this environment.'); } catch (caught) { setAuthError(caught instanceof Error ? caught.message : 'Password reset is unavailable.'); } finally { setAuthBusy(false); } };

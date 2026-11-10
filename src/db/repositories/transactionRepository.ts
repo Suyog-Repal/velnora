@@ -243,7 +243,10 @@ export class TransactionRepository {
 
   /** True when a reference or fingerprint key already identifies this event in the scope. */
   async hasIdentityKey(scope: string, key: string): Promise<boolean> {
-    return (await this.db.getFirstAsync<{ n: number }>('SELECT 1 AS n FROM transaction_keys WHERE scope = ? AND key = ?', scope, key)) !== null;
+    // A key whose transaction was deleted identifies nothing: deleting a transaction must free the statement line for re-import.
+    return (await this.db.getFirstAsync<{ n: number }>(
+      'SELECT 1 AS n FROM transaction_keys k JOIN transactions t ON t.id = k.transaction_id WHERE k.scope = ? AND k.key = ? AND t.deleted_at IS NULL', scope, key,
+    )) !== null;
   }
 
   /** Rows the person needs to look at, newest first. */
@@ -635,9 +638,11 @@ export class TransactionRepository {
           entity_type: 'transaction',
           entity_id: id,
           operation: 'delete',
-          payload: JSON.stringify({ id, deleted_at: now, user_id: existing.user_id }),
+          payload: JSON.stringify({ id, deleted_at: now, user_id: existing.user_id, reference_id: existing.reference_id ?? null, fingerprint: existing.fingerprint ?? null }),
         });
       }
+      // The identity keys of a deleted row no longer identify anything (the sync tombstone above is what survives).
+      await this.db.runAsync('DELETE FROM transaction_keys WHERE transaction_id = ?', id);
 
       if (!externalTxn) await this.db.execAsync('COMMIT');
       return true;
@@ -783,6 +788,14 @@ export class TransactionRepository {
         return 'inserted';
       }
 
+      // The server acknowledged a create against an existing row of the same payment (same reference) under THAT row's id.
+      // The device already holds the payment: inserting the server's copy would count it twice.
+      if (remote.reference_id) {
+        const held = await this.db.getFirstAsync<{ id: string }>(
+          `SELECT id FROM transactions WHERE reference_id = ? AND deleted_at IS NULL AND COALESCE(user_id, '') = ? LIMIT 1`, remote.reference_id, remote.user_id ?? '',
+        );
+        if (held) return 'ignored';
+      }
       await this.db.runAsync(
         `INSERT INTO transactions (
           id, user_id, amount, amount_paise, direction, counterparty, category_id, category,

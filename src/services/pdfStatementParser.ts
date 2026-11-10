@@ -1,6 +1,7 @@
 import type { Direction } from '../db/types.ts';
 import { extractReference } from '../../transactionParser.ts';
 import { hashRow, kindOf, parseStatementDate, type StatementRow } from './statementImport.ts';
+import { isUpiStatement, isWithheld, ledgerDirection, parseUpiStatement, paiseToRupees, type Reconciliation, type UpiRecord } from './upiStatementParser.ts';
 
 /**
  * Turns the text of a bank statement PDF (rows as printed, columns kept as runs of spaces; see backend/app/statements.py)
@@ -19,9 +20,26 @@ export interface PdfStatementMeta {
   closingBalance: number | null;
   headerFound: boolean;
   unsupportedCurrency: boolean;
+  /** Which reader understood the layout. 'generic' is the column-heading reader used for bank statements. */
+  format?: 'upi_app' | 'generic';
+  paymentApp?: string | null;
 }
 
-export interface PdfParseResult { rows: StatementRow[]; errors: { line: number; reason: string }[]; meta: PdfStatementMeta }
+/** A record the reader would not import: the amount, date or direction could not be settled. It stays visible to the person. */
+export interface WithheldRecord {
+  index: number; page: number; reasons: string[]; evidence: string[]; original: string[];
+  dateText: string | null; timeText: string | null; description: string; amountText: string | null; reference: string;
+  /** Present only when date and amount are certain and just the direction is open: the person can then choose it. */
+  choosable: { date: string; hasTime: boolean; amount: number; counterparty: string; bankName: string | null; accountLast4: string | null } | null;
+}
+
+export interface PdfParseResult {
+  rows: StatementRow[]; errors: { line: number; reason: string }[]; meta: PdfStatementMeta;
+  withheld?: WithheldRecord[];
+  reconciliation?: Reconciliation | null;
+  recordsDetected?: number;
+  recordsPerPage?: number[];
+}
 
 interface Cell { text: string; start: number; end: number }
 type ColumnKind = 'date' | 'narration' | 'debit' | 'credit' | 'amount' | 'balance' | 'reference' | 'type';
@@ -74,8 +92,8 @@ const MAX_GROUP_LINES = 8;
 // "UPI Transaction ID: 62742596121", "Transaction ID T2610011843", "UTR No: 4012..." -> the id
 const ID_LINE = /^(?:UPI\s+)?(?:transaction|txn|utr|ref(?:erence)?)\s*(?:id|no\.?|number)?\s*[:#.-]?\s*([A-Z0-9][A-Z0-9-]{5,})\s*$/i;
 const INSTRUMENT_LINE = /^(?:paid by|paid from|credited to|debited from|received in)\b/i;
-const OUT_WORDING = /^(?:paid to|sent to|payment to|money sent to|transferred to)\b/i;
-const IN_WORDING = /^(?:received from|money received from|credited by)\b/i;
+const OUT_WORDING = /^(?:paid\s+to|sent\s+to|payment\s+to|money\s+sent\s+to|transferred\s+to)\b/i;
+const IN_WORDING = /^(?:received\s+from|money\s+received\s+from|credited\s+by)\b/i;
 
 function splitCells(line: string): Cell[] {
   const cells: Cell[] = [];
@@ -168,7 +186,70 @@ function nearestColumn(cell: Cell, columns: Column[]): ColumnKind | null {
   return best.kind;
 }
 
-export function parsePdfStatement(pages: string[][]): PdfParseResult {
+function dayKey(d: Date): string { return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; }
+
+function upiRow(rec: UpiRecord, direction: 'income' | 'expense', seen: Map<string, number>): StatementRow {
+  const kind: StatementRow['kind'] = rec.transfer ? 'transfer' : rec.direction === 'refund' ? 'refund' : rec.direction === 'reversal' ? 'reversal' : 'payment';
+  const amount = paiseToRupees(rec.amountPaise ?? 0);
+  // The UPI id is the identity; without one, the printed day+time, amount, direction and wording stand in, with an occurrence count.
+  const base = [dayKey(rec.date!), rec.timeText ?? '', (rec.amountPaise ?? 0), direction, rec.description.toLowerCase(), rec.reference, rec.accountLast4 ?? ''].join('|');
+  const occurrence = seen.get(base) ?? 0;
+  seen.set(base, occurrence + 1);
+  return {
+    line: rec.index, date: rec.date!.toISOString(), amount, direction, narration: rec.description.slice(0, 160), referenceId: rec.reference,
+    fingerprint: `st-${hashRow(`${base}|${occurrence}`)}`, kind, origin: 'pdf', ...(rec.hasTime ? { hasTime: true } : {}),
+    counterparty: rec.counterparty || undefined, bankName: rec.bankName, accountLast4: rec.accountLast4, paymentApp: 'Google Pay',
+    reviewReasons: rec.reviewReasons, directionEvidence: rec.evidence, directionConfidence: rec.confidence, original: rec.original,
+    timeText: rec.timeText, amountText: rec.amountText, page: rec.page,
+    // a record the reader flagged is saved as "needs review", never as a confirmed financial record
+    ...(rec.reviewReasons.length ? { needsReview: true } : {}),
+  };
+}
+
+/** A withheld record the person has decided the direction of (date and amount were certain). It is saved as "needs review". */
+export function withheldToRow(w: WithheldRecord, direction: 'income' | 'expense'): StatementRow | null {
+  if (!w.choosable) return null;
+  const date = new Date(w.choosable.date);
+  const base = [dayKey(date), w.timeText ?? '', Math.round(w.choosable.amount * 100), direction, w.description.toLowerCase(), w.reference, w.choosable.accountLast4 ?? ''].join('|');
+  return {
+    line: w.index, date: w.choosable.date, amount: w.choosable.amount, direction, narration: w.description.slice(0, 160), referenceId: w.reference,
+    fingerprint: `st-${hashRow(`${base}|0`)}`, kind: 'payment', origin: 'pdf', ...(w.choosable.hasTime ? { hasTime: true } : {}),
+    counterparty: w.choosable.counterparty || undefined, bankName: w.choosable.bankName, accountLast4: w.choosable.accountLast4, paymentApp: 'Google Pay',
+    reviewReasons: [...w.reasons, 'Direction chosen by you'], directionEvidence: w.evidence, directionConfidence: 'low', original: w.original,
+    timeText: w.timeText, amountText: w.amountText, page: w.page, needsReview: true,
+  };
+}
+
+/** Maps the structured UPI-app reader's records onto the shared statement rows. Withheld records are not rows. */
+function parseUpiPages(pages: string[][], onPage?: (page: number, total: number) => void): PdfParseResult {
+  const result = parseUpiStatement(pages, onPage);
+  const rows: StatementRow[] = []; const withheld: WithheldRecord[] = []; const errors: { line: number; reason: string }[] = [];
+  const seen = new Map<string, number>();
+  for (const rec of result.records) {
+    const direction = ledgerDirection(rec);
+    if (isWithheld(rec) || !direction || !rec.date || rec.amountPaise === null) {
+      const dateAndAmountOk = !!rec.date && rec.amountPaise !== null && rec.amountPaise > 0;
+      const onlyDirectionOpen = dateAndAmountOk && rec.reviewReasons.every((r) => r === 'Unknown direction' || r === 'Conflicting direction');
+      withheld.push({
+        index: rec.index, page: rec.page, reasons: rec.reviewReasons.length ? rec.reviewReasons : ['Unrecognized record'], evidence: rec.evidence, original: rec.original,
+        dateText: rec.dateText, timeText: rec.timeText, description: rec.description, amountText: rec.amountText, reference: rec.reference,
+        choosable: onlyDirectionOpen ? { date: rec.date!.toISOString(), hasTime: rec.hasTime, amount: paiseToRupees(rec.amountPaise!), counterparty: rec.counterparty, bankName: rec.bankName, accountLast4: rec.accountLast4 } : null,
+      });
+      errors.push({ line: rec.index, reason: rec.reviewReasons.includes('Missing amount') || rec.reviewReasons.includes('Uncertain amount') ? 'Amount not understood'
+        : rec.reviewReasons.includes('Missing date') || rec.reviewReasons.includes('Uncertain date') ? 'Date not understood' : 'Could not tell money in from money out' });
+      continue;
+    }
+    rows.push(upiRow(rec, direction, seen));
+  }
+  const meta: PdfStatementMeta = {
+    bankName: null, periodStart: result.periodStart ? result.periodStart.toISOString() : null, periodEnd: result.periodEnd ? result.periodEnd.toISOString() : null,
+    openingBalance: null, closingBalance: null, headerFound: true, unsupportedCurrency: false, format: 'upi_app', paymentApp: 'Google Pay',
+  };
+  return { rows, errors, meta, withheld, reconciliation: result.reconciliation, recordsDetected: result.records.length, recordsPerPage: result.recordsPerPage };
+}
+
+export function parsePdfStatement(pages: string[][], onPage?: (page: number, total: number) => void): PdfParseResult {
+  if (isUpiStatement(pages)) return parseUpiPages(pages, onPage);
   const meta: PdfStatementMeta = { bankName: null, periodStart: null, periodEnd: null, openingBalance: null, closingBalance: null, headerFound: false, unsupportedCurrency: false };
   const errors: { line: number; reason: string }[] = [];
 
@@ -245,7 +326,10 @@ export function parsePdfStatement(pages: string[][]): PdfParseResult {
     const narration = words.join(' ').replace(/\s+/g, ' ').trim().slice(0, 160);
     const { date, hasTime } = withTime(parsedDate, timeText);
     // Wording is the weakest witness: used only when no column, marker or balance has spoken, and never if it says both.
-    const paidOut = words.some((w) => OUT_WORDING.test(w)); const paidIn = words.some((w) => IN_WORDING.test(w));
+    // "Paid to State Bank of India 4823" under a payment RECEIVED is the account the money arrived in, not payee wording.
+    const accountLine = (w: string) => OUT_WORDING.test(w) && /\d{4}\s*$/.test(w) && BANKS.some(([p]) => p.test(w));
+    const wording = words.filter((w) => !accountLine(w));
+    const paidOut = wording.some((w) => OUT_WORDING.test(w)); const paidIn = wording.some((w) => IN_WORDING.test(w));
     const textDirection: Direction | null = paidOut && !paidIn ? 'expense' : paidIn && !paidOut ? 'income' : null;
     drafts.push({ line, date, hasTime, amount, columnDirection, textDirection, balance, narration, referenceId: referenceCell || idText || extractReference(narration) });
   };

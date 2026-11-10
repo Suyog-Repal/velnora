@@ -49,3 +49,24 @@ export function createSessionRefresher<S extends RefreshableSession>(deps: Sessi
     return inflight;
   };
 }
+
+/**
+ * Refresh tokens ROTATE on the server: using one revokes it. Every caller that needs a fresh session (launch restore, the offline
+ * retry, a sync that got 401) must come through ONE of these: a single request at a time, and a token that someone else already
+ * rotated is never sent again (the stored, newer session is returned without touching the network). Errors keep their HTTP status
+ * so the caller can tell a rejected token (sign in again) from a network failure (keep the session, retry later).
+ */
+export function createSharedRefresh<S extends RefreshableSession>(deps: { loadStored: () => Promise<S | null>; refresh: (session: S) => Promise<S> }) {
+  let inflight: { userId: string; promise: Promise<S> } | null = null;
+  return function refreshShared(session: S): Promise<S> {
+    if (inflight && inflight.userId === session.user.id) return inflight.promise;
+    const promise = (async () => {
+      const stored = await deps.loadStored().catch(() => null);
+      const base = stored && stored.user.id === session.user.id ? stored : session;
+      if (base !== session && base.refresh_token !== session.refresh_token) return base; // rotated meanwhile: already fresh
+      return deps.refresh(base);
+    })().finally(() => { inflight = null; });
+    inflight = { userId: session.user.id, promise };
+    return promise;
+  };
+}

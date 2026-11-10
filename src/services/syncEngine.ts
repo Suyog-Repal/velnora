@@ -99,12 +99,18 @@ function buildSimplePayload(entityType: string, p: Record<string, unknown>, isDe
   return { match_key: p.match_key, original_text: p.original_text, display_name: p.display_name, category: p.category ?? null };
 }
 
+const MAX_AUTO_RETRIES = 6;
+
 export class SyncEngine {
   private isSyncing = false;
   private isOnline = true;
   private lastSyncAt: string | null = null;
   private lastError: string | null = null;
   private lastReconnectTrigger = 0;
+  /** A sync was requested while one was running: one follow-up cycle runs afterwards, so a just-saved change is never left waiting. */
+  private rerunRequested = false;
+  private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  private consecutiveFailures = 0;
   private listeners: Set<StateListener> = new Set();
   private unsubscribeNetInfo: (() => void) | null = null;
   private sessionProvider: (() => Promise<SyncSession | null>) | null = null;
@@ -205,6 +211,7 @@ export class SyncEngine {
       this.unsubscribeNetInfo = null;
     }
     this.sessionProvider = null;
+    if (this.retryTimer) { clearTimeout(this.retryTimer); this.retryTimer = null; }
   }
 
   public subscribe(listener: StateListener): () => void {
@@ -240,6 +247,7 @@ export class SyncEngine {
    */
   public async triggerSync(explicitSession?: SyncSession | null, apiBaseUrl?: string): Promise<SyncSummary> {
     if (this.isSyncing) {
+      this.rerunRequested = true;
       return { pushed: 0, pulled: 0, conflicts: 0, errors: ['Sync already in progress'] };
     }
 
@@ -301,8 +309,25 @@ export class SyncEngine {
       this.isSyncing = false;
       this.notifyListeners();
     }
-
+    this.scheduleFollowUp(summary);
     return summary;
+  }
+
+  /**
+   * After a cycle: run one more if a request arrived meanwhile; after a TRANSIENT failure (network, server down, timeout) retry later
+   * with exponential backoff, capped and bounded. A rejected session (401) or a permanently rejected item never retries by itself:
+   * the person signing in again, the app returning to the foreground or the network coming back starts the next cycle.
+   */
+  private scheduleFollowUp(summary: SyncSummary): void {
+    if (this.retryTimer) { clearTimeout(this.retryTimer); this.retryTimer = null; }
+    const transient = !!this.lastError && !/^(UNAUTHORIZED|VALIDATION_FAILED_|No active session)/.test(this.lastError) && !/status 401/i.test(this.lastError);
+    if (!this.lastError && summary.errors.length === 0) this.consecutiveFailures = 0;
+    let delay: number | null = null;
+    if (this.rerunRequested) { this.rerunRequested = false; delay = 250; }
+    else if (transient && this.consecutiveFailures < MAX_AUTO_RETRIES) { delay = Math.min(300_000, 30_000 * 2 ** this.consecutiveFailures); this.consecutiveFailures += 1; }
+    if (delay === null || !this.sessionProvider) return; // without a session provider (tests, signed out) nothing can run by itself
+    this.retryTimer = setTimeout(() => { this.retryTimer = null; void this.triggerSync(); }, delay);
+    (this.retryTimer as { unref?: () => void }).unref?.();
   }
 
   /**
@@ -405,6 +430,9 @@ export class SyncEngine {
           payload: isDelete
             ? {
                 deleted_at: (payloadObj as { deleted_at: string }).deleted_at || new Date().toISOString(),
+                // identity keys let the server find the payment even when it was acknowledged under another row's id
+                reference_id: (payloadObj as { reference_id?: string | null }).reference_id ?? null,
+                fingerprint: (payloadObj as { fingerprint?: string | null }).fingerprint ?? null,
               }
             : {
                 amount: (payloadObj as TransactionEntity).amount,
@@ -559,7 +587,19 @@ export class SyncEngine {
         }
         pushed++;
         // Queue items are removed ONLY upon confirmed server acknowledgement
-        await txRepo.updateSyncStatus(localId, 'synced', ack.server_version);
+        const local = ackedFor.entity_type === 'transaction' && ackedFor.operation !== 'delete' ? await txRepo.getById(localId) : null;
+        if (local?.deleted_at) {
+          // Deleted on the device while this create/update was in flight: the server now holds an ACTIVE copy. It must not be
+          // marked synced (a later pull would bring it back); record the deletion for the server instead.
+          await txRepo.updateSyncStatus(localId, 'pending_delete', ack.server_version);
+          await syncQueueRepo.dequeue(ack.operation_id); // first: enqueueing a delete next to a queued create would cancel both
+          await syncQueueRepo.enqueue({
+            entity_type: 'transaction', entity_id: localId, operation: 'delete',
+            payload: JSON.stringify({ id: localId, deleted_at: local.deleted_at, user_id: local.user_id, reference_id: local.reference_id ?? null, fingerprint: local.fingerprint ?? null }),
+          });
+        } else {
+          await txRepo.updateSyncStatus(localId, 'synced', ack.server_version);
+        }
         const ackedItem = ackedFor;
         if (ackedItem?.entity_type === 'budget') {
           await db.runAsync("UPDATE budgets SET sync_status = 'synced' WHERE id = ?", localId);

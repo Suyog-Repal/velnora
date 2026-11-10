@@ -1,5 +1,6 @@
 import type { Session } from '../db/types.ts';
-import { parsePdfStatement, type PdfStatementMeta } from './pdfStatementParser.ts';
+import { parsePdfStatement, type PdfStatementMeta, type WithheldRecord } from './pdfStatementParser.ts';
+import type { Reconciliation } from './upiStatementParser.ts';
 import type { StatementRow } from './statementImport.ts';
 
 /**
@@ -37,7 +38,8 @@ export const PDF_FAILURE_MESSAGES: Record<PdfFailure, string> = {
 
 export interface PdfFile { uri: string; name: string; mimeType?: string | null; size?: number | null }
 
-export interface PdfExtractResponse { status: 'text' | 'scanned' | 'encrypted' | 'invalid' | 'empty'; page_count: number; pages: string[][] }
+export interface PdfPageIssue { page: number; reason: string; recovered?: boolean }
+export interface PdfExtractResponse { status: 'text' | 'scanned' | 'encrypted' | 'invalid' | 'empty'; page_count: number; pages: string[][]; page_issues?: PdfPageIssue[]; pages_processed?: number }
 
 /** Transport, injected so the pipeline is testable without a device. Resolves with the HTTP status and parsed body. */
 export interface PdfExtractPort {
@@ -45,7 +47,12 @@ export interface PdfExtractPort {
 }
 
 export type PdfReadResult =
-  | { ok: true; rows: StatementRow[]; errors: { line: number; reason: string }[]; meta: PdfStatementMeta; pageCount: number }
+  | {
+    ok: true; rows: StatementRow[]; errors: { line: number; reason: string }[]; meta: PdfStatementMeta; pageCount: number;
+    /** Pages the server read. Fewer than pageCount means the import is INCOMPLETE and must be shown as such. */
+    pagesProcessed: number; pageIssues: PdfPageIssue[]; incomplete: boolean;
+    withheld: WithheldRecord[]; reconciliation: Reconciliation | null; recordsDetected: number;
+  }
   | { ok: false; reason: PdfFailure; message: string };
 
 const fail = (reason: PdfFailure, message?: string): PdfReadResult => ({ ok: false, reason, message: message ?? PDF_FAILURE_MESSAGES[reason] });
@@ -77,6 +84,7 @@ function isExtractResponse(body: unknown): body is PdfExtractResponse {
 
 export async function readPdfStatement(
   file: PdfFile, session: Session | null, port: PdfExtractPort, refresh?: (stale: Session) => Promise<Session | null>,
+  onProgress?: (stage: 'reading' | 'analysing', page?: number, total?: number) => void,
 ): Promise<PdfReadResult> {
   const invalid = validatePdfFile(file);
   if (invalid) return fail(invalid);
@@ -103,11 +111,20 @@ export async function readPdfStatement(
   if (status === 'invalid' || status === 'empty') return fail('invalid');
   if (status === 'scanned') return fail('scanned');
 
-  const parsed = parsePdfStatement(pages);
+  onProgress?.('reading', pageCount, pageCount);
+  const parsed = parsePdfStatement(pages, (page, total) => onProgress?.('analysing', page, total));
   if (parsed.meta.unsupportedCurrency) return fail('unsupported_currency');
-  if (!parsed.rows.length) {
+  const withheld = parsed.withheld ?? [];
+  if (!parsed.rows.length && !withheld.length) {
     if (parsed.errors.length) return fail('rows_not_understood', explainUnreadRows(parsed.errors));
     return fail(parsed.meta.headerFound ? 'no_transactions' : 'unsupported_layout');
   }
-  return { ok: true, rows: parsed.rows, errors: parsed.errors, meta: parsed.meta, pageCount };
+  // Pages the server could not read, or fewer pages than the file has, mean the statement was NOT fully read.
+  const pageIssues = response.body.page_issues ?? [];
+  const pagesProcessed = Math.min(pages.length, response.body.pages_processed ?? pages.length - pageIssues.length);
+  const incomplete = pageIssues.length > 0 || pages.length < pageCount || pagesProcessed < pageCount;
+  return {
+    ok: true, rows: parsed.rows, errors: parsed.errors, meta: parsed.meta, pageCount, pagesProcessed, pageIssues, incomplete,
+    withheld, reconciliation: parsed.reconciliation ?? null, recordsDetected: parsed.recordsDetected ?? parsed.rows.length + parsed.errors.length,
+  };
 }

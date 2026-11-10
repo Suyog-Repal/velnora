@@ -29,6 +29,21 @@ export interface StatementRow {
   needsReview?: boolean;
   /** How sure the category is. 'user' means the person chose it (now or in a saved rule). */
   categoryConfidence?: 'high' | 'medium' | 'low' | 'user';
+  /** PDF only. The payee/payer without the "Paid to" wording, when the reader could tell it apart. */
+  counterparty?: string;
+  bankName?: string | null;
+  accountLast4?: string | null;
+  /** The app the statement came from ("Google Pay"), when the layout says so. */
+  paymentApp?: string | null;
+  /** PDF only. Why the reader wants the person to look at this row, which witnesses decided its direction, how sure it is. */
+  reviewReasons?: string[];
+  directionEvidence?: string[];
+  directionConfidence?: 'high' | 'medium' | 'low';
+  /** PDF only. The statement's own lines for this record, kept in memory for the review screen and never stored. */
+  original?: string[];
+  timeText?: string | null;
+  amountText?: string | null;
+  page?: number;
 }
 
 export interface StatementParseResult { rows: StatementRow[]; errors: { line: number; reason: string }[]; headerFound: boolean }
@@ -180,9 +195,10 @@ export function displayName(narration: string): string {
 }
 
 function toInput(row: StatementRow, scope: string | null): CreateTransactionInput {
-  const counterparty = displayName(row.narration);
+  const counterparty = row.counterparty || displayName(row.narration);
   return {
     amount: row.amount, direction: row.direction, counterparty,
+    account_last4: row.accountLast4 ?? null, bank_name: row.bankName ?? null, payment_app: row.paymentApp ?? null,
     category: row.category ?? suggestCategory({ merchant: row.narration, body: row.narration, direction: row.direction, kind: row.kind }),
     description: `Imported from ${row.origin === 'pdf' ? 'PDF ' : ''}statement: ${row.narration}`, transaction_date: row.date, source: 'sms', capture_source: 'csv_import',
     txn_kind: row.kind, verification_status: row.needsReview ? 'needs_review' : 'verified', reference_id: row.referenceId || null, fingerprint: row.fingerprint, user_id: scope, sync_status: 'pending_create',
@@ -191,7 +207,7 @@ function toInput(row: StatementRow, scope: string | null): CreateTransactionInpu
 
 const detectionFor = (row: StatementRow): DetectionInput => ({
   source: 'csv_import', detectedAt: new Date(row.date).getTime(), dayPrecision: !row.hasTime,
-  metadata: { referenceId: row.referenceId || undefined, balance: row.balance, fingerprint: row.fingerprint },
+  metadata: { referenceId: row.referenceId || undefined, balance: row.balance, fingerprint: row.fingerprint, accountLast4: row.accountLast4 ?? undefined },
 });
 
 /** Read-only comparison with the ledger. */
@@ -236,7 +252,8 @@ export async function applyStatement(
     await rememberRow(p.row, outcome.transaction.id);
     if (outcome.created) {
       summary.added += 1;
-      if (outcome.transaction.verification_status === 'needs_review') { summary.needsReview += 1; summary.possibleDuplicates += 1; }
+      if (outcome.transaction.verification_status === 'needs_review') summary.needsReview += 1;
+      if (outcome.transaction.possible_duplicate_of) summary.possibleDuplicates += 1;
     } else summary.matched += 1;
   }
   return summary;
@@ -258,15 +275,16 @@ export async function flagStatementOverlaps(db: IDatabase, scope: string | null,
     const d = new Date(p.row.date);
     const from = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0).toISOString();
     const to = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59, 999).toISOString();
-    const rows = await db.getAllAsync<{ id: string; counterparty: string }>(
-      `SELECT t.id, t.counterparty FROM transactions t
+    const rows = await db.getAllAsync<{ id: string; counterparty: string; reference_id: string | null }>(
+      `SELECT t.id, t.counterparty, t.reference_id FROM transactions t
        WHERE t.deleted_at IS NULL AND COALESCE(t.user_id, '') = ? AND t.direction = ? AND t.amount_paise = ?
          AND t.transaction_date >= ? AND t.transaction_date <= ?
          AND EXISTS (SELECT 1 FROM transaction_sources s WHERE s.transaction_id = t.id AND s.source = 'csv_import')
        ORDER BY t.created_at`,
       key, p.row.direction, Math.round(p.row.amount * 100), from, to,
     );
-    const hit = rows.find((r) => !taken.has(r.id) && merchantsCompatible(r.counterparty, displayName(p.row.narration)));
+    // Two payments with different bank references are two payments, however alike they look (same shop, same amount, same day).
+    const hit = rows.find((r) => !taken.has(r.id) && !(p.row.referenceId && r.reference_id && p.row.referenceId !== r.reference_id) && merchantsCompatible(r.counterparty, p.row.counterparty || displayName(p.row.narration)));
     if (hit) { taken.add(hit.id); out.push({ ...p, status: 'possible', matchId: hit.id, matchLabel: hit.counterparty }); } else out.push(p);
   }
   return out;

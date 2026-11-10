@@ -4,6 +4,7 @@ import { deleteUserLocalData, getLocalDataSummary } from './src/services/localDa
 import { purgeStagedSmsForUser } from './src/services/smsStagingService.ts';
 import type { AuthUser, Session } from './src/db/types.ts';
 import { resolveApiUrl } from './src/services/apiConfig.ts';
+import { createSharedRefresh } from './src/services/sessionRefresh.ts';
 import { AUTH_PATHS, AuthRequestError, apiRequest, expectSession, registerBody, type RequestErrorKind } from './src/services/apiClient.ts';
 
 export type { AuthUser, Session };
@@ -75,6 +76,15 @@ export async function refreshSession(session: Session): Promise<Session> {
   await saveSession(next);
   return next;
 }
+
+/**
+ * Refresh tokens ROTATE on the server: the old one is revoked the moment it is used. Three callers need a fresh session (launch
+ * restore, the offline retry, a sync that got 401) and they used to call refreshSession separately, so two of them could spend the
+ * same token, the loser got "revoked" (401), and that was read as "the session ended". Every caller must come through here:
+ * one request at a time, and a token that was already rotated by someone else is never sent again (the stored session wins).
+ * Errors keep their HTTP status so callers can tell a rejected token from a network failure.
+ */
+export const refreshSessionShared = createSharedRefresh<Session>({ loadStored: loadSession, refresh: refreshSession });
 
 /**
  * Returns count of unsynchronized transactions for a given user.

@@ -30,9 +30,12 @@ export async function categorizeRows(db: IDatabase, scope: string | null, rows: 
   const out: StatementRow[] = [];
   for (const row of rows) {
     const saved = (await findAlias(db, scope, displayName(row.narration))) ?? (await findAlias(db, scope, row.narration));
+    // A row the PDF reader itself flagged (uncertain wording, repeated reference, ...) stays flagged whatever its category says,
+    // unless the person has set the category themselves.
+    const guess = categorizeRow(row);
     out.push(saved?.category
-      ? { ...row, category: saved.category, categoryConfidence: 'user', needsReview: false }
-      : { ...row, ...categorizeRow(row) });
+      ? { ...row, category: saved.category, categoryConfidence: 'user', needsReview: !!row.reviewReasons?.length }
+      : { ...row, ...guess, needsReview: guess.needsReview || !!row.reviewReasons?.length });
   }
   return out;
 }
