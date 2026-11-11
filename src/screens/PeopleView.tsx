@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Alert, Pressable, ScrollView, Text, View } from 'react-native';
-import { palette, radius } from '../../theme';
+import { palette, radius, tint } from '../../theme';
 import { typo } from '../../typography';
 import { ArrowDownLeft, ArrowUpRight } from '../../icons';
-import { Button, CategoryIcon, Chip, EmptyBlock, Initial, Input, Labeled, SearchField, Sheet, currencySymbol, formatPaise, type Colors } from '../ui/common';
+import { Button, CategoryIcon, Chip, EmptyBlock, Initial, Input, Labeled, SearchField, Segmented, Sheet, currencySymbol, formatPaise, type Colors } from '../ui/common';
 import { Reveal, Tap } from './ProfileView';
 import { TransactionCard } from './TransactionsView';
 import { aggregatePeople, personTransactions, totalsOf, type PersonAggregate } from '../services/peopleService';
@@ -19,11 +19,15 @@ import type { Session, TransactionEntity } from '../db/types';
 const fmtDate = (iso: string) => new Date(iso).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
 const fmtDue = (d: string) => fmtDate(`${d}T12:00:00`);
 
-function Tile({ label, value, sub, color, colors }: { label: string; value: string; sub?: string; color?: string; colors: Colors }) {
-  return <View style={{ flex: 1, minWidth: '47%', backgroundColor: colors.card, borderColor: colors.border, borderWidth: 1, borderRadius: radius.lg, padding: 14 }}>
-    <Text style={{ color: colors.muted, ...typo.label }}>{label}</Text>
-    <Text style={{ color: color ?? colors.text, ...typo.amountMd, marginTop: 4 }} numberOfLines={1} adjustsFontSizeToFit>{value}</Text>
-    {sub ? <Text style={{ ...typo.caption, color: colors.muted, marginTop: 2 }}>{sub}</Text> : null}
+function Tile({ label, value, sub, color, colors, icon }: { label: string; value: string; sub?: string; color?: string; colors: Colors; icon?: React.ReactNode }) {
+  const tone = color ?? colors.text;
+  return <View style={{ flex: 1, minWidth: '47%', backgroundColor: colors.card, borderColor: colors.border, borderWidth: 1, borderRadius: radius.lg, padding: 14 }} accessible accessibilityLabel={`${label}: ${value}${sub ? `, ${sub}` : ''}`}>
+    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+      {icon ? <View style={{ width: 28, height: 28, borderRadius: 9, backgroundColor: tint(tone, 0.12), alignItems: 'center', justifyContent: 'center' }}>{icon}</View> : null}
+      <Text style={{ color: colors.muted, ...typo.caption, flex: 1 }} numberOfLines={1}>{label}</Text>
+    </View>
+    <Text style={{ color: tone, ...typo.amountMd, marginTop: 10 }} numberOfLines={1} adjustsFontSizeToFit>{value}</Text>
+    {sub ? <Text style={{ ...typo.caption, color: colors.muted, marginTop: 2 }} numberOfLines={1}>{sub}</Text> : null}
   </View>;
 }
 
@@ -51,33 +55,32 @@ export function PeopleView({ transactions, categories, session, colors, refreshK
   const summary = useMemo(() => summarizeExpected(expected), [expected]);
 
   return <View>
-    <View style={{ flexDirection: 'row', marginBottom: 14 }}>
-      <Chip label="People" active={tab === 'people'} onPress={() => setTab('people')} colors={colors} />
-      <Chip label={`Expected${summary.receive.count + summary.pay.count ? ` (${summary.receive.count + summary.pay.count})` : ''}`} active={tab === 'expected'} onPress={() => setTab('expected')} colors={colors} />
-    </View>
+    <View style={{ marginBottom: 14 }}><Segmented colors={colors} value={tab} onChange={setTab} options={[['people', 'People'], ['expected', `Expected${summary.receive.count + summary.pay.count ? ` (${summary.receive.count + summary.pay.count})` : ''}`]] as const} /></View>
 
     {tab === 'people' ? <View>
       <Reveal index={0}><View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginBottom: 14 }}>
-        <Tile label="RECEIVED" value={formatPaise(all.incomingPaise)} sub={`${all.incomingCount} transaction${all.incomingCount === 1 ? '' : 's'}`} color={palette.emerald} colors={colors} />
-        <Tile label="PAID" value={formatPaise(all.outgoingPaise)} sub={`${all.outgoingCount} transaction${all.outgoingCount === 1 ? '' : 's'}`} color={palette.danger} colors={colors} />
-        <Tile label="NET" value={formatPaise(all.netPaise)} sub={`${people.length} ${people.length === 1 ? 'person' : 'people'}`} colors={colors} />
-        <Tile label="TRANSACTIONS" value={String(all.count)} sub="all time" colors={colors} />
+        <Tile icon={<ArrowDownLeft size={16} color={palette.accentText} />} label="Received" value={formatPaise(all.incomingPaise)} sub={`${all.incomingCount} transaction${all.incomingCount === 1 ? '' : 's'}`} color={palette.accentText} colors={colors} />
+        <Tile icon={<ArrowUpRight size={16} color={palette.expenseText} />} label="Paid" value={formatPaise(all.outgoingPaise)} sub={`${all.outgoingCount} transaction${all.outgoingCount === 1 ? '' : 's'}`} color={palette.expenseText} colors={colors} />
+        <Tile label="Net" value={formatPaise(all.netPaise)} sub={`${people.length} ${people.length === 1 ? 'person' : 'people'}`} colors={colors} />
+        <Tile label="Transactions" value={String(all.count)} sub="all time" colors={colors} />
       </View></Reveal>
       <SearchField colors={colors} value={query} onChangeText={setQuery} placeholder="Search people" accessibilityLabel="Search people" />
       {people.length === 0 ? <View><EmptyBlock title="No people yet" text="People appear here from the merchants and names on your transactions." colors={colors} /><Pressable onPress={onAddTransaction}><Text style={{ color: palette.accentText, fontWeight: '700', textAlign: 'center' }}>Add transaction</Text></Pressable></View>
         : shown.length === 0 ? <EmptyBlock title="No match" text="No one matches that search." colors={colors} />
-        : shown.map((p, i) => <Reveal key={p.key} index={Math.min(i, 8) + 1}><Tap onPress={() => setPersonKey(p.key)} label={p.name}
-          style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: colors.card, borderColor: colors.border, borderWidth: 1, borderRadius: radius.lg, padding: 14, marginBottom: 10 }}>
-          <Initial label={p.name} color={palette.emerald} />
-          <View style={{ flex: 1, marginHorizontal: 12 }}>
-            <Text numberOfLines={1} style={{ ...typo.cardTitle, color: colors.text }}>{p.name}</Text>
-            <Text style={{ ...typo.caption, color: colors.muted, marginTop: 2 }}>{p.count} transaction{p.count === 1 ? '' : 's'} · last {fmtDate(p.lastAt)}</Text>
-          </View>
-          <View style={{ alignItems: 'flex-end' }}>
-            {p.incomingPaise > 0 ? <Text style={{ color: palette.accentText, ...typo.amountSm, fontSize: 14 }}>+{formatPaise(p.incomingPaise)}</Text> : null}
-            {p.outgoingPaise > 0 ? <Text style={{ color: palette.expenseText, ...typo.amountSm, fontSize: 14 }}>-{formatPaise(p.outgoingPaise)}</Text> : null}
-          </View>
-        </Tap></Reveal>)}
+        : <View style={{ backgroundColor: colors.card, borderColor: colors.border, borderWidth: 1, borderRadius: radius.lg, paddingHorizontal: 14, overflow: 'hidden' }}>
+          {shown.map((p, i) => <Tap key={p.key} onPress={() => setPersonKey(p.key)} label={`${p.name}, ${p.count} transaction${p.count === 1 ? '' : 's'}`}
+            style={{ flexDirection: 'row', alignItems: 'center', minHeight: 64, paddingVertical: 12, borderBottomWidth: i === shown.length - 1 ? 0 : 1, borderBottomColor: colors.border }}>
+            <Initial label={p.name} color={palette.emerald} size={40} />
+            <View style={{ flex: 1, marginHorizontal: 12, minWidth: 0 }}>
+              <Text numberOfLines={1} style={{ ...typo.cardTitle, color: colors.text }}>{p.name}</Text>
+              <Text numberOfLines={1} style={{ ...typo.caption, color: colors.muted, marginTop: 2 }}>{p.count} transaction{p.count === 1 ? '' : 's'} · last {fmtDate(p.lastAt)}</Text>
+            </View>
+            <View style={{ alignItems: 'flex-end', flexShrink: 0, maxWidth: '40%' }}>
+              {p.incomingPaise > 0 ? <Text style={{ color: palette.accentText, ...typo.amountSm }} numberOfLines={1} adjustsFontSizeToFit>+{formatPaise(p.incomingPaise)}</Text> : null}
+              {p.outgoingPaise > 0 ? <Text style={{ color: palette.expenseText, ...typo.amountSm }} numberOfLines={1} adjustsFontSizeToFit>-{formatPaise(p.outgoingPaise)}</Text> : null}
+            </View>
+          </Tap>)}
+        </View>}
     </View> : <ExpectedTab expected={expected} summary={summary} colors={colors} onAdd={() => setForm({})} onOpen={(e) => setDetailId(e.id)} />}
 
     <PersonSheet person={person} transactions={transactions} categories={categories} expected={expected} colors={colors} onClose={() => setPersonKey(null)} onOpenTx={onOpenTx}
@@ -92,8 +95,8 @@ function ExpectedTab({ expected, summary, colors, onAdd, onOpen }: { expected: E
   const items = expected.filter((e) => filter === 'all' || (filter === 'pending' && e.status === 'pending') || (filter === 'settled' && e.status === 'settled') || (filter === 'overdue' && isOverdue(e)));
   return <View>
     <Reveal index={0}><View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginBottom: 12 }}>
-      <Tile label="TO RECEIVE" value={formatPaise(summary.receive.outstandingPaise)} sub={`${summary.receive.count} pending · ${summary.receive.people} ${summary.receive.people === 1 ? 'person' : 'people'}`} color={palette.emerald} colors={colors} />
-      <Tile label="TO PAY" value={formatPaise(summary.pay.outstandingPaise)} sub={`${summary.pay.count} pending · ${summary.pay.people} ${summary.pay.people === 1 ? 'person' : 'people'}`} color={palette.danger} colors={colors} />
+      <Tile label="To receive" value={formatPaise(summary.receive.outstandingPaise)} sub={`${summary.receive.count} pending · ${summary.receive.people} ${summary.receive.people === 1 ? 'person' : 'people'}`} color={palette.accentText} colors={colors} />
+      <Tile label="To pay" value={formatPaise(summary.pay.outstandingPaise)} sub={`${summary.pay.count} pending · ${summary.pay.people} ${summary.pay.people === 1 ? 'person' : 'people'}`} color={palette.expenseText} colors={colors} />
     </View></Reveal>
     <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 10 }}>
       <Chip label="Pending" active={filter === 'pending'} onPress={() => setFilter('pending')} colors={colors} />
@@ -117,7 +120,7 @@ function ExpectedTab({ expected, summary, colors, onAdd, onOpen }: { expected: E
               <Text style={{ color: over ? palette.expenseText : colors.muted, ...typo.caption, fontWeight: over ? '700' : '500' }}>{e.status === 'settled' ? `Settled ${e.settled_at ? fmtDate(e.settled_at) : ''}` : over ? `Overdue · ${fmtDue(e.due_date!)}` : e.due_date ? `Due ${fmtDue(e.due_date)}` : 'No due date'}</Text>
             </View>
           </View>
-          {e.status === 'pending' && e.paid_paise > 0 ? <View style={{ marginTop: 10 }}><View style={{ height: 6, borderRadius: 3, backgroundColor: `${palette.emerald}22`, overflow: 'hidden' }}><View style={{ width: `${pct}%`, height: 6, backgroundColor: palette.emerald }} /></View><Text style={{ color: colors.muted, fontSize: 12, marginTop: 4, fontVariant: ['tabular-nums'] }}>{formatPaise(e.paid_paise)} of {formatPaise(e.amount_paise)} paid</Text></View> : null}
+          {e.status === 'pending' && e.paid_paise > 0 ? <View style={{ marginTop: 10 }}><View style={{ height: 6, borderRadius: 3, backgroundColor: tint(palette.emerald, 0.18), overflow: 'hidden' }}><View style={{ width: `${pct}%`, height: 6, backgroundColor: palette.emerald }} /></View><Text style={{ color: colors.muted, fontSize: 12, marginTop: 4, fontVariant: ['tabular-nums'] }}>{formatPaise(e.paid_paise)} of {formatPaise(e.amount_paise)} paid</Text></View> : null}
         </Tap></Reveal>;
       })}
   </View>;
@@ -152,10 +155,10 @@ function PersonSheet({ person, transactions, categories, expected, colors, onClo
       <Chip label="This month" active={period === 'month'} onPress={() => setPeriod('month')} colors={colors} />
     </View>
     <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginBottom: 12 }}>
-      <Tile label="RECEIVED" value={formatPaise(totals.incomingPaise)} sub={`${totals.incomingCount} transaction${totals.incomingCount === 1 ? '' : 's'}`} color={palette.emerald} colors={colors} />
-      <Tile label="PAID" value={formatPaise(totals.outgoingPaise)} sub={`${totals.outgoingCount} transaction${totals.outgoingCount === 1 ? '' : 's'}`} color={palette.danger} colors={colors} />
-      <Tile label="NET" value={formatPaise(totals.netPaise)} sub={totals.netPaise >= 0 ? 'in your favour' : 'you paid more'} color={totals.netPaise >= 0 ? palette.emerald : palette.danger} colors={colors} />
-      <Tile label="TOTAL" value={String(totals.count)} sub="transactions" colors={colors} />
+      <Tile label="Received" value={formatPaise(totals.incomingPaise)} sub={`${totals.incomingCount} transaction${totals.incomingCount === 1 ? '' : 's'}`} color={palette.accentText} colors={colors} />
+      <Tile label="Paid" value={formatPaise(totals.outgoingPaise)} sub={`${totals.outgoingCount} transaction${totals.outgoingCount === 1 ? '' : 's'}`} color={palette.expenseText} colors={colors} />
+      <Tile label="Net" value={formatPaise(totals.netPaise)} sub={totals.netPaise >= 0 ? 'in your favour' : 'you paid more'} color={totals.netPaise >= 0 ? palette.accentText : palette.expenseText} colors={colors} />
+      <Tile label="Total" value={String(totals.count)} sub="transactions" colors={colors} />
     </View>
 
     <Text style={{ color: colors.muted, ...typo.label, marginTop: 6, marginBottom: 8 }}>EXPECTED PAYMENTS</Text>

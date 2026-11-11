@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ComponentRef, type ReactNode } from '
 import { Animated, Easing, Keyboard, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View, type TextInputProps, type TextStyle, type ViewStyle } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import NetInfo from '@react-native-community/netinfo';
+import Svg, { Circle, Defs, LinearGradient, Path, Stop } from 'react-native-svg';
 import { palette, radius, space, tint } from '../../theme';
 import { type } from '../../typography';
 import { ArrowDownLeft, ArrowUpRight, CATEGORY_ICON_MAP, Search, X } from '../../icons';
@@ -212,3 +213,27 @@ export const ui = StyleSheet.create({
   typeIcon: { width: 26, height: 26, borderRadius: 13, alignItems: 'center', justifyContent: 'center' },
   empty: { borderWidth: 1, borderRadius: radius.lg, padding: 24, alignItems: 'center', marginVertical: 8 },
 });
+
+/** Pill-shaped segmented control: one option selected, each option a 40dp-tall tab with an accessible selected state. */
+export function Segmented<T extends string>({ options, value, onChange, colors }: { options: readonly (readonly [T, string])[]; value: T; onChange: (v: T) => void; colors: Colors }) {
+  return <View accessibilityRole="tablist" style={{ flexDirection: 'row', backgroundColor: tint(palette.emerald, 0.1), borderRadius: radius.pill, padding: 3 }}>
+    {options.map(([k, label]) => { const on = value === k; return <Pressable key={k} onPress={() => onChange(k)} accessibilityRole="tab" accessibilityState={{ selected: on }} accessibilityLabel={label}
+      style={{ flex: 1, minHeight: 40, borderRadius: radius.pill, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 6, backgroundColor: on ? colors.card : 'transparent', borderWidth: on ? 1 : 0, borderColor: colors.border }}>
+      <Text style={{ ...type.chip, color: on ? palette.accentText : colors.muted }} numberOfLines={1}>{label}</Text></Pressable>; })}
+  </View>;
+}
+
+/** Gradient summary surface (the same treatment as the Home balance card): darkened accent shades, white text inside. */
+export function HeroSurface({ children, style, accessibilityLabel, onPress }: { children: ReactNode; style?: ViewStyle; accessibilityLabel?: string; onPress?: () => void }) {
+  const inner = <>
+    <Svg style={StyleSheet.absoluteFill} width="100%" height="100%" pointerEvents="none">
+      <Defs><LinearGradient id="velnoraHero" x1="0" y1="0" x2="1" y2="1"><Stop offset="0" stopColor={palette.heroStart} /><Stop offset="1" stopColor={palette.heroEnd} /></LinearGradient></Defs>
+      <Path d="M0 0H2000V2000H0Z" fill="url(#velnoraHero)" />
+      <Circle cx="92%" cy="6%" r="80" fill="#FFFFFF" fillOpacity={0.06} />
+    </Svg>
+    {children}
+  </>;
+  const base: ViewStyle = { borderRadius: radius.xl, padding: space.xl, overflow: 'hidden', backgroundColor: palette.heroEnd };
+  if (!onPress) return <View style={[base, style]}>{inner}</View>;
+  return <Pressable onPress={onPress} accessibilityRole="button" accessibilityLabel={accessibilityLabel} style={({ pressed }) => [base, style, pressed && { opacity: 0.92 }]}>{inner}</Pressable>;
+}

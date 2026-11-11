@@ -6,11 +6,11 @@ export const palette = {
   navyDeep: '#081827',
   emerald: '#12B886',
   emeraldSoft: '#DDF7EE',
-  ink: '#132238',
-  muted: '#5B6B80', // 5.3:1 on canvas, 5.6:1 on white (was #718096, 3.9:1)
-  canvas: '#F6F8F9',
+  ink: '#172B27',
+  muted: '#587069', // >= 4.5:1 on canvas and white (soft green-grey)
+  canvas: '#F5F8F7',
   card: '#FFFFFF',
-  border: '#E4EAF0',
+  border: '#E5ECE8',
   danger: '#D95C67',
   dangerDeep: '#B83A47', // filled expense surfaces (white text 5.6:1)
   warning: '#C9892B',
@@ -26,6 +26,10 @@ export const palette = {
   expenseOnNavy: '#FF9AA3', // coral that keeps 7:1 on navy
   navyBorder: '#29405A',
   errorStrong: '#DC2626',
+  // Home summary card gradient: darkened shades of the accent, re-derived by applyAccent.
+  heroStart: '#0A5A46',
+  heroEnd: '#07382C',
+  incomeOnHero: '#8EF0CF',
   // Text-safe variants (>= 4.5:1 on the current surface). Re-derived by applyScheme / applyAccent.
   accentText: '#0A7F5E',
   expenseText: '#B83A47',
@@ -59,6 +63,14 @@ export function ensureContrast(color: string, bg: string, min = 4.5): string {
   return out;
 }
 
+/** Multiplies each RGB channel by `factor` (< 1 darkens), keeping the hue. */
+export function shade(color: string, factor: number): string {
+  const m = /^#?([0-9a-f]{6})/i.exec(color.trim());
+  if (!m) return color;
+  const n = parseInt(m[1], 16);
+  return `#${[(n >> 16) & 255, (n >> 8) & 255, n & 255].map((v) => toHex(v * factor)).join('')}`;
+}
+
 let currentDark = false;
 /** Call whenever the scheme or accent changes (before styles are rebuilt). */
 export function applyScheme(dark: boolean): void {
@@ -86,16 +98,21 @@ export function applyAccent(id: AccentId): void {
   const accent = ACCENTS.find((a) => a.id === id) ?? ACCENTS[0];
   palette.emerald = accent.main;
   palette.emeraldSoft = accent.soft;
+  palette.heroStart = shade(accent.main, 0.5);
+  palette.heroEnd = shade(accent.main, 0.3);
 }
 
 /** Shared layout tokens so spacing / radius / elevation stop being re-invented per component. */
 export const space = { xs: 4, sm: 8, md: 12, lg: 16, xl: 20, xxl: 24 } as const;
 export const radius = { sm: 10, md: 14, lg: 18, xl: 24, pill: 999 } as const;
 export const control = { height: 48, buttonHeight: 52, minTouch: 44, chipHeight: 36 } as const;
+/** Screen gutters and bottom-navigation metrics. */
+export const layout = { gutter: 20, sectionGap: 24, navHeight: 64, navPill: { width: 56, height: 30 } } as const;
 /** Standard icon grid: one stroke width everywhere, three sizes. */
 export const iconSize = { sm: 16, md: 20, lg: 24, stroke: 2 } as const;
 /** One restrained elevation for floating surfaces (FAB); cards rely on a border instead of a shadow. */
 export const elevation = {
+  card: { shadowColor: '#0B2A24', shadowOpacity: 0.05, shadowRadius: 8, shadowOffset: { width: 0, height: 2 }, elevation: 1 },
   fab: { shadowColor: '#000', shadowOpacity: 0.22, shadowRadius: 10, shadowOffset: { width: 0, height: 4 }, elevation: 6 },
 } as const;
 
