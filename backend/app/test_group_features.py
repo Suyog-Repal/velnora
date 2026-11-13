@@ -52,6 +52,14 @@ def pull(h):
     return r.json()
 
 
+def assert_rejected_and_not_stored(h, r, entity_id, collection="transactions"):
+    """An invalid item is rejected on its own (per-item validation_error, HTTP 200 for the batch) and nothing is stored."""
+    assert r.status_code == 200
+    result = r.json()["results"][0]
+    assert result["status"] == "error" and result["error_code"] == "validation_error"
+    assert all(row["id"] != entity_id for row in pull(h)[collection])
+
+
 def test_optional_phone_and_details_roundtrip_edit_clear():
     h = user()
     tid = str(uuid4())
@@ -76,13 +84,15 @@ def test_optional_phone_and_details_roundtrip_edit_clear():
 @pytest.mark.parametrize("bad", ["9876543210", "+12", "+0123456789", "abc", "+91 98765 43210", "+9198765432101234567"])
 def test_invalid_phone_rejected(bad):
     h = user()
-    r = push(h, "transaction", str(uuid4()), "create", tx_payload(merchant_phone=bad))
-    assert r.status_code == 422
+    tid = str(uuid4())
+    r = push(h, "transaction", tid, "create", tx_payload(merchant_phone=bad))
+    assert_rejected_and_not_stored(h, r, tid)
 
 
 def test_invalid_location_rejected():
     h = user()
-    assert push(h, "transaction", str(uuid4()), "create", tx_payload(location_lat=123, location_lng=0)).status_code == 422
+    tid = str(uuid4())
+    assert_rejected_and_not_stored(h, push(h, "transaction", tid, "create", tx_payload(location_lat=123, location_lng=0)), tid)
 
 
 def test_phone_and_location_isolated_between_users():
@@ -161,7 +171,9 @@ def test_expected_payment_sync_partial_settle_delete_isolation():
     assert push(a, "expected_payment", str(uuid4()), "create", {**p, "direction": "gift"}).json()["results"][0]["status"] == "error"
     assert push(a, "expected_payment", str(uuid4()), "create", {**p, "status": "weird"}).json()["results"][0]["status"] == "error"
     assert push(a, "expected_payment", str(uuid4()), "create", {"person": " ", "amount_paise": 5}).json()["results"][0]["status"] == "error"
-    assert push(a, "expected_payment", str(uuid4()), "create", {**p, "due_date": "01/12/2026"}).status_code == 422
+    bad_id = str(uuid4())
+    assert_rejected_and_not_stored(a, push(a, "expected_payment", bad_id, "create", {**p, "due_date": "01/12/2026"}), bad_id,
+                                   collection="expected_payments")
     # isolation
     assert pull(b)["expected_payments"] == []
     assert push(b, "expected_payment", eid, "update", p).json()["results"][0]["status"] == "error"

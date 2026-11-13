@@ -342,6 +342,45 @@ export const MIGRATIONS = [
       );
     `,
   },
+  {
+    version: 9,
+    description: 'Multi-attachment support: transaction_attachments table',
+    up: `
+      -- transaction_attachments: one row per attachment, many per transaction
+      CREATE TABLE IF NOT EXISTS transaction_attachments (
+        id TEXT PRIMARY KEY,                       -- UUID v4, stable across devices
+        transaction_id TEXT NOT NULL,
+        user_id TEXT,
+        local_path TEXT,                           -- app-private file path; NULL if only remote
+        remote_id TEXT,                            -- server-assigned receipt id after upload
+        upload_status TEXT NOT NULL DEFAULT 'local'
+          CHECK(upload_status IN ('local','pending','uploading','synced','failed')),
+        attachment_type TEXT NOT NULL DEFAULT 'photo'
+          CHECK(attachment_type IN ('photo','scan')),
+        page_index INTEGER NOT NULL DEFAULT 0,     -- for multi-page scans
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        deleted_at TEXT,
+        FOREIGN KEY (transaction_id) REFERENCES transactions(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_attachments_tx ON transaction_attachments(transaction_id);
+      CREATE INDEX IF NOT EXISTS idx_attachments_pending ON transaction_attachments(upload_status) WHERE upload_status IN ('pending','failed');
+    `,
+  },
+  {
+    version: 10,
+    description: 'Attachment metadata (file name, MIME type, size, dimensions) and upload retry bookkeeping',
+    up: `
+      ALTER TABLE transaction_attachments ADD COLUMN file_name TEXT;
+      ALTER TABLE transaction_attachments ADD COLUMN mime_type TEXT;
+      ALTER TABLE transaction_attachments ADD COLUMN size_bytes INTEGER;
+      ALTER TABLE transaction_attachments ADD COLUMN width INTEGER;
+      ALTER TABLE transaction_attachments ADD COLUMN height INTEGER;
+      ALTER TABLE transaction_attachments ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE transaction_attachments ADD COLUMN next_retry_at TEXT;
+      ALTER TABLE transaction_attachments ADD COLUMN last_error TEXT;
+    `,
+  },
 ];
 
 export const DEFAULT_CATEGORIES = [

@@ -1,3 +1,4 @@
+import { AttachmentRepository } from '../db/repositories/attachmentRepository.ts';
 import { getDatabase } from '../db/database.ts';
 import { withWriteLock } from '../db/writeLock.ts';
 import type { IDatabase } from '../db/types.ts';
@@ -85,7 +86,16 @@ export async function importGuestData(userId: string, database?: IDatabase): Pro
           ? await db.getFirstAsync<{ id: string }>(
               'SELECT id FROM transactions WHERE user_id = ? AND deleted_at IS NULL AND fingerprint = ?', id, row.fingerprint)
           : null;
-        if (dupRef || dupFp) { skipped += 1; continue; }
+        if (dupRef || dupFp) {
+          // The account already has this payment: the guest copy is not imported, but photos attached to it while in guest
+          // mode move to the account's transaction (and are queued for upload by adoptForUser below), so none are lost.
+          await db.runAsync(
+            `UPDATE transaction_attachments SET transaction_id = ?, updated_at = ? WHERE transaction_id = ? AND user_id IS NULL AND deleted_at IS NULL`,
+            (dupRef ?? dupFp)!.id, now, row.id,
+          );
+          skipped += 1;
+          continue;
+        }
 
         await db.runAsync(
           `UPDATE transactions SET user_id = ?, sync_status = 'pending_create', updated_at = ? WHERE id = ? AND user_id IS NULL`,
@@ -145,6 +155,8 @@ export async function importGuestData(userId: string, database?: IDatabase): Pro
            ON CONFLICT(entity_type, entity_id) DO UPDATE SET payload = excluded.payload, operation = 'create'`,
           `import-exp-${e.id}`, e.id, JSON.stringify({ user_id: id, person: e.person, direction: e.direction, amount_paise: e.amount_paise, paid_paise: e.paid_paise, note: e.note, due_date: e.due_date, status: e.status, settled_at: e.settled_at, payments }), now);
       }
+      // Photos and scans of the imported transactions now belong to the account too, and are queued for upload.
+      await new AttachmentRepository(db).adoptForUser(id);
       await db.execAsync('COMMIT');
       return { imported, skippedDuplicates: skipped };
     } catch (err) {

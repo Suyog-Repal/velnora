@@ -263,6 +263,37 @@ class Receipt(Base):
     created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 
+class Attachment(Base):
+    """
+    Transaction attachment (photo or scanned document page). Many per transaction.
+    The id is assigned by the client so a retried upload is idempotent (same id -> same row, never a duplicate).
+    Bytes live in the app's own database (private; only served to the owner through authenticated requests).
+    Deleting soft-deletes the row (tombstone) and clears the bytes.
+    """
+    __tablename__ = "transaction_attachments"
+
+    id = Column(UUID(as_uuid=True), primary_key=True)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    # No FK to transactions, like receipts: ownership is checked on upload and rows stay owner-scoped.
+    transaction_id = Column(UUID(as_uuid=True), nullable=False, index=True)
+    attachment_type = Column(String(20), nullable=False, default="photo")
+    page_index = Column(Integer, nullable=False, default=0)
+    content_type = Column(String(40), nullable=False)
+    size_bytes = Column(Integer, nullable=False)
+    width = Column(Integer, nullable=True)
+    height = Column(Integer, nullable=True)
+    data = Column(LargeBinary, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        Index("ix_transaction_attachments_tx_user", "transaction_id", "user_id"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<Attachment id={self.id} transaction_id={self.transaction_id} type={self.attachment_type}>"
+
+
 class ExpectedPayment(Base):
     """Money someone is expected to pay the user ('receive') or the user is expected to pay ('pay'), with partial payments."""
     __tablename__ = "expected_payments"

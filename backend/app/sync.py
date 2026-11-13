@@ -9,13 +9,14 @@ Implements:
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from enum import Enum
-from typing import List, Literal, Optional
+import logging
+from typing import Any, Dict, List, Literal, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 import re
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from sqlalchemy import func, or_, select, text
 from sqlalchemy.orm import Session
 
@@ -45,6 +46,78 @@ def ledger_values(payload: "SyncItemPayload") -> dict:
     values["txn_kind"] = payload.txn_kind or "payment"
     values["verification_status"] = payload.verification_status or "verified"
     return values
+
+
+logger = logging.getLogger(__name__)
+
+INTERNAL_ITEM_ERROR = "The server could not apply this change. It was not rejected and will be retried automatically."
+PERMANENT_ERROR_CODES = frozenset({"validation_error", "forbidden", "missing_fields", "not_found", "rejected"})
+
+
+def classify_item_error(message: Optional[str]) -> str:
+    """Stable error_code for a handler-produced per-item error message (internal errors are coded where they occur)."""
+    text_ = (message or "").lower()
+    if text_.startswith("forbidden") or "cannot be modified" in text_ or "cannot be deleted" in text_:
+        return "forbidden"
+    if text_.startswith("missing required"):
+        return "missing_fields"
+    if "not found" in text_:
+        return "not_found"
+    if text_.startswith("unsupported entity type") or text_.startswith("invalid"):
+        return "validation_error"
+    return "rejected"
+
+
+def invalid_item_result(raw: Any, exc: ValidationError) -> "SyncPushItemResult":
+    """Per-item result for an item that failed validation. Names the offending fields only, never the submitted values."""
+    raw = raw if isinstance(raw, dict) else {}
+    fields = sorted({".".join(str(p) for p in err.get("loc", ())) or "item" for err in exc.errors()})
+    entity_id: Optional[UUID] = None
+    operation: Optional[SyncOperationType] = None
+    try:
+        entity_id = UUID(str(raw.get("entity_id")))
+    except (ValueError, TypeError):
+        pass
+    try:
+        operation = SyncOperationType(raw.get("operation"))
+    except ValueError:
+        pass
+    return SyncPushItemResult(
+        operation_id=str(raw.get("operation_id") or ""),
+        entity_id=entity_id,
+        operation=operation,
+        status="error",
+        server_version=0,
+        error=f"Invalid value for: {', '.join(fields)}"[:300],
+        error_code="validation_error",
+    )
+
+
+def find_identity_twin(db: Session, user_id: UUID, payload: "SyncItemPayload") -> Optional[TransactionModel]:
+    """
+    This user's ACTIVE row for the same payment, by bank reference (or, only when there is no reference, by fingerprint).
+    The same rule a create uses to deduplicate, so an id the server answered with can always be found again from the payload.
+    Locks the row it returns.
+    """
+    reference = (payload.reference_id or "").strip()
+    fingerprint = (payload.fingerprint or "").strip()
+    if reference:
+        return db.scalar(
+            select(TransactionModel).where(
+                TransactionModel.user_id == user_id,
+                TransactionModel.reference_id == reference,
+                TransactionModel.deleted_at.is_(None),
+            ).with_for_update()
+        )
+    if fingerprint:
+        return db.scalar(
+            select(TransactionModel).where(
+                TransactionModel.user_id == user_id,
+                TransactionModel.fingerprint == fingerprint,
+                TransactionModel.deleted_at.is_(None),
+            ).with_for_update()
+        )
+    return None
 
 
 def to_paise(amount: Decimal) -> int:
@@ -130,7 +203,9 @@ class SyncPushItem(BaseModel):
 
 class SyncPushRequest(BaseModel):
     device_id: Optional[str] = None
-    items: List[SyncPushItem]
+    # Each item is validated on its own in sync_push (SyncPushItem.model_validate), so one malformed item is reported as
+    # a per-item error instead of rejecting the whole batch with HTTP 422.
+    items: List[Dict[str, Any]]
 
 
 class SyncPullTransaction(BaseModel):
@@ -174,12 +249,18 @@ class SyncPullTransaction(BaseModel):
 
 class SyncPushItemResult(BaseModel):
     operation_id: str
-    entity_id: UUID
-    operation: SyncOperationType
+    # The CANONICAL server id. It differs from the pushed id when a create (or an update of an id the server does not
+    # know) was matched to an existing row of the same payment by reference / fingerprint; the client re-keys to it.
+    # None only for an item too malformed to name its entity.
+    entity_id: Optional[UUID] = None
+    operation: Optional[SyncOperationType] = None
     status: str  # "synced" | "conflict_resolved" | "conflict_rejected" | "error"
     server_version: int
     updated_at: Optional[datetime] = None
     error: Optional[str] = None
+    # Stable machine-readable reason for status "error". Permanent (do not retry unchanged): validation_error, forbidden,
+    # missing_fields, not_found, rejected. Retryable: internal_error (the server failed, the item was not rejected).
+    error_code: Optional[str] = None
     winning_record: Optional[SyncPullTransaction] = None
 
 
@@ -351,12 +432,20 @@ def sync_push(
     results: List[SyncPushItemResult] = []
     now = datetime.now(timezone.utc)
 
+    # Validate item by item: a malformed item gets its own "error" result and the rest of the batch is still applied.
+    items: List[SyncPushItem] = []
+    for raw in request.items:
+        try:
+            items.append(SyncPushItem.model_validate(raw))
+        except ValidationError as exc:
+            results.append(invalid_item_result(raw, exc))
+
     # Acquire user-level row lock upfront if any transaction operations are in this batch,
     # ensuring serialized revision allocation across the entire request.
-    if any(item.entity_type == "transaction" for item in request.items):
+    if any(item.entity_type == "transaction" for item in items):
         db.execute(select(UserModel.id).where(UserModel.id == user.id).with_for_update())
 
-    for item in request.items:
+    for item in items:
         try:
             with db.begin_nested():
                 # ==============================================================
@@ -658,6 +747,11 @@ def sync_push(
                 # --------------------------------------------------------------
                 elif item.operation == SyncOperationType.update:
                     if not existing:
+                        # The device may hold this payment under its own id because an earlier create was acknowledged
+                        # against an existing row (same reference / fingerprint). Update THAT row (same version rules)
+                        # and answer with its id; upserting the device id would store the payment twice.
+                        existing = find_identity_twin(db, user.id, item.payload)
+                    if not existing:
                         # Upsert if complete record provided
                         if item.payload.amount and item.payload.direction and item.payload.counterparty and item.payload.category:
                             amount_paise = to_paise(item.payload.amount)
@@ -798,25 +892,7 @@ def sync_push(
                     # id, so the device's own id is unknown here. The delete then names the same payment by its identity keys, and
                     # deletes only this user's active row carrying that reference/fingerprint, so it cannot stay active on the server.
                     if not existing:
-                        reference = (item.payload.reference_id or "").strip()
-                        fingerprint = (item.payload.fingerprint or "").strip()
-                        twin = None
-                        if reference:
-                            twin = db.scalar(
-                                select(TransactionModel).where(
-                                    TransactionModel.user_id == user.id,
-                                    TransactionModel.reference_id == reference,
-                                    TransactionModel.deleted_at.is_(None),
-                                ).with_for_update()
-                            )
-                        if twin is None and fingerprint and not reference:
-                            twin = db.scalar(
-                                select(TransactionModel).where(
-                                    TransactionModel.user_id == user.id,
-                                    TransactionModel.fingerprint == fingerprint,
-                                    TransactionModel.deleted_at.is_(None),
-                                ).with_for_update()
-                            )
+                        twin = find_identity_twin(db, user.id, item.payload)
                         if twin is not None:
                             twin.deleted_at = now
                             twin.server_version += 1
@@ -875,7 +951,13 @@ def sync_push(
                             )
                         )
 
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - the savepoint is rolled back; the item is reported, the batch continues
+            # Log the cause without SQL text, parameters or payload values (they carry personal financial data).
+            logger.error(
+                "sync push item failed: %s sqlstate=%s entity_type=%s operation=%s",
+                type(getattr(e, "orig", e)).__name__, getattr(getattr(e, "orig", None), "sqlstate", None),
+                item.entity_type, item.operation.value,
+            )
             results.append(
                 SyncPushItemResult(
                     operation_id=item.operation_id,
@@ -883,9 +965,14 @@ def sync_push(
                     operation=item.operation,
                     status="error",
                     server_version=0,
-                    error=str(e),
+                    error=INTERNAL_ITEM_ERROR,
+                    error_code="internal_error",
                 )
             )
+
+    for result in results:
+        if result.status == "error" and result.error_code is None:
+            result.error_code = classify_item_error(result.error)
 
     db.commit()
     return SyncPushResponse(results=results, server_time=now)

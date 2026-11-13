@@ -795,7 +795,14 @@ def test_sync_error_handling_401_and_422():
             ]
         },
     )
-    assert resp_422.status_code == 422
+    # An invalid ITEM is rejected on its own (per-item error), so it cannot block the other items of a batch.
+    assert resp_422.status_code == 200
+    result = resp_422.json()["results"][0]
+    assert result["status"] == "error" and result["error_code"] == "validation_error"
+    assert "payload.amount" in result["error"] and "10.1234" not in result["error"]
+
+    # A malformed request ENVELOPE is still rejected as a whole.
+    assert client.post("/api/v1/sync/push", headers=headers, json={"items": "not-a-list"}).status_code == 422
 
 
 def test_category_completeness_flag_and_exclusion_of_deleted():

@@ -7,7 +7,7 @@ import { currentMonth } from '../services/budgetService';
 import { MONTH_SHORT, formatDisplayDate } from '../services/dateUtils';
 import { getServiceDb } from '../services/transactionService';
 import { buildMonthlyReport, listReportMonths, parseReportMonth, reportMonthKey, type MonthlyReport } from '../services/monthlyReportService';
-import { exportReportCsv, exportReportPdf, type ExportResult } from '../services/monthlyReportExport';
+import { exportReportCsv, exportReportPdf, saveExportedFile, type ExportResult, type ExportedFile } from '../services/monthlyReportExport';
 import { clearReportFiles, expoReportExportPort } from '../services/monthlyReportExportExpo';
 import { pct } from './PieChart';
 
@@ -24,6 +24,8 @@ export function MonthlyReportView({ scope, colors, refreshKey }: { scope: string
   const [busy, setBusy] = useState<'pdf' | 'csv' | null>(null);
   const busyRef = useRef(false);
   const [feedback, setFeedback] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null);
+  const [lastFile, setLastFile] = useState<ExportedFile | null>(null);
+  const [saving, setSaving] = useState(false);
 
   useEffect(() => { void clearReportFiles(); }, []);
 
@@ -59,13 +61,21 @@ export function MonthlyReportView({ scope, colors, refreshKey }: { scope: string
 
   const run = async (kind: 'pdf' | 'csv') => {
     if (!report || busyRef.current) return; // one export at a time: repeated taps do nothing
-    busyRef.current = true; setBusy(kind); setFeedback(null);
+    busyRef.current = true; setBusy(kind); setFeedback(null); setLastFile(null);
     let result: ExportResult;
     try { result = await (kind === 'pdf' ? exportReportPdf : exportReportCsv)(expoReportExportPort, report); }
     catch { result = { ok: false, error: 'The export failed. Please try again.' }; }
     busyRef.current = false; setBusy(null);
+    setLastFile(result.file ?? null);
     if (result.ok) setFeedback({ kind: 'ok', text: `${result.fileName} is ready. Choose where to save or send it.` });
-    else if (!result.cancelled) setFeedback({ kind: 'error', text: result.error });
+    else if (!result.cancelled) setFeedback({ kind: 'error', text: result.code ? `${result.error} (${result.code})` : result.error });
+  };
+  const saveCopy = async () => {
+    if (!lastFile || saving) return;
+    setSaving(true);
+    const r = await saveExportedFile(expoReportExportPort, lastFile);
+    setSaving(false);
+    if (!r.cancelled) setFeedback({ kind: r.ok ? 'ok' : 'error', text: r.message });
   };
 
   const money = (p: number) => formatPaise(p);
@@ -135,6 +145,7 @@ export function MonthlyReportView({ scope, colors, refreshKey }: { scope: string
           </View>
         </View>}
       {feedback ? <Text style={{ color: feedback.kind === 'error' ? palette.expenseText : palette.accentText, marginTop: 10 }} accessibilityLiveRegion="polite">{feedback.text}</Text> : null}
+      {lastFile && expoReportExportPort.saveToDevice ? <Button title={saving ? 'Saving…' : `Save ${lastFile.fileName.endsWith('.pdf') ? 'PDF' : 'CSV'} to device`} kind="ghost" onPress={() => void saveCopy()} busy={saving} disabled={saving} /> : null}
     </View> : null}
   </View>;
 }

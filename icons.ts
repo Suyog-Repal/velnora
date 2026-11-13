@@ -42,3 +42,11 @@ export const WifiOff = NativeWifiOff as any;
 export const TagIcon = NativeTag as any;
 
 export const CATEGORY_ICON_MAP: Record<string, any> = { Utensils:CatUtensils,ShoppingBag:CatShoppingBag,Car:CatCar,Receipt:CatReceipt,ShoppingCart:CatShoppingCart,HeartPulse:CatHeartPulse,GraduationCap:CatGraduationCap,Film:CatFilm,Plane:CatPlane,Sparkles:CatSparkles,House:CatHouse,Briefcase:CatBriefcase,Laptop:CatLaptop,Store:CatStore,TrendingUp:CatTrendingUp,Tag:CatTag,MoreHorizontal:CatMoreHorizontal,Home:CatHouse } as any;
+
+import { RotateCw as NativeRotateCw, RotateCcw as NativeRotateCcw, Crop as NativeCrop, Images as NativeImages, RefreshCw as NativeRefreshCw, ScanText as NativeScanText } from 'lucide-react-native';
+export const RotateCw = NativeRotateCw as any;
+export const RotateCcw = NativeRotateCcw as any;
+export const Crop = NativeCrop as any;
+export const Images = NativeImages as any;
+export const RefreshCw = NativeRefreshCw as any;
+export const ScanText = NativeScanText as any;

@@ -9,7 +9,7 @@ import { runMigrations } from '../../db/migrations.ts';
 import type { IDatabase } from '../../db/types.ts';
 import { buildCsv, buildMonthlyReport, csvCell, csvHeader, listReportMonths, paiseToPlain, reportFileName, reportMonthLabel, verifyReport, type MonthlyReport } from '../monthlyReportService.ts';
 import { donutSvg, escapeHtml, pieSlicesFor, renderReportHtml, reportPageCount, wrapLines } from '../monthlyReportHtml.ts';
-import { exportReportCsv, exportReportPdf, type ReportExportPort } from '../monthlyReportExport.ts';
+import { exportReportCsv, exportReportPdf, safeErrorCode, saveExportedFile, type ExportedFile, type ReportExportPort } from '../monthlyReportExport.ts';
 import { REPORT_LOGO_PNG_BASE64 } from '../reportLogo.ts';
 import { categoryBreakdown } from '../analyticsService.ts';
 import { getCashFlowSummary } from '../cashFlowService.ts';
@@ -354,12 +354,12 @@ async function exportFlow() {
   const log: string[] = [];
   const port = fakePort(log);
   const pdf = await exportReportPdf(port, report);
-  assert.deepEqual(pdf, { ok: true, fileName: 'Velnora_Financial_Report_October_2026.pdf' });
+  assert.deepEqual(pdf, { ok: true, fileName: 'Velnora_Financial_Report_October_2026.pdf', file: { uri: 'cache://velnora-reports/Velnora_Financial_Report_October_2026.pdf', fileName: 'Velnora_Financial_Report_October_2026.pdf', mimeType: 'application/pdf' } });
   assert.equal(port.htmls.length, 1); assert.ok(port.htmls[0].includes('October 2026'));
   assert.deepEqual(port.shared, [{ uri: 'cache://velnora-reports/Velnora_Financial_Report_October_2026.pdf', mimeType: 'application/pdf' }]);
   assert.equal(port.files.size, 1, 'only the final, descriptively named file is left');
   const csv = await exportReportCsv(port, report);
-  assert.deepEqual(csv, { ok: true, fileName: 'Velnora_Transactions_October_2026.csv' });
+  assert.deepEqual(csv, { ok: true, fileName: 'Velnora_Transactions_October_2026.csv', file: { uri: 'cache://velnora-reports/Velnora_Transactions_October_2026.csv', fileName: 'Velnora_Transactions_October_2026.csv', mimeType: 'text/csv' } });
   assert.equal(port.shared[1].mimeType, 'text/csv');
   assert.equal(port.files.get('cache://velnora-reports/Velnora_Transactions_October_2026.csv'), buildCsv(report), 'the shared CSV is exactly the CSV built from the report');
 
@@ -371,16 +371,34 @@ async function exportFlow() {
 
   // Cancellation, missing share support, platform failures: clean results, never a throw, never a leaked detail.
   const cancelled = await exportReportPdf(fakePort([], { async share() { throw new Error('User cancelled the share sheet'); } }), report);
-  assert.deepEqual(cancelled, { ok: false, cancelled: true, error: 'Sharing was cancelled.' });
+  assert.equal(cancelled.ok, false); assert.equal((cancelled as { cancelled?: boolean }).cancelled, true);
   const noShare = await exportReportCsv(fakePort([], { async canShare() { return false; } }), report);
-  assert.deepEqual(noShare, { ok: false, error: 'Sharing is not available on this device.' });
+  assert.equal(noShare.ok, false); assert.match((noShare as { error: string }).error, /Sharing is not available/);
+  assert.ok((noShare as { file?: unknown }).file, 'the created file is still offered for saving');
   const printFail = await exportReportPdf(fakePort([], { async printHtmlToPdf() { throw new Error('ENOSPC /data/user/0/com.x/cache Merchant 5000'); } }), report);
   assert.equal(printFail.ok, false); assert.ok(!(printFail as { error: string }).error.includes('ENOSPC') && !(printFail as { error: string }).error.includes('/data'), 'platform error text is not surfaced');
   assert.match((printFail as { error: string }).error, /PDF could not be created/);
   const writeFail = await exportReportCsv(fakePort([], { async writeUtf8() { throw new Error('EACCES'); } }), report);
   assert.match((writeFail as { error: string }).error, /CSV could not be saved/);
-  const shareFail = await exportReportPdf(fakePort([], { async share() { throw new Error('boom'); } }), report);
-  assert.match((shareFail as { error: string }).error, /could not be shared/);
+  const shareFail = await exportReportPdf(fakePort([], { async share() { throw Object.assign(new Error('Failed to share the file: /data/user/0/x'), { code: 'ERR_SHARING_FAILED' }); } }), report);
+  assert.match((shareFail as { error: string }).error, /created but the share sheet could not open/);
+  assert.equal((shareFail as { code?: string }).code, 'ERR_SHARING_FAILED');
+  assert.ok(!(shareFail as { error: string }).error.includes('/data'), 'no native path is surfaced');
+  assert.equal((shareFail as { file?: { mimeType: string } }).file?.mimeType, 'application/pdf');
+  const busyShare = await exportReportPdf(fakePort([], { async share() { throw Object.assign(new Error('Another share request is being processed now.'), { code: 'ERR_SHARING_IN_PROGRESS' }); } }), report);
+  assert.match((busyShare as { error: string }).error, /earlier share is still open/);
+  // A message-only error never becomes a "code".
+  assert.equal(safeErrorCode(new Error('x')), undefined); assert.equal(safeErrorCode({ code: '/data/user/0' }), undefined);
+
+  // Save-to-device fallback works independently of sharing, and reports cancel/failure without throwing.
+  const saved: string[] = [];
+  const savePort = fakePort([], { async saveToDevice(uri, name) { saved.push(`${uri}|${name}`); return 'saved'; } });
+  const file = (shareFail as { file: ExportedFile }).file;
+  assert.deepEqual(await saveExportedFile(savePort, file), { ok: true, message: 'Velnora_Financial_Report_October_2026.pdf was saved.' });
+  assert.deepEqual(saved, ['cache://velnora-reports/Velnora_Financial_Report_October_2026.pdf|Velnora_Financial_Report_October_2026.pdf']);
+  assert.equal((await saveExportedFile(fakePort([], { async saveToDevice() { return 'cancelled'; } }), file)).cancelled, true);
+  assert.equal((await saveExportedFile(fakePort([], { async saveToDevice() { throw new Error('denied'); } }), file)).ok, false);
+  assert.equal((await saveExportedFile(fakePort([]), file)).ok, false, 'no save support -> clear refusal');
 
   // A report whose figures disagree is never exported.
   const tampered: MonthlyReport = { ...report, summary: { ...report.summary, expensePaise: report.summary.expensePaise + 1 } };

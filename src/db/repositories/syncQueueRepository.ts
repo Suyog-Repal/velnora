@@ -165,6 +165,24 @@ export class SyncQueueRepository {
     await this.db.runAsync('DELETE FROM sync_queue WHERE id = ?', id);
   }
 
+  /**
+   * Server acknowledged the change it was SENT. Removes the queue item only if it still holds that same change. A local edit
+   * made while the request was in flight reuses the same queue row (one row per entity), so removing it unconditionally
+   * would drop that edit: it is kept instead, as an 'update' (the server now has the entity), ready for the next push.
+   * Returns true when the item was removed, false when a newer local change is still queued.
+   */
+  async acknowledge(id: string, sentPayload: string): Promise<boolean> {
+    const removed = await this.db.runAsync('DELETE FROM sync_queue WHERE id = ? AND payload = ?', id, sentPayload);
+    if (removed.changes > 0) return true;
+    await this.db.runAsync(
+      `UPDATE sync_queue SET operation = CASE WHEN operation = 'create' THEN 'update' ELSE operation END,
+         retry_count = 0, next_retry_at = NULL, error_code = NULL
+       WHERE id = ?`,
+      id,
+    );
+    return false;
+  }
+
   async removeForEntity(entityType: SyncEntityType, entityId: string): Promise<void> {
     await this.db.runAsync(
       'DELETE FROM sync_queue WHERE entity_type = ? AND entity_id = ?',

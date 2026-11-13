@@ -13,7 +13,7 @@ import type { ParsedSmsTransaction } from '../../transactionParser.ts';
 import { canEditTransaction, toUpdateInput, type DetailsPatch } from './transactionDetails.ts';
 import { applyAlias, rememberAlias } from './merchantAliasService.ts';
 import { autoSettleFromTransaction } from './expectedPaymentService.ts';
-import { triggerSync, type SyncSummary } from './syncEngine.ts';
+import { syncEngine, triggerSync, type SyncSummary } from './syncEngine.ts';
 
 let repositoriesInitialized = false;
 let txRepo: TransactionRepository | null = null;
@@ -383,11 +383,16 @@ export function onSyncResult(listener: (summary: SyncSummary) => void): () => vo
   return () => { syncListeners.delete(listener); };
 }
 
-export async function syncPendingTransactions(session: Session): Promise<SyncSummary> {
-  const summary = await triggerSync(session);
+// Every real cycle of the engine (app-triggered, network reconnect, follow-up, retry timer) reports here, so the UI and the
+// dependent uploads (receipts, attachments) react to automatic syncs too, not only to the ones the app starts itself.
+// Earlier only syncPendingTransactions() notified, so a backlog synced in the background left the screen showing it pending.
+syncEngine.onCycleComplete(async (summary, s) => {
   for (const l of syncListeners) { try { l(summary); } catch { /* a UI listener must never break syncing */ } }
-  if (postSyncHook) await postSyncHook(session).catch(() => undefined);
-  return summary;
+  if (postSyncHook) await postSyncHook(s as Session).catch(() => undefined);
+});
+
+export async function syncPendingTransactions(session: Session): Promise<SyncSummary> {
+  return triggerSync(session);
 }
 
 /**

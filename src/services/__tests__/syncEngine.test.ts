@@ -907,14 +907,15 @@ async function runAllSyncEngineTests() {
       await engine.pushPendingChanges(session);
     });
 
-    // Verify retry count reached 10 and transaction is marked 'failed'
+    // A server/network failure is never permanent: after the 10th failure the item is still pending and scheduled to retry
+    // (capped backoff), not dead-lettered. (Dead-lettering transient failures stranded whole backlogs as "waiting to sync".)
     const exhaustedQueue = await syncRepo.peek(1);
     assert.equal(exhaustedQueue[0].retry_count, 10);
-    assert.equal(exhaustedQueue[0].error_code, 'MAX_RETRIES_EXCEEDED');
-    assert.equal(exhaustedQueue[0].next_retry_at, '9999-12-31T23:59:59Z');
+    assert.notEqual(exhaustedQueue[0].next_retry_at, '9999-12-31T23:59:59Z');
+    assert.ok(new Date(exhaustedQueue[0].next_retry_at!).getTime() <= Date.now() + 15 * 60_000 + 1000, 'backoff is capped at 15 minutes');
 
     const failedTx = await txRepo.getById('tx-exhaust-1');
-    assert.equal(failedTx?.sync_status, 'failed');
+    assert.equal(failedTx?.sync_status, 'pending_create');
     assert.ok(failedTx !== null, 'Original transaction data remains available in SQLite');
 
     // Manual Recovery: trigger retryFailedOperation

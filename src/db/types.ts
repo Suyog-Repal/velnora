@@ -182,3 +182,31 @@ export interface IDatabase {
 export type AuthUser = { id: string; full_name: string; email: string };
 export type Session = { user: AuthUser; access_token: string; refresh_token: string; token_type: string };
 
+export type AttachmentType = 'photo' | 'scan';
+export type AttachmentUploadStatus = 'local' | 'pending' | 'uploading' | 'synced' | 'failed';
+
+export interface AttachmentEntity {
+  id: string;
+  transaction_id: string;
+  user_id: string | null;
+  /** App-private file (documentDirectory). NULL when it only exists in the cloud and has not been downloaded yet. */
+  local_path: string | null;
+  /** Cloud reference, set only after the server confirmed it stored the file (same value as id). */
+  remote_id: string | null;
+  upload_status: AttachmentUploadStatus;
+  attachment_type: AttachmentType;
+  page_index: number;
+  created_at: string;
+  updated_at: string;
+  /** Tombstone: set when the person removed it; the row stays until the server confirmed the deletion. */
+  deleted_at: string | null;
+  file_name: string | null;
+  mime_type: string | null;
+  size_bytes: number | null;
+  width: number | null;
+  height: number | null;
+  retry_count: number;
+  next_retry_at: string | null;
+  last_error: string | null;
+}
+

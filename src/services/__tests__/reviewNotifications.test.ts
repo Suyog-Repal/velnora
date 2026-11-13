@@ -399,8 +399,8 @@ async function main() {
     for (const m of MIGRATIONS.filter((x) => x.version <= 7)) { await db.execAsync(m.up); await db.runAsync('INSERT INTO schema_migrations VALUES (?, ?)', m.version, 'x'); }
     const t = new Date(base).toISOString();
     await db.runAsync(`INSERT INTO transactions (id, user_id, amount, amount_paise, direction, counterparty, category, transaction_date, source, sync_status, verification_status, capture_source, created_at, updated_at) VALUES ('old', 'u', 10, 1000, 'expense', 'X', 'Y', ?, 'sms', 'synced', 'needs_review', 'sms', ?, ?)`, t, t, t);
-    assert.equal(await runMigrations(db), 1);
-    assert.equal(await getCurrentSchemaVersion(db), 8);
+    assert.equal(await runMigrations(db), MIGRATIONS.length - 7);
+    assert.equal(await getCurrentSchemaVersion(db), MIGRATIONS[MIGRATIONS.length - 1].version);
     assert.equal((await db.getAllAsync('SELECT * FROM transactions')).length, 1);
     assert.equal((await db.getAllAsync('SELECT * FROM review_notifications')).length, 0);
   });

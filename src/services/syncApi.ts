@@ -21,6 +21,13 @@ export class SyncApiError extends Error {
 }
 
 const DEFAULT_API_PORT = 8000;
+/** Long enough for a free-tier server to wake up (about a minute), short enough that a dead request cannot block syncing. */
+export const SYNC_REQUEST_TIMEOUT_MS = 75_000;
+let requestTimeoutMs: number | null = null;
+/** Test hook: override the request timeout (null restores the default). */
+export function setSyncRequestTimeoutMs(ms: number | null): void {
+  requestTimeoutMs = ms;
+}
 
 let configuredBaseUrl: string | null = null;
 
@@ -45,24 +52,39 @@ async function syncRequest<T>(
 ): Promise<T> {
   const url = `${baseUrl || getBaseApiUrl()}${endpoint}`;
   let response: Response;
+  let responseBody: unknown;
+  // React Native's Android HTTP client has no read timeout: without this a stalled request (a sleeping server, a network
+  // switch mid-request) would keep the sync engine "in progress" forever and every later sync would be skipped.
+  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), requestTimeoutMs ?? SYNC_REQUEST_TIMEOUT_MS) : null;
 
   try {
-    response = await fetch(url, {
-      method,
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`,
-      },
-      body: body ? JSON.stringify(body) : undefined,
-    });
-  } catch (netErr) {
-    throw new SyncApiError(
-      'Unable to connect to synchronization server.',
-      'connection',
-    );
+    try {
+      response = await fetch(url, {
+        method,
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: body ? JSON.stringify(body) : undefined,
+        signal: controller?.signal,
+      });
+    } catch (netErr) {
+      const timedOut = controller?.signal.aborted === true;
+      throw new SyncApiError(
+        timedOut ? 'Synchronization server did not respond in time.' : 'Unable to connect to synchronization server.',
+        'connection',
+      );
+    }
+    try {
+      responseBody = await response.json();
+    } catch {
+      if (controller?.signal.aborted) throw new SyncApiError('Synchronization server did not respond in time.', 'connection');
+      responseBody = null;
+    }
+  } finally {
+    if (timer) clearTimeout(timer);
   }
-
-  const responseBody = await response.json().catch(() => null);
 
   if (!response.ok) {
     const detail =

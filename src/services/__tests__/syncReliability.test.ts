@@ -34,17 +34,21 @@ const mk = (tx: TransactionRepository, name: string, extra: object = {}) =>
 const profilePending = async (tx: TransactionRepository) =>
   (await tx.filterByDate('2000-01-01', '2100-01-01')).filter((t) => !t.deleted_at && t.sync_status !== 'synced' && t.user_id).length;
 
-// 1. Server dedupes by fingerprint and answers with the EXISTING row's id: the local row must still become synced.
+// 1. Server dedupes by fingerprint and answers with the EXISTING row's id: the local row moves to that canonical id and
+//    becomes synced there (it must not stay synced under an id the server does not know: later edits would duplicate it).
 {
   const { engine, tx, q } = await setup();
   const t = await mk(tx, 'Dup', { fingerprint: 'fp-1' });
-  handler = (b) => ({ status: 200, json: { results: b.items.map((i: any) => ack(i, { entity_id: '11111111-1111-4111-8111-111111111111' })), server_time: '' } });
+  const canonical = '11111111-1111-4111-8111-111111111111';
+  handler = (b) => ({ status: 200, json: { results: b.items.map((i: any) => ack(i, { entity_id: canonical })), server_time: '' } });
   const r = await engine.pushPendingChanges(session);
   assert.equal(r.pushed, 1);
-  assert.equal((await tx.getById(t.id))!.sync_status, 'synced');
+  assert.equal(await tx.getById(t.id), null);
+  assert.equal((await tx.getById(canonical))!.sync_status, 'synced');
+  assert.equal((await tx.getById(canonical))!.counterparty, 'Dup');
   assert.equal(await q.getPendingCount(), 0);
   assert.equal(await profilePending(tx), 0);
-  console.log('ok: duplicate-ack with different entity_id clears local pending');
+  console.log('ok: duplicate-ack with different entity_id moves the row to the canonical id and clears pending');
 }
 
 // 2. Multiple transactions, partial success: only acknowledged ones leave the queue.

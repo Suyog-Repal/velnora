@@ -1,5 +1,5 @@
 import { StatusBar } from 'expo-status-bar';
-import { Alert, Animated, AppState, Easing, Keyboard, KeyboardAvoidingView, Linking, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View, useWindowDimensions } from 'react-native';
+import { AccessibilityInfo, Alert, Animated, AppState, Easing, Keyboard, KeyboardAvoidingView, Linking, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View, useWindowDimensions } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Svg, { Circle, Defs, LinearGradient, Path, Stop } from 'react-native-svg';
 import { useEffect, useMemo, useRef, useState } from 'react';
@@ -20,7 +20,7 @@ import { PeopleView } from './src/screens/PeopleView';
 import { findOpenForPerson, outstandingPaise, recordPayment } from './src/services/expectedPaymentService';
 import { CurrencySheet, SettingsPage } from './src/screens/SettingsPages';
 import { CURRENCIES } from './src/ui/currency';
-import { ArrowDownLeft, ArrowUpRight, Bell, Chart, ChevronRight, CirclePlus, Eye, EyeOff, Home, KeyRound, LayoutGrid, LockKeyhole, LogOut, PiggyBank, Plus, ScanLine, Search, Settings, Sliders, Target, UserRound, Users, WalletCards, X } from './icons';
+import { ArrowDownLeft, ArrowUpRight, Bell, Chart, ChevronRight, CirclePlus, Eye, EyeOff, Home, KeyRound, LayoutGrid, LockKeyhole, LogOut, PiggyBank, Plus, Search, Settings, Sliders, Target, UserRound, Users, WalletCards, X } from './icons';
 import {
   initTransactionService,
   getTransactions,
@@ -35,6 +35,9 @@ import { getServiceDb, onSyncResult, setPostSyncHook } from './src/services/tran
 import { listCategories, type CategoryView } from './src/services/categoryService';
 import { uploadPendingReceipts } from './src/services/receiptService';
 import { expoReceiptFs, expoReceiptUploader } from './src/services/receiptFiles';
+import { commitAttachmentChanges, syncDeletedAttachments, uploadPendingAttachments } from './src/services/attachmentService';
+import { expoAttachmentApi, expoAttachmentFs } from './src/services/attachmentFiles';
+import { AttachmentSection, EMPTY_DRAFT, draftChanges, type AttachmentDraft } from './src/components/AttachmentSection';
 import { setSyncSessionRefresher, startSyncEngine, stopSyncEngine, triggerSync } from './src/services/syncEngine';
 import { createSessionRefresher } from './src/services/sessionRefresh';
 import { API_URL } from './auth';
@@ -56,7 +59,6 @@ import { TransactionsView } from './src/screens/TransactionsView';
 import { TransactionSheet } from './src/screens/TransactionSheet';
 import { AnalyticsView } from './src/screens/AnalyticsView';
 import { BudgetsView } from './src/screens/BudgetsView';
-import { ReceiptScan } from './src/screens/ReceiptScan';
 import { CategoryManager, MerchantNamesManager } from './src/screens/ManageSheets';
 
 type Tab = 'home' | 'transactions' | 'analytics' | 'budgets' | 'people' | 'profile';
@@ -77,6 +79,18 @@ function toUiTransaction(entity: TransactionEntity): Transaction {
 }
 
 function money(value: number) { return formatAmount(value); }
+
+/** The system "remove animations" / reduce-motion setting, kept up to date. */
+function useReduceMotion(): boolean {
+  const [reduced, setReduced] = useState(false);
+  useEffect(() => {
+    let live = true;
+    AccessibilityInfo.isReduceMotionEnabled().then((v) => { if (live) setReduced(v); }).catch(() => undefined);
+    const sub = AccessibilityInfo.addEventListener('reduceMotionChanged', setReduced);
+    return () => { live = false; sub.remove(); };
+  }, []);
+  return reduced;
+}
 
 export default function App() {
   // The SMS permission explanation waits until the splash has finished so the two never overlap.
@@ -106,6 +120,10 @@ function AppInner() {
   const [counterparty, setCounterparty] = useState('');
   const [category, setCategory] = useState(DEFAULT_CATEGORIES[0]);
   const [formError, setFormError] = useState('');
+  const [attachDraft, setAttachDraft] = useState<AttachmentDraft>(EMPTY_DRAFT);
+  // Set only by a reviewed "Fill in from receipt": the receipt's reference id and the note typed in its review.
+  const [receiptRef, setReceiptRef] = useState<string | null>(null);
+  const [receiptNote, setReceiptNote] = useState('');
   const [saving, setSaving] = useState(false);
   const savingRef = useRef(false); // blocks a second tap before the `saving` state re-renders
   const [amountFocused, setAmountFocused] = useState(false);
@@ -126,8 +144,10 @@ function AppInner() {
   const [importNotice, setImportNotice] = useState('');
   const [catViews, setCatViews] = useState<CategoryView[]>([]);
   const [txLoading, setTxLoading] = useState(true);
-  const [openTx, setOpenTx] = useState<TransactionEntity | null>(null);
-  const [showScan, setShowScan] = useState(false);
+  const [openTx, setOpenTxState] = useState<TransactionEntity | null>(null);
+  const [openTxMode, setOpenTxMode] = useState<'view' | 'edit'>('view');
+  /** Tapping a saved transaction opens read-only Details; the pencil inside switches to Edit. */
+  const setOpenTx = (t: TransactionEntity | null) => { setOpenTxMode('view'); setOpenTxState(t); };
   const [showCats, setShowCats] = useState(false);
   const [showAliases, setShowAliases] = useState(false);
   const [drillCategory, setDrillCategory] = useState<string | null>(null);
@@ -142,10 +162,18 @@ function AppInner() {
   const [txTime, setTxTime] = useState(localHm());
   const [dateTouched, setDateTouched] = useState(false);
   const [timeTouched, setTimeTouched] = useState(false);
-  // "Synced" / "saved offline" notices come from real sync outcomes only.
-  useEffect(() => onSyncResult((summary) => notices.syncResult(summary)), []);
+  const [categoryTouched, setCategoryTouched] = useState(false);
+  // "Synced" / "saved offline" notices come from real sync outcomes only. Any cycle that changed data (including the
+  // engine's own reconnect / retry cycles) also refreshes the screen, so "waiting to sync" reflects the database.
+  const reloadRef = useRef<() => Promise<void>>(async () => undefined);
+  useEffect(() => onSyncResult((summary) => {
+    notices.syncResult(summary);
+    if (summary.pushed > 0 || summary.pulled > 0) void reloadRef.current().catch(() => undefined);
+  }), []);
 
-  // Screen transition: content slides in from the direction of travel while fading in.
+  // Screen transition: content fades in with a short slide from the direction of travel (no pop, no resize). A tap during a
+  // running transition restarts it cleanly. With the system's reduce-motion setting on, the new tab simply appears.
+  const reduceMotion = useReduceMotion();
   const enter = useRef(new Animated.Value(1)).current;
   const slideDir = useRef(1);
   const changeTab = (next: Tab) => {
@@ -154,8 +182,9 @@ function AppInner() {
     if (next !== 'transactions') setDrillCategory(null);
     setTab(next);
     enter.stopAnimation();
+    if (reduceMotion) { enter.setValue(1); return; }
     enter.setValue(0);
-    Animated.timing(enter, { toValue: 1, duration: 260, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start();
+    Animated.timing(enter, { toValue: 1, duration: TAB_ENTER.ms, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start();
   };
   const [mode, setMode] = useThemeMode();
   const [accent, setAccent] = useAccent();
@@ -176,7 +205,13 @@ function AppInner() {
   // After each sync, upload receipts whose transactions the server now has, then sync the resulting reference.
   useEffect(() => {
     setPostSyncHook(async (s) => {
-      const r = await uploadPendingReceipts(getServiceDb(), expoReceiptFs, expoReceiptUploader(API_URL), s);
+      const db = getServiceDb();
+      const r = await uploadPendingReceipts(db, expoReceiptFs, expoReceiptUploader(API_URL), s);
+      // Attachments ride on the same engine: after every cycle, upload what the server can now accept and send deletions.
+      // Their failures are isolated: they never change a transaction's sync state.
+      const api = expoAttachmentApi(API_URL);
+      await uploadPendingAttachments(db, expoAttachmentFs, api, s, (stale) => sessionRefresher.current?.(stale) ?? Promise.resolve(null)).catch(() => undefined);
+      await syncDeletedAttachments(db, api, s).catch(() => undefined);
       if (r.uploaded > 0) await triggerSync(s);
     });
     return () => setPostSyncHook(null);
@@ -269,6 +304,7 @@ function AppInner() {
     // Also covers changes that arrived by sync, e.g. resolved on another device.
     void runReviewPass(getServiceDb(), owner).catch(() => undefined);
   };
+  reloadRef.current = reloadData;
 
   // Tapping a review notification. Links are held until the database and session are ready (cold start).
   useEffect(() => { setReviewNotifierPort(getNativeReviewNotifier()); }, []);
@@ -406,8 +442,8 @@ function AppInner() {
   const openForm = (dir: Direction) => {
     setDirection(dir);
     setCategory(categoriesFor(dir)[0]);
-    setAmount(''); setCounterparty(''); setFormError('');
-    setTxDate(localYmd()); setTxTime(localHm()); setDateTouched(false); setTimeTouched(false);
+    setAmount(''); setCounterparty(''); setFormError(''); setAttachDraft(EMPTY_DRAFT); setReceiptRef(null); setReceiptNote('');
+    setTxDate(localYmd()); setTxTime(localHm()); setDateTouched(false); setTimeTouched(false); setCategoryTouched(false);
     setShowForm(true);
   };
   const chooseDirection = (dir: Direction) => {
@@ -439,11 +475,21 @@ function AppInner() {
         direction: savedDirection,
         counterparty: counterparty.trim(),
         category: savedCategory,
-        description: savedDirection === 'income' ? `Received from ${counterparty.trim()}` : `Paid to ${counterparty.trim()}`,
+        description: receiptNote.trim() || (savedDirection === 'income' ? `Received from ${counterparty.trim()}` : `Paid to ${counterparty.trim()}`),
         source: 'manual',
+        ...(receiptRef ? { reference_id: receiptRef } : {}),
         ...(when ? { transaction_date: when } : {}),
       }, session);
       notices.localSave(savedDirection, !!session);
+      // Attachments are stored after the transaction (they reference its id). Each is stored on its own, so one unreadable
+      // image never loses the transaction or the other images.
+      const attachChanges = draftChanges(attachDraft);
+      if (attachChanges.added.length) {
+        const res = await commitAttachmentChanges(getServiceDb(), expoAttachmentFs, session, created.id, attachChanges).catch(() => ({ added: 0, removed: 0, failed: attachChanges.added.length }));
+        if (res.failed > 0) showToast(`${res.failed} attachment${res.failed === 1 ? '' : 's'} could not be saved. The transaction was saved.`, 'warning', 'attach-failed');
+        if (session && res.added > 0) void syncPendingTransactions(session).catch(() => undefined);
+      }
+      setAttachDraft(EMPTY_DRAFT);
       // A payment from/to someone with a pending expected amount: exact matches settle automatically; otherwise ask.
       try {
         const open = (await findOpenForPerson(getServiceDb(), scope, created.counterparty, created.direction === 'income' ? 'receive' : 'pay')).filter((e) => !e.payments.some((p) => p.transaction_id === created.id));
@@ -497,7 +543,7 @@ function AppInner() {
       {!session && <Text style={[styles.caption, { color: colors.muted, marginBottom: 12 }]}>Guest mode · data stays on this device and is not synced.</Text>}
       {importNotice ? <Text style={styles.noticeText}>{importNotice}</Text> : null}
       {session && sessionStale ? <Text style={[styles.caption, { color: colors.muted, marginBottom: 12 }]}>Offline · working from local data; sync resumes when you reconnect.</Text> : null}
-      <Animated.View style={{ opacity: enter, transform: [{ translateX: enter.interpolate({ inputRange: [0, 1], outputRange: [slideDir.current * 28, 0] }) }] }}>
+      <Animated.View style={{ opacity: enter, transform: [{ translateX: enter.interpolate({ inputRange: [0, 1], outputRange: [slideDir.current * TAB_ENTER.offsetDp, 0] }) }] }}>
       {tab === 'home' && <HomeScreen scope={scope} onOpen={setOpenTx} transactions={transactions} cashFlow={cashFlow} health={ledgerHealth} onReview={() => setShowReview(true)} colors={colors} onAddIncome={() => openForm('income')} onAddExpense={() => openForm('expense')} onViewAll={() => changeTab('transactions')} onAnalytics={() => changeTab('analytics')} />}
       {tab === 'transactions' && <TransactionsView key={drillCategory ?? 'all'} transactions={transactions} categories={catViews} colors={colors} loading={txLoading} online={online} onOpen={setOpenTx} onAdd={() => openForm('expense')} initialCategory={drillCategory} />}
       {tab === 'analytics' && <AnalyticsView scope={scope} colors={colors} refreshKey={dataTick} onDrill={(c) => { setDrillCategory(c); changeTab('transactions'); }} />}
@@ -511,7 +557,7 @@ function AppInner() {
     </ScrollView>
     {tab !== 'profile' && <Pressable style={({ pressed }) => [styles.fab, pressed && { opacity: 0.9, transform: [{ scale: 0.97 }] }]} onPress={() => openForm('expense')} accessibilityRole="button" accessibilityLabel="Add transaction"><Plus color="#FFFFFF" size={26} strokeWidth={2} /></Pressable>}
     <ToastHost bottom={layout.navHeight + 76} />
-    <BottomNav tab={tab} setTab={changeTab} colors={colors} dark={dark} />
+    <BottomNav tab={tab} setTab={changeTab} colors={colors} dark={dark} reduceMotion={reduceMotion} />
   </View>
   <Modal visible={importPrompt !== null} transparent animationType="fade" onRequestClose={() => setImportPrompt(null)}><View style={styles.modalBackdrop}><View style={[styles.modal, { backgroundColor: colors.card }]}>
     <Text style={[styles.modalTitle, { color: colors.text }]}>Import local data?</Text>
@@ -520,7 +566,7 @@ function AppInner() {
     <Pressable disabled={importBusy} onPress={() => setImportPrompt(null)}><Text style={[styles.link, { textAlign: 'center', marginTop: 16 }]}>Not now</Text></Pressable>
   </View></View></Modal>
   <ReviewSheet visible={showReview} session={session} colors={colors} onClose={() => setShowReview(false)} onComplete={setReviewTxId} />
-  <CompleteTransactionSheet transactionId={reviewTxId} session={session} categories={catViews} colors={colors} onClose={() => setReviewTxId(null)} onChanged={() => void reloadData()} onEdit={setOpenTx} />
+  <CompleteTransactionSheet transactionId={reviewTxId} session={session} categories={catViews} colors={colors} onClose={() => setReviewTxId(null)} onChanged={() => void reloadData()} onEdit={(t) => { setOpenTxMode('edit'); setOpenTxState(t); }} />
   <AccountsSheet visible={showAccounts} scope={scope} colors={colors} onClose={() => setShowAccounts(false)} onChanged={() => void reloadData()} />
   <StatementImportSheet visible={showImport !== null} mode={showImport ?? 'csv'} scope={scope} session={session} categories={catViews} refreshSession={(stale) => sessionRefresher.current?.(stale) ?? Promise.resolve(null)} colors={colors} onClose={() => setShowImport(null)} onImported={() => { void reloadData(); if (session) void syncPendingTransactions(session); }} />
   <Sheet visible={showForm} onClose={closeForm} title="Record transaction" colors={colors} footer={<>
@@ -548,14 +594,24 @@ function AppInner() {
     </View>
     <Text style={[styles.label, { color: colors.muted }]}>CATEGORY</Text>
     <ScrollView horizontal showsHorizontalScrollIndicator={false} keyboardShouldPersistTaps="handled" contentContainerStyle={{ paddingRight: 8 }}>
-      {formCategories.map((item) => <Chip key={item} label={item} active={category.toLowerCase() === item.toLowerCase()} color={catViews.find((c) => c.type === direction && c.name === item)?.color} onPress={() => setCategory(item)} colors={colors} />)}
+      {formCategories.map((item) => <Chip key={item} label={item} active={category.toLowerCase() === item.toLowerCase()} color={catViews.find((c) => c.type === direction && c.name === item)?.color} onPress={() => { setCategory(item); setCategoryTouched(true); }} colors={colors} />)}
     </ScrollView>
-    <Pressable onPress={() => { closeForm(); setShowScan(true); }} accessibilityRole="button" style={({ pressed }) => [styles.scanLink, { borderColor: colors.border, opacity: pressed ? 0.7 : 1 }]}>
-      <ScanLine color={palette.emerald} size={18} /><Text style={styles.link}>Scan a receipt instead</Text>
-    </Pressable>
+    <AttachmentSection draft={attachDraft} onChange={setAttachDraft} colors={colors} signedIn={!!session} receipt={{
+      session, categories: catViews,
+      current: { direction, merchant: counterparty, amount, date: txDate, time: txTime, category,
+        // Defaults (today, the first category) are fallbacks, not entries: only what the person set can conflict.
+        entered: { merchant: true, amount: true, date: dateTouched, time: timeTouched, category: categoryTouched } },
+      // The person reviewed and confirmed these in the receipt sheet; they become the form's values (still editable here).
+      onApply: (r) => {
+        setDirection(r.direction); setAmount(r.amount); setCounterparty(r.merchant);
+        const list = categoriesFor(r.direction);
+        setCategory(list.find((n) => n.toLowerCase() === r.category.toLowerCase()) ?? list[0]);
+        setTxDate(r.date); setTxTime(r.time); setDateTouched(true); setTimeTouched(true); setCategoryTouched(true);
+        setReceiptRef(r.referenceId); setReceiptNote(r.note); setFormError('');
+      },
+    }} />
   </Sheet>
-  <TransactionSheet tx={openTx} session={session} categories={catViews} colors={colors} onClose={() => setOpenTx(null)} onChanged={() => void reloadData()} />
-  <ReceiptScan visible={showScan} session={session} categories={catViews} colors={colors} onClose={() => setShowScan(false)} onSaved={() => void reloadData()} />
+  <TransactionSheet key={openTx?.id ?? 'none'} tx={openTx} initialMode={openTxMode} session={session} categories={catViews} colors={colors} onClose={() => setOpenTx(null)} onChanged={() => void reloadData()} />
   <SettingsPage visible={showSettings} onClose={() => setShowSettings(false)} colors={colors} mode={mode} setMode={setMode} accent={accent} setAccent={setAccent} />
   <CurrencySheet visible={showCurrency} onClose={() => setShowCurrency(false)} colors={colors} code={currency} setCode={setCurrency} />
   <CategoryManager visible={showCats} scope={scope} colors={colors} onClose={() => setShowCats(false)} onChanged={() => void reloadData()} />
@@ -657,43 +713,43 @@ function FlowCard({ label, value, color, icon, colors }: { label: string; value:
   </View>;
 }
 /** Bottom-navigation tap response: 3 dp up, 1.05x, ~200 ms in total, ease-out, no overshoot. */
-const NAV_TAP = { liftDp: 3, scale: 1.05, riseMs: 80, returnMs: 120 } as const;
+/** Bottom-nav press feel: a physical press inwards and a smooth release. Timing-based (no spring, no overshoot). */
+const NAV_TAP = { pressScale: 0.9, pressOpacity: 0.82, pressMs: 90, releaseMs: 150 } as const;
+/** Tab content transition. */
+const TAB_ENTER = { ms: 220, offsetDp: 12 } as const;
 
-function NavItem({ Icon, label, active, onPress, colors, dark }: { Icon: typeof Home; label: string; active: boolean; onPress: () => void; colors: Colors; dark: boolean }) {
+function NavItem({ Icon, label, active, onPress, colors, dark, reduceMotion }: { Icon: typeof Home; label: string; active: boolean; onPress: () => void; colors: Colors; dark: boolean; reduceMotion: boolean }) {
   const on = useRef(new Animated.Value(active ? 1 : 0)).current;
-  // Subtle tap response on the icon only: it eases up ~3 dp and scales to 1.05, then eases back to exactly where it was
-  // (timing-based: no spring, no overshoot, no repeat). Plays when this tab becomes active (taps and programmatic tab
-  // changes alike) and again when the already-active tab is tapped. Runs on the native driver; other tabs and the bar stay still.
-  const pop = useRef(new Animated.Value(0)).current; // 0 = at rest, 1 = peak of the tap response
-  const playPop = () => {
-    pop.stopAnimation();
-    pop.setValue(0);
-    Animated.sequence([
-      Animated.timing(pop, { toValue: 1, duration: NAV_TAP.riseMs, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
-      Animated.timing(pop, { toValue: 0, duration: NAV_TAP.returnMs, easing: Easing.out(Easing.quad), useNativeDriver: true }),
-    ]).start();
+  // Press feedback on the icon only: scales in while the finger is down, eases back out on release. The selected state is
+  // shown by the existing pill and colour; nothing lifts, pops or pulses. Native driver; the bar layout never moves.
+  const press = useRef(new Animated.Value(0)).current; // 0 = at rest, 1 = fully pressed
+  const pressTo = (v: 0 | 1) => {
+    if (reduceMotion) return;
+    press.stopAnimation();
+    Animated.timing(press, {
+      toValue: v, duration: v ? NAV_TAP.pressMs : NAV_TAP.releaseMs,
+      easing: v ? Easing.out(Easing.quad) : Easing.out(Easing.cubic), useNativeDriver: true,
+    }).start();
   };
-  const mounted = useRef(false);
   useEffect(() => {
-    Animated.timing(on, { toValue: active ? 1 : 0, duration: 160, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start();
-    if (mounted.current && active) playPop();
-    mounted.current = true;
-  }, [active, on]); // eslint-disable-line react-hooks/exhaustive-deps
-  return <Pressable style={styles.navItem} hitSlop={{ top: 4, bottom: 4 }} onPress={() => { if (active) playPop(); onPress(); }} accessibilityRole="tab" accessibilityState={{ selected: active }} accessibilityLabel={label}>
+    Animated.timing(on, { toValue: active ? 1 : 0, duration: reduceMotion ? 0 : 160, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start();
+  }, [active, on, reduceMotion]);
+  return <Pressable style={styles.navItem} hitSlop={{ top: 4, bottom: 4 }} onPressIn={() => pressTo(1)} onPressOut={() => pressTo(0)} onPress={onPress}
+    accessibilityRole="tab" accessibilityState={{ selected: active }} accessibilityLabel={label}>
     <View style={styles.navPillWrap}>
-      {/* Selected background: a rounded accent pill that grows in behind the active icon. */}
+      {/* Selected background: a rounded accent pill behind the active icon. */}
       <Animated.View pointerEvents="none" style={[styles.navPill, { backgroundColor: dark ? `${palette.emerald}38` : palette.emeraldSoft, opacity: on, transform: [{ scaleX: on.interpolate({ inputRange: [0, 1], outputRange: [0.5, 1] }) }] }]} />
-      <Animated.View pointerEvents="none" style={{ transform: [{ translateY: pop.interpolate({ inputRange: [0, 1], outputRange: [0, -NAV_TAP.liftDp] }) }, { scale: pop.interpolate({ inputRange: [0, 1], outputRange: [1, NAV_TAP.scale] }) }] }}>
+      <Animated.View pointerEvents="none" style={{ opacity: press.interpolate({ inputRange: [0, 1], outputRange: [1, NAV_TAP.pressOpacity] }), transform: [{ scale: press.interpolate({ inputRange: [0, 1], outputRange: [1, NAV_TAP.pressScale] }) }] }}>
         <Icon size={20} color={active ? palette.accentText : colors.muted} strokeWidth={2} />
       </Animated.View>
     </View>
     <Text style={[styles.navLabel, { color: active ? palette.accentText : colors.muted, fontWeight: active ? '600' : '500' }]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.85}>{label}</Text>
   </Pressable>;
 }
-function BottomNav({ tab, setTab, colors, dark }: { tab: Tab; setTab: (tab: Tab) => void; colors: Colors; dark: boolean }) {
+function BottomNav({ tab, setTab, colors, dark, reduceMotion }: { tab: Tab; setTab: (tab: Tab) => void; colors: Colors; dark: boolean; reduceMotion: boolean }) {
   const items: [Tab, typeof Home, string][] = [['home', Home, 'Home'], ['transactions', LayoutGrid, 'Transactions'], ['analytics', Chart, 'Analytics'], ['budgets', WalletCards, 'Budgets'], ['people', Users, 'People']];
   return <View accessibilityRole="tablist" style={[styles.nav, { backgroundColor: colors.card, borderTopColor: colors.border }]}>
-    {items.map(([key, Icon, label]) => <NavItem key={key} Icon={Icon} label={label} active={tab === key} onPress={() => setTab(key)} colors={colors} dark={dark} />)}
+    {items.map(([key, Icon, label]) => <NavItem key={key} Icon={Icon} label={label} active={tab === key} onPress={() => setTab(key)} colors={colors} dark={dark} reduceMotion={reduceMotion} />)}
   </View>;
 }
 

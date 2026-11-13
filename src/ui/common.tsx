@@ -147,7 +147,7 @@ export function useKeyboardVisible(): boolean {
  * much (0 if the window did resize). The sheet is capped at 92% of the remaining height, its body scrolls, and the
  * optional `footer` (primary action) sits outside the scroll area so it always stays above the keyboard.
  */
-export function Sheet({ visible, onClose, title, colors, children, footer }: { visible: boolean; onClose: () => void; title: string; colors: Colors; children: ReactNode; footer?: ReactNode }) {
+export function Sheet({ visible, onClose, title, colors, children, footer, headerAction }: { visible: boolean; onClose: () => void; title: string; colors: Colors; children: ReactNode; footer?: ReactNode; /** Optional button shown left of the close button (e.g. edit). */ headerAction?: ReactNode }) {
   const keyboard = useKeyboardVisible();
   const scrollRef = useRef<ComponentRef<typeof ScrollView>>(null);
   const contentRef = useRef<ComponentRef<typeof View>>(null);
@@ -175,7 +175,7 @@ export function Sheet({ visible, onClose, title, colors, children, footer }: { v
       <Pressable style={StyleSheet.absoluteFill} onPress={onClose} accessibilityLabel="Close" />
       <Animated.View style={[ui.sheet, { backgroundColor: colors.canvas, borderColor: colors.border, opacity: rise, transform: [{ translateY: rise.interpolate({ inputRange: [0, 1], outputRange: [48, 0] }) }] }]}>
         <View style={[ui.grabber, { backgroundColor: colors.border }]} />
-        <View style={ui.sheetHeader}><Text style={[ui.sheetTitle, { color: colors.text }]} numberOfLines={1}>{title}</Text><Pressable onPress={onClose} hitSlop={14} accessibilityRole="button" accessibilityLabel="Close" style={[ui.closeButton, { backgroundColor: colors.card, borderColor: colors.border }]}><X color={colors.muted} size={18} /></Pressable></View>
+        <View style={ui.sheetHeader}><Text style={[ui.sheetTitle, { color: colors.text, flex: 1 }]} numberOfLines={1}>{title}</Text>{headerAction ? <View style={{ marginRight: 10 }}>{headerAction}</View> : null}<Pressable onPress={onClose} hitSlop={14} accessibilityRole="button" accessibilityLabel="Close" style={[ui.closeButton, { backgroundColor: colors.card, borderColor: colors.border }]}><X color={colors.muted} size={18} /></Pressable></View>
         <ScrollView ref={scrollRef} style={ui.sheetScroll} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" contentContainerStyle={{ paddingHorizontal: 20, paddingTop: 14, paddingBottom: footer ? 12 : 28 }}>
           <View ref={contentRef} collapsable={false}>{children}</View>
         </ScrollView>

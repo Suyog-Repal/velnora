@@ -682,6 +682,66 @@ export class TransactionRepository {
     return rows.map((r) => this.mapRow(r));
   }
 
+  /**
+   * The server identified a locally created transaction as an existing row of the same payment (same bank reference /
+   * fingerprint) and answered with THAT row's id. Moves the local transaction to the canonical id so later edits, deletes,
+   * attachments and other devices all address one record.
+   *  - 'rekeyed': no local row had the canonical id; the local row (all fields kept) now lives under it, with its
+   *    attachments, source evidence, dedup keys, review state and queued change.
+   *  - 'merged': the device already held the canonical row (e.g. pulled from another device), so the local row was a
+   *    second copy of the same payment. Its attachments, evidence and keys move to the canonical row and the copy is
+   *    removed; nothing is sent to the server for it (the server never had it under this id).
+   *  - 'none': ids are equal or the local row no longer exists.
+   * Atomic (SAVEPOINT), so it is also safe inside an enclosing transaction.
+   */
+  async adoptCanonicalId(
+    localId: string,
+    canonicalId: string,
+    options?: { discardCopyAttachments?: boolean },
+  ): Promise<'rekeyed' | 'merged' | 'none'> {
+    if (!canonicalId || localId === canonicalId) return 'none';
+    const local = await this.getById(localId);
+    if (!local) return 'none';
+    const canonical = await this.getById(canonicalId);
+    const tables = new Set((await this.db.getAllAsync<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table'")).map((t) => t.name));
+    await this.db.execAsync('SAVEPOINT adopt_canonical_id');
+    try {
+      if (!canonical) {
+        const cols = (await this.db.getAllAsync<{ name: string }>('PRAGMA table_info(transactions)')).map((c) => c.name).filter((c) => c !== 'id');
+        await this.db.runAsync(
+          `INSERT INTO transactions (id, ${cols.join(', ')}) SELECT ?, ${cols.join(', ')} FROM transactions WHERE id = ?`, canonicalId, localId,
+        );
+        if (tables.has('transaction_keys')) await this.db.runAsync('UPDATE transaction_keys SET transaction_id = ? WHERE transaction_id = ?', canonicalId, localId);
+        if (tables.has('transaction_sources')) await this.db.runAsync('UPDATE transaction_sources SET transaction_id = ? WHERE transaction_id = ?', canonicalId, localId);
+        if (tables.has('review_notifications')) await this.db.runAsync('UPDATE review_notifications SET transaction_id = ? WHERE transaction_id = ?', canonicalId, localId);
+        await this.db.runAsync("UPDATE sync_queue SET entity_id = ? WHERE entity_type = 'transaction' AND entity_id = ?", canonicalId, localId);
+      } else {
+        // Same payment twice on this device: keep the canonical row, keep everything attached to the copy.
+        if (tables.has('transaction_keys')) {
+          await this.db.runAsync('UPDATE OR IGNORE transaction_keys SET transaction_id = ? WHERE transaction_id = ?', canonicalId, localId);
+        }
+        if (tables.has('transaction_sources')) {
+          await this.db.runAsync('UPDATE OR IGNORE transaction_sources SET transaction_id = ? WHERE transaction_id = ?', canonicalId, localId);
+        }
+        if (tables.has('review_notifications')) await this.db.runAsync('DELETE FROM review_notifications WHERE transaction_id = ?', localId);
+        // The copy's queued change is answered (acknowledged against the canonical row); never send it again.
+        await this.db.runAsync("DELETE FROM sync_queue WHERE entity_type = 'transaction' AND entity_id = ?", localId);
+      }
+      // A copy the user deleted keeps its attachments to itself (they go with it); every other case carries them over.
+      if (tables.has('transaction_attachments') && !(canonical && options?.discardCopyAttachments)) {
+        await this.db.runAsync('UPDATE transaction_attachments SET transaction_id = ? WHERE transaction_id = ?', canonicalId, localId);
+      }
+      await this.db.runAsync('UPDATE transactions SET possible_duplicate_of = ? WHERE possible_duplicate_of = ?', canonicalId, localId);
+      await this.db.runAsync('DELETE FROM transactions WHERE id = ?', localId);
+      await this.db.execAsync('RELEASE adopt_canonical_id');
+    } catch (err) {
+      await this.db.execAsync('ROLLBACK TO adopt_canonical_id');
+      await this.db.execAsync('RELEASE adopt_canonical_id');
+      throw err;
+    }
+    return canonical ? 'merged' : 'rekeyed';
+  }
+
   async updateSyncStatus(id: string, status: SyncStatus, serverVersion?: number): Promise<void> {
     const now = new Date().toISOString();
     if (serverVersion !== undefined) {
@@ -793,6 +853,13 @@ export class TransactionRepository {
       if (remote.reference_id) {
         const held = await this.db.getFirstAsync<{ id: string }>(
           `SELECT id FROM transactions WHERE reference_id = ? AND deleted_at IS NULL AND COALESCE(user_id, '') = ? LIMIT 1`, remote.reference_id, remote.user_id ?? '',
+        );
+        if (held) return 'ignored';
+      } else if (remote.fingerprint) {
+        // The server also deduplicates by fingerprint when a payment has no reference: the same rule applies here.
+        const held = await this.db.getFirstAsync<{ id: string }>(
+          `SELECT id FROM transactions WHERE fingerprint = ? AND (reference_id IS NULL OR reference_id = '') AND deleted_at IS NULL
+             AND COALESCE(user_id, '') = ? LIMIT 1`, remote.fingerprint, remote.user_id ?? '',
         );
         if (held) return 'ignored';
       }

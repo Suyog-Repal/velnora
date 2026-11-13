@@ -92,15 +92,16 @@ export function AppearanceCard({ mode, setMode, accent, setAccent, colors }: { m
 }
 
 export function profileStats(transactions: TransactionEntity[], now = new Date()) {
-  let spentPaise = 0; let pending = 0; let count = 0;
+  let spentPaise = 0; let pending = 0; let failed = 0; let count = 0;
   for (const t of transactions) {
     if (t.deleted_at) continue;
     count += 1;
     if (t.sync_status !== 'synced' && t.user_id) pending += 1;
+    if (t.sync_status === 'failed' && t.user_id) failed += 1; // rejected by the server: also counted in `pending`
     const d = new Date(t.transaction_date);
     if (countsAsExpense(t) && d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth()) spentPaise += t.amount_paise;
   }
-  return { count, spentPaise, pending };
+  return { count, spentPaise, pending, failed };
 }
 
 export function ProfileView({ session, colors, mode, accent, transactions, online, onOpenSettings, onOpenCurrency, currencyLabel, onOpenCategories, onOpenAliases, onOpenReview, onOpenAccounts, onOpenImport, onOpenImportPdf, reviewCount, onSignIn, onCreate, onLogout, accountSections }: {
@@ -111,7 +112,7 @@ export function ProfileView({ session, colors, mode, accent, transactions, onlin
 }) {
   const stats = profileStats(transactions);
   const name = session?.user.full_name ?? 'Guest';
-  const status = !session ? 'Guest · on this device' : !online ? 'Offline' : stats.pending > 0 ? `${stats.pending} waiting to sync` : 'All synced';
+  const status = !session ? 'Guest · on this device' : !online ? 'Offline' : stats.pending > 0 ? `${stats.pending} waiting to sync${stats.failed > 0 ? ` (${stats.failed} rejected by server)` : ''}` : 'All synced';
   const avatarPulse = useRef(new Animated.Value(0)).current;
   useEffect(() => { Animated.timing(avatarPulse, { toValue: 1, duration: 700, delay: 120, easing: Easing.out(Easing.back(1.6)), useNativeDriver: true }).start(); }, [avatarPulse]);
   let i = 0;

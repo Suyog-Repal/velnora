@@ -120,7 +120,32 @@ async function sessionRestore() {
   assert.equal((await restoreSession(stored, async () => { throw s429; })).status, 'offline', 'rate limiting is not a rejection');
 }
 
+/** Photos attached in guest mode follow their transaction into the account: imported rows keep theirs, and the photos
+ *  of a guest copy skipped as a duplicate move to the account's transaction. Everything adopted is queued for upload. */
+async function importCarriesAttachments() {
+  const { db, repo } = await fresh();
+  const attach = (id: string, txId: string, deleted = false) => db.runAsync(
+    `INSERT INTO transaction_attachments (id, transaction_id, user_id, local_path, upload_status, attachment_type, page_index, created_at, updated_at, deleted_at)
+     VALUES (?, ?, NULL, 'file:///p.jpg', 'local', 'photo', 0, '2026-11-13T00:00:00Z', '2026-11-13T00:00:00Z', ?)`, id, txId, deleted ? '2026-11-13T01:00:00Z' : null);
+  const account = await repo.create(tx({ user_id: 'user-A', reference_id: 'REFDUP9' }));
+  const guestDup = await repo.create(tx({ user_id: null, reference_id: 'REFDUP9' }));
+  const guestNew = await repo.create(tx({ amount: 77 }));
+  await attach('att-dup', guestDup.id); await attach('att-dup-removed', guestDup.id, true); await attach('att-new', guestNew.id);
+  const res = await importGuestData('user-A', db);
+  assert.deepEqual(res, { imported: 1, skippedDuplicates: 1 });
+  const rows = await db.getAllAsync<{ id: string; transaction_id: string; user_id: string | null; upload_status: string }>(
+    'SELECT id, transaction_id, user_id, upload_status FROM transaction_attachments ORDER BY id');
+  const by = Object.fromEntries(rows.map((r) => [r.id, r]));
+  assert.deepEqual([by['att-new'].transaction_id, by['att-new'].user_id, by['att-new'].upload_status], [guestNew.id, 'user-A', 'pending']);
+  assert.deepEqual([by['att-dup'].transaction_id, by['att-dup'].user_id, by['att-dup'].upload_status], [account.id, 'user-A', 'pending'],
+    'photo of the skipped duplicate now belongs to the account transaction');
+  assert.deepEqual([by['att-dup-removed'].transaction_id, by['att-dup-removed'].user_id], [guestDup.id, null], 'a removed photo is not brought back');
+  assert.equal(rows.length, 3, 'no attachment created or lost');
+  db.close();
+}
+
 await firstLaunchAndPersistence();
+await importCarriesAttachments();
 await guestDataIsNeverUploaded();
 await importRequiresCallAndWorks();
 await importDedupesAndIsAtomic();

@@ -35,7 +35,23 @@ export interface SyncPushResultItem {
   server_version: number;
   updated_at?: string;
   error?: string | null;
+  /** Stable reason for status 'error' (newer servers). See isPermanentItemError. */
+  error_code?: string | null;
   winning_record?: RemoteTransaction | null;
+}
+
+/** Server rejected the change itself: resending it unchanged cannot succeed. */
+const PERMANENT_ITEM_ERROR_CODES = new Set(['validation_error', 'forbidden', 'missing_fields', 'not_found', 'rejected']);
+/** The same rejections as worded by servers that send no error_code. */
+const LEGACY_PERMANENT_ITEM_ERROR = /^(Missing required|Forbidden|Unsupported entity type|System categories|Transaction not found|Category not found|Invalid value)/;
+
+/**
+ * Permanent = the server rejected this exact change. Anything else (internal_error, or an unclassified message from an older
+ * server such as a database error) means the server failed to apply it, so it is retried with capped backoff, never parked.
+ */
+export function isPermanentItemError(ack: Pick<SyncPushResultItem, 'error' | 'error_code'>): boolean {
+  if (ack.error_code) return PERMANENT_ITEM_ERROR_CODES.has(ack.error_code);
+  return LEGACY_PERMANENT_ITEM_ERROR.test(ack.error ?? '');
 }
 
 export interface SyncPushServerResponse {
@@ -100,6 +116,12 @@ function buildSimplePayload(entityType: string, p: Record<string, unknown>, isDe
 }
 
 const MAX_AUTO_RETRIES = 6;
+/** One cycle pushes the queue in batches until it is empty (bounded so a pathological queue cannot spin forever). */
+const PUSH_BATCH_SIZE = 50;
+const MAX_PUSH_BATCHES_PER_CYCLE = 40;
+/** Network / 5xx backoff cap. Such failures are never permanent: the item keeps its place and retries. */
+const MAX_TRANSIENT_BACKOFF_MS = 15 * 60_000;
+type CycleListener = (summary: SyncSummary, session: SyncSession) => void | Promise<void>;
 
 export class SyncEngine {
   private isSyncing = false;
@@ -112,6 +134,7 @@ export class SyncEngine {
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private consecutiveFailures = 0;
   private listeners: Set<StateListener> = new Set();
+  private cycleListeners: Set<CycleListener> = new Set();
   private unsubscribeNetInfo: (() => void) | null = null;
   private sessionProvider: (() => Promise<SyncSession | null>) | null = null;
   private sessionRefresher: ((stale: SyncSession) => Promise<SyncSession | null>) | null = null;
@@ -214,6 +237,15 @@ export class SyncEngine {
     if (this.retryTimer) { clearTimeout(this.retryTimer); this.retryTimer = null; }
   }
 
+  /**
+   * Called after every real sync cycle (app-triggered, reconnect, follow-up or retry timer) with the session it used
+   * (possibly refreshed). Lets the UI refresh and lets dependent uploads (receipts, attachments) run after any sync.
+   */
+  public onCycleComplete(listener: CycleListener): () => void {
+    this.cycleListeners.add(listener);
+    return () => { this.cycleListeners.delete(listener); };
+  }
+
   public subscribe(listener: StateListener): () => void {
     this.listeners.add(listener);
     listener(this.getState());
@@ -269,11 +301,14 @@ export class SyncEngine {
 
     try {
       const runCycle = async (s: SyncSession) => {
-        // 1. Push local changes
-        const pushResult = await this.pushPendingChanges(s, apiBaseUrl);
-        summary.pushed += pushResult.pushed;
-        summary.conflicts += pushResult.conflicts;
-        summary.errors.push(...pushResult.errors);
+        // 1. Push local changes: batch after batch until nothing eligible is left (a 183-item backlog needs 4 batches).
+        for (let batch = 0; batch < MAX_PUSH_BATCHES_PER_CYCLE; batch++) {
+          const pushResult = await this.pushPendingChanges(s, apiBaseUrl);
+          summary.pushed += pushResult.pushed;
+          summary.conflicts += pushResult.conflicts;
+          summary.errors.push(...pushResult.errors);
+          if (!pushResult.more) break;
+        }
 
         // 2. Pull remote changes (transactions + categories)
         const pullResult = await this.pullRemoteChanges(s, apiBaseUrl);
@@ -310,6 +345,9 @@ export class SyncEngine {
       this.notifyListeners();
     }
     this.scheduleFollowUp(summary);
+    for (const listener of [...this.cycleListeners]) {
+      try { await listener(summary, session); } catch { /* a listener must never break syncing */ }
+    }
     return summary;
   }
 
@@ -338,13 +376,18 @@ export class SyncEngine {
    */
   private async requeueStrandedFailures(userId?: string | null): Promise<void> {
     const { syncQueueRepo, txRepo, metadataRepo } = await this.getRepos();
-    const markerKey = `sync_requeue_stranded_v1_${userId ?? 'none'}`;
+    // v2: builds before this one also parked items PERMANENTLY after 10 network/5xx failures (an offline stretch or a
+    // sleeping server was enough), and the v1 pass had already been used. Those were never rejected by the server, so they
+    // are given back to the queue once more. Server creates are idempotent (same id / fingerprint / reference -> same row),
+    // so items that did reach the server before the ack was lost are acknowledged, not duplicated.
+    const markerKey = `sync_requeue_stranded_v2_${userId ?? 'none'}`;
     if (await metadataRepo.get(markerKey)) return;
-    const parked = await syncQueueRepo.peek(200, userId);
+    const parked = await syncQueueRepo.peek(5000, userId);
     for (const item of parked) {
       if (item.next_retry_at !== PERMANENT_FAILURE_DATE) continue;
       const code = item.error_code ?? '';
-      if (code !== 'MAX_RETRIES_EXCEEDED' && code !== 'PERMANENT_ERROR_422' && code !== 'PERMANENT_ERROR_400') continue;
+      // Never retried: payloads that cannot be parsed, and explicit ownership / completeness rejections.
+      if (code === 'MALFORMED_PAYLOAD' || code.includes('Forbidden') || code.includes('Missing required')) continue;
       await syncQueueRepo.resetRetry(item.id);
       if (item.entity_type === 'transaction') {
         await txRepo.updateSyncStatus(item.entity_id, item.operation === 'create' ? 'pending_create' : item.operation === 'delete' ? 'pending_delete' : 'pending_update');
@@ -354,19 +397,51 @@ export class SyncEngine {
   }
 
   /**
+   * A transaction of this account that is not synced but has NO queue entry can never be pushed (the engine only sends
+   * queue items), so it would stay "waiting to sync" forever. Re-queue it. The server treats a repeated create as
+   * already-synced and an update of an unknown id as an upsert, so this is safe whether or not the server has it.
+   * A row created and deleted before it ever synced is left alone (it must never reach the server).
+   */
+  private async requeueOrphans(userId: string): Promise<void> {
+    const { db, syncQueueRepo } = await this.getRepos();
+    const orphans = await db.getAllAsync<TransactionEntity>(
+      `SELECT * FROM transactions t
+       WHERE t.user_id = ? AND t.sync_status IN ('pending_create', 'pending_update', 'pending_delete', 'failed')
+         AND NOT EXISTS (SELECT 1 FROM sync_queue q WHERE q.entity_type = 'transaction' AND q.entity_id = t.id)
+       LIMIT 5000`,
+      userId,
+    );
+    for (const tx of orphans) {
+      if (tx.deleted_at) {
+        if (tx.sync_status === 'pending_create') continue;
+        await syncQueueRepo.enqueue({
+          entity_type: 'transaction', entity_id: tx.id, operation: 'delete',
+          payload: JSON.stringify({ id: tx.id, deleted_at: tx.deleted_at, user_id: tx.user_id, reference_id: tx.reference_id ?? null, fingerprint: tx.fingerprint ?? null }),
+        });
+        continue;
+      }
+      await syncQueueRepo.enqueue({
+        entity_type: 'transaction', entity_id: tx.id, operation: tx.sync_status === 'pending_create' ? 'create' : 'update',
+        payload: JSON.stringify(tx),
+      });
+    }
+  }
+
+  /**
    * Push pending transactions from sync_queue to cloud.
    * Differentiates HTTP 401, 422/400 (permanent rejection), and 5xx/network (exponential backoff).
    */
   public async pushPendingChanges(
     session: SyncSession,
     apiBaseUrl?: string,
-  ): Promise<{ pushed: number; conflicts: number; errors: string[] }> {
+  ): Promise<{ pushed: number; conflicts: number; errors: string[]; more: boolean }> {
     const { syncQueueRepo, txRepo } = await this.getRepos();
     await this.requeueStrandedFailures(session.user?.id);
-    const pendingItems = await syncQueueRepo.peekEligible(50, session.user?.id);
+    if (session.user?.id) await this.requeueOrphans(session.user.id);
+    const pendingItems = await syncQueueRepo.peekEligible(PUSH_BATCH_SIZE, session.user?.id);
 
     if (pendingItems.length === 0) {
-      return { pushed: 0, conflicts: 0, errors: [] };
+      return { pushed: 0, conflicts: 0, errors: [], more: false };
     }
 
     const pushItems = [];
@@ -471,10 +546,13 @@ export class SyncEngine {
     }
 
     if (pushItems.length === 0) {
-      return { pushed: 0, conflicts: 0, errors: [] };
+      return { pushed: 0, conflicts: 0, errors: [], more: false };
     }
 
-    return this.sendAndAcknowledge(session, pendingItems, pushItems, apiBaseUrl);
+    const result = await this.sendAndAcknowledge(session, pendingItems, pushItems, apiBaseUrl);
+    // A full batch that made progress means more may be waiting. Rejected items got a future retry time, so the next batch
+    // of the same cycle never re-sends them.
+    return { ...result, more: pendingItems.length === PUSH_BATCH_SIZE && (result.pushed > 0 || result.errors.length > 0) };
   }
 
   /**
@@ -537,22 +615,17 @@ export class SyncEngine {
         }
       }
 
-      // Temporary server failure (5xx), 429 or network interruption: apply exponential backoff
+      // Temporary server failure (5xx), 429, timeout or network interruption: exponential backoff, capped. Never
+      // permanent: the server did not reject these items, it simply was not reachable (offline, asleep, overloaded).
+      // Earlier builds dead-lettered them after 10 attempts, which stranded whole backlogs as "waiting to sync".
       for (const item of sent) {
-        const nextRetryCount = item.retry_count + 1;
-        if (nextRetryCount >= MAX_RETRY_ATTEMPTS) {
-          // Reached retry limit -> dead-letter / mark failed
-          await syncQueueRepo.markFailed(item.id, 'MAX_RETRIES_EXCEEDED', PERMANENT_FAILURE_DATE);
-          await txRepo.updateSyncStatus(item.entity_id, 'failed');
-        } else {
-          const backoffMs = Math.min(300000, Math.pow(2, item.retry_count) * 1000 + Math.random() * 500);
-          const nextRetry = new Date(Date.now() + backoffMs).toISOString();
-          await syncQueueRepo.markFailed(
-            item.id,
-            err instanceof Error ? err.message : 'TEMPORARY_SERVER_ERROR',
-            nextRetry,
-          );
-        }
+        const backoffMs = Math.min(MAX_TRANSIENT_BACKOFF_MS, Math.pow(2, Math.min(item.retry_count, 20)) * 1000 + Math.random() * 500);
+        const nextRetry = new Date(Date.now() + backoffMs).toISOString();
+        await syncQueueRepo.markFailed(
+          item.id,
+          err instanceof Error ? err.message : 'TEMPORARY_SERVER_ERROR',
+          nextRetry,
+        );
       }
       throw err;
     }
@@ -575,8 +648,28 @@ export class SyncEngine {
       const ackedFor = sent.find((p) => p.id === ack.operation_id);
       if (!ackedFor) continue; // not an operation we sent: never trust it to change local state
       acknowledged.add(ack.operation_id);
-      const localId = ackedFor.entity_id;
+      let localId = ackedFor.entity_id;
       if (ack.status === 'synced' || ack.status === 'conflict_resolved') {
+        pushed++;
+        // The server matched this create/update to an existing row of the same payment and answered with THAT row's id.
+        // Adopt it, so later edits, deletes, attachments and other devices all address one record.
+        if (ackedFor.entity_type === 'transaction' && ackedFor.operation !== 'delete' && ack.entity_id && ack.entity_id !== localId) {
+          const before = await txRepo.getById(localId);
+          const canonicalHeld = await txRepo.getById(ack.entity_id);
+          if (before?.deleted_at && canonicalHeld && !canonicalHeld.deleted_at) {
+            // Deleted on the device while in flight, and the device still holds the payment's canonical row: the user removed
+            // a second copy. The kept row must not be deleted on the server; the copy is merged away locally.
+            await txRepo.adoptCanonicalId(localId, ack.entity_id, { discardCopyAttachments: true });
+            await syncQueueRepo.dequeue(ack.operation_id);
+            continue;
+          }
+          const outcome = await txRepo.adoptCanonicalId(localId, ack.entity_id);
+          if (outcome === 'merged') {
+            await syncQueueRepo.dequeue(ack.operation_id);
+            continue;
+          }
+          if (outcome === 'rekeyed') localId = ack.entity_id;
+        }
         if (ack.status === 'conflict_resolved') {
           conflicts++;
           // When server version wins or record was deleted on server,
@@ -585,7 +678,6 @@ export class SyncEngine {
             await txRepo.mergeRemoteTransaction(ack.winning_record, { forceServerWin: true });
           }
         }
-        pushed++;
         // Queue items are removed ONLY upon confirmed server acknowledgement
         const local = ackedFor.entity_type === 'transaction' && ackedFor.operation !== 'delete' ? await txRepo.getById(localId) : null;
         if (local?.deleted_at) {
@@ -597,32 +689,35 @@ export class SyncEngine {
             entity_type: 'transaction', entity_id: localId, operation: 'delete',
             payload: JSON.stringify({ id: localId, deleted_at: local.deleted_at, user_id: local.user_id, reference_id: local.reference_id ?? null, fingerprint: local.fingerprint ?? null }),
           });
-        } else {
-          await txRepo.updateSyncStatus(localId, 'synced', ack.server_version);
+          continue;
         }
-        const ackedItem = ackedFor;
-        if (ackedItem?.entity_type === 'budget') {
-          await db.runAsync("UPDATE budgets SET sync_status = 'synced' WHERE id = ?", localId);
-        } else if (ackedItem?.entity_type === 'merchant_alias') {
-          await db.runAsync("UPDATE merchant_aliases SET sync_status = 'synced' WHERE id = ?", localId);
-        } else if (ackedItem?.entity_type === 'expected_payment') {
-          await db.runAsync("UPDATE expected_payments SET sync_status = 'synced' WHERE id = ?", localId);
+        // Remove the queue item only if it still holds the change that was sent. An edit made while the request was in
+        // flight stays queued (as an update) and the row stays pending until THAT change is acknowledged too.
+        const settled = await syncQueueRepo.acknowledge(ack.operation_id, ackedFor.payload);
+        if (ackedFor.entity_type === 'transaction') {
+          if (settled) {
+            await txRepo.updateSyncStatus(localId, 'synced', ack.server_version);
+          } else if (ackedFor.operation !== 'delete') {
+            await txRepo.updateSyncStatus(localId, 'pending_update', ack.server_version);
+          }
+        } else if (settled) {
+          const table = { budget: 'budgets', merchant_alias: 'merchant_aliases', expected_payment: 'expected_payments' }[ackedFor.entity_type as string];
+          if (table) await db.runAsync(`UPDATE ${table} SET sync_status = 'synced' WHERE id = ?`, localId);
         }
-        await syncQueueRepo.dequeue(ack.operation_id);
       } else {
         const errorMsg = ack.error || 'Server rejected item';
         errors.push(`${localId}: ${errorMsg}`);
-        const item = ackedFor;
-        const retryCount = item ? item.retry_count + 1 : 1;
-
-        if (errorMsg.includes('Missing required') || errorMsg.includes('Forbidden') || retryCount >= MAX_RETRY_ATTEMPTS) {
-          // Permanent failure
+        if (isPermanentItemError(ack)) {
+          // The server REJECTED this exact change (invalid, forbidden, incomplete): resending it unchanged cannot succeed.
+          // It stays visible as failed, with the reason, until the user edits it or retries it explicitly.
           await syncQueueRepo.markFailed(ack.operation_id, errorMsg, PERMANENT_FAILURE_DATE);
-          await txRepo.updateSyncStatus(localId, 'failed');
+          if (ackedFor.entity_type === 'transaction') await txRepo.updateSyncStatus(localId, 'failed');
         } else {
-          const backoffMs = Math.min(300000, Math.pow(2, retryCount) * 1000 + Math.random() * 500);
-          const nextRetry = new Date(Date.now() + backoffMs).toISOString();
-          await syncQueueRepo.markFailed(ack.operation_id, errorMsg, nextRetry);
+          // The server FAILED to apply it (internal error, e.g. a schema problem it must fix): not a rejection. Keep the
+          // item queued and pending, with capped exponential backoff, so it syncs on its own once the server is fixed.
+          // Earlier builds parked these permanently after 10 attempts (how the 183-item backlog got stranded).
+          const backoffMs = Math.min(MAX_TRANSIENT_BACKOFF_MS, Math.pow(2, Math.min(ackedFor.retry_count + 1, 20)) * 1000 + Math.random() * 500);
+          await syncQueueRepo.markFailed(ack.operation_id, errorMsg, new Date(Date.now() + backoffMs).toISOString());
         }
       }
     }
@@ -823,7 +918,7 @@ export class SyncEngine {
    */
   public async retryFailedOperation(entityId: string): Promise<boolean> {
     const { syncQueueRepo, txRepo } = await this.getRepos();
-    const queue = await syncQueueRepo.peek(100);
+    const queue = await syncQueueRepo.peek(5000);
     const item = queue.find((q) => q.entity_id === entityId);
     if (!item) return false;
 
@@ -838,7 +933,7 @@ export class SyncEngine {
    */
   public async retryAllFailed(): Promise<number> {
     const { syncQueueRepo, txRepo } = await this.getRepos();
-    const queue = await syncQueueRepo.peek(100);
+    const queue = await syncQueueRepo.peek(5000);
     const failedItems = queue.filter(
       (q) => q.next_retry_at === PERMANENT_FAILURE_DATE || q.retry_count >= MAX_RETRY_ATTEMPTS,
     );

@@ -1,18 +1,22 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Alert, Image, ScrollView, Text, View } from 'react-native';
-import * as ImagePicker from 'expo-image-picker';
+import { Alert, Pressable, ScrollView, Text, View } from 'react-native';
 import { palette } from '../../theme';
-import { Camera, ImageIcon, MapPin, Phone, Trash } from '../../icons';
+import { Pencil, Phone } from '../../icons';
 import { Button, Chip, Input, Labeled, Sheet, TypeToggle, currencySymbol, formatPaise, type Colors } from '../ui/common';
 import { LocationPicker } from './LocationPicker';
 import { DateField } from '../ui/CalendarDatePicker';
 import { TimeField } from '../ui/TimePicker';
-import { notices } from '../ui/Toast';
-import { buildMerchantPhone, formatDateInput, formatTimeInput, parseLocalDateTime } from '../services/transactionDetails';
-import { deleteTransaction, getServiceDb, updateLedgerFields, updateTransactionDetails } from '../services/transactionService';
+import { notices, showToast } from '../ui/Toast';
+import { buildMerchantPhone, type LocationInput } from '../services/transactionDetails';
+import { formFromTransaction, planEdit, type EditFormState } from '../services/transactionEdit';
+import { deleteTransaction, getServiceDb, syncPendingTransactions, updateLedgerFields, updateTransactionDetails } from '../services/transactionService';
 import { rememberAlias } from '../services/merchantAliasService';
-import { attachReceipt, removeReceipt } from '../services/receiptService';
+import { removeReceipt } from '../services/receiptService';
 import { downloadReceipt, expoReceiptFs } from '../services/receiptFiles';
+import { commitAttachmentChanges, ensureLocalFile, getAttachments, refreshRemoteAttachments, removeAttachmentsForTransaction, toDraft, type DraftAttachment } from '../services/attachmentService';
+import { expoAttachmentApi, expoAttachmentFs } from '../services/attachmentFiles';
+import { AttachmentSection, EMPTY_DRAFT, draftChanges, draftIsDirty, type AttachmentDraft } from '../components/AttachmentSection';
+import { TransactionRepository } from '../db/repositories/transactionRepository';
 import { API_URL } from '../../auth';
 import type { CategoryView } from '../services/categoryService';
 import { KIND_LABELS, VERIFICATION_LABELS, sourceLabel } from '../services/ledgerRules';
@@ -21,9 +25,18 @@ import type { Direction, Session, TransactionEntity, TransactionKind } from '../
 const PAYMENT_METHODS = ['UPI', 'Card', 'Cash', 'Net banking', 'Other'];
 const DIAL_CODES = ['+91', '+1', '+44', '+971', '+65', '+61'];
 
-export function TransactionSheet({ tx, session, categories, colors, onClose, onChanged }: {
-  tx: TransactionEntity | null; session: Session | null; categories: CategoryView[]; colors: Colors; onClose: () => void; onChanged: () => void;
+export type TransactionSheetMode = 'view' | 'edit';
+
+/**
+ * An existing transaction. Opens as read-only Transaction Details; the pencil switches the SAME sheet to the edit form.
+ * Saving updates the same transaction id and returns to Details; cancelling (Cancel, close, Android back) discards the
+ * unsaved changes and returns to Details. New transactions never come here (they use the Add form).
+ */
+export function TransactionSheet({ tx, initialMode = 'view', session, categories, colors, onClose, onChanged }: {
+  tx: TransactionEntity | null; initialMode?: TransactionSheetMode; session: Session | null; categories: CategoryView[]; colors: Colors; onClose: () => void; onChanged: () => void;
 }) {
+  const [current, setCurrent] = useState<TransactionEntity | null>(tx);
+  const [mode, setMode] = useState<TransactionSheetMode>(initialMode);
   const [merchant, setMerchant] = useState('');
   const [amount, setAmount] = useState('');
   const [date, setDate] = useState('');
@@ -34,37 +47,100 @@ export function TransactionSheet({ tx, session, categories, colors, onClose, onC
   const [dial, setDial] = useState('+91');
   const [phone, setPhone] = useState('');
   const [error, setError] = useState('');
-  const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false);
   const [showMap, setShowMap] = useState(false);
-  const [receiptUri, setReceiptUri] = useState<string | null>(null);
+  /** The stored attachments as last loaded; the draft is reset to this on cancel. */
+  const [savedItems, setSavedItems] = useState<DraftAttachment[]>([]);
+  const [attachDraft, setAttachDraft] = useState<AttachmentDraft>(EMPTY_DRAFT);
+  const [attachLoading, setAttachLoading] = useState(false);
   const [kind, setKind] = useState<TransactionKind>('payment');
   const [bank, setBank] = useState('');
   const [last4, setLast4] = useState('');
+  const [note, setNote] = useState('');
+  /** Location change made in this edit, applied only by "Save changes": undefined = untouched, null = remove. */
+  const [locDraft, setLocDraft] = useState<LocationInput | null | undefined>(undefined);
+  const [markReviewed, setMarkReviewed] = useState(false);
+
+  /** Puts the saved values of `t` into the edit fields (prefill, and cancel): every unsaved change is dropped. */
+  const fillForm = (t: TransactionEntity) => {
+    const f = formFromTransaction(t, DIAL_CODES);
+    setMerchant(f.merchant); setAmount(f.amount); setDate(f.date); setTime(f.time);
+    setDirection(f.direction); setCategory(f.category); setPayment(f.payment); setError('');
+    setKind(f.kind); setBank(f.bank); setLast4(f.last4); setDial(f.dial); setPhone(f.phone);
+    setNote(f.note); setLocDraft(undefined); setMarkReviewed(false);
+  };
 
   const id = tx?.id;
   useEffect(() => {
     if (!tx) return;
-    setMerchant(tx.counterparty); setAmount(String(tx.amount_paise / 100)); setDate(formatDateInput(tx.transaction_date)); setTime(formatTimeInput(tx.transaction_date));
-    setDirection(tx.direction); setCategory(tx.category); setPayment(tx.payment_method ?? null); setError(''); setNote('');
-    setKind(tx.txn_kind ?? 'payment'); setBank(tx.bank_name ?? ''); setLast4(tx.account_last4 ?? '');
-    const p = tx.merchant_phone ?? '';
-    const known = [...DIAL_CODES].sort((x, y) => y.length - x.length).find((c) => p.startsWith(c));
-    if (!p) { setDial('+91'); setPhone(''); } else if (known) { setDial(known); setPhone(p.slice(known.length)); } else { setDial('+91'); setPhone(p); }
-    setReceiptUri(tx.receipt_local_path ?? null);
-    // Receipt added on another device: fetch it into private storage the first time it is opened (needs internet).
-    if (!tx.receipt_local_path && tx.receipt_remote_id && session) {
-      void downloadReceipt(API_URL, session, tx.id, tx.receipt_remote_id).then(async (path) => {
-        // device-private path: written directly, never queued for sync
-        getServiceDb().runAsync('UPDATE transactions SET receipt_local_path = ? WHERE id = ?', path, tx.id).catch(() => undefined);
-        setReceiptUri(path);
-      }).catch(() => undefined);
-    }
+    setCurrent(tx); setMode(initialMode); fillForm(tx);
+    void loadAttachments(tx);
   }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /**
+   * Existing attachments: the ones on this device first (works offline), then anything added or removed on another device,
+   * then cloud-only files are downloaded once into permanent storage. The old single receipt (earlier versions) is shown as
+   * an attachment too, so nothing a person attached before disappears.
+   */
+  const loadAttachments = async (t: TransactionEntity) => {
+    const db = getServiceDb();
+    const api = expoAttachmentApi(API_URL);
+    const legacy = (): DraftAttachment[] => (t.receipt_local_path || t.receipt_remote_id
+      ? [{ key: `legacy-${t.id}`, source: 'legacy', type: 'photo', uri: t.receipt_local_path ?? null }] : []);
+    const setUri = (key: string, uri: string) => {
+      setSavedItems((list) => list.map((x) => (x.key === key ? { ...x, uri } : x)));
+      setAttachDraft((d) => ({ ...d, items: d.items.map((x) => (x.key === key ? { ...x, uri } : x)) }));
+    };
+    const show = async () => {
+      const saved = (await getAttachments(db, t.id)).map(toDraft);
+      const items = [...legacy(), ...saved];
+      setSavedItems(items);
+      setAttachDraft((d) => (draftIsDirty(d) ? d : { items, removed: [] }));
+      return saved;
+    };
+    setAttachDraft(EMPTY_DRAFT); setAttachLoading(true);
+    try {
+      let saved = await show();
+      if (session && t.user_id === session.user.id) {
+        if (await refreshRemoteAttachments(db, expoAttachmentFs, api, session, t.id).catch(() => false)) saved = await show();
+        for (const item of saved.filter((x) => !x.uri && x.attachmentId)) {
+          const path = await ensureLocalFile(db, expoAttachmentFs, api, session, item.attachmentId!).catch(() => null);
+          if (path) setUri(item.key, path);
+        }
+        // Receipt added on another device by an earlier version: fetch it into private storage the first time.
+        if (!t.receipt_local_path && t.receipt_remote_id) {
+          void downloadReceipt(API_URL, session, t.id, t.receipt_remote_id).then((path) => {
+            getServiceDb().runAsync('UPDATE transactions SET receipt_local_path = ? WHERE id = ?', path, t.id).catch(() => undefined); // device-private path, never synced
+            setUri(`legacy-${t.id}`, path);
+          }).catch(() => undefined);
+        }
+      }
+    } finally {
+      setAttachLoading(false);
+    }
+  };
+
+  /** Re-reads the saved transaction (after a save or an immediately-applied change) so Details shows what is stored. */
+  const refresh = async (): Promise<TransactionEntity | null> => {
+    if (!current) return null;
+    const fresh = await new TransactionRepository(getServiceDb()).getById(current.id).catch(() => null);
+    if (fresh) setCurrent(fresh);
+    return fresh;
+  };
 
   const typeCats = useMemo(() => categories.filter((c) => c.type === direction).sort((a, b) => Number(b.name.toLowerCase() === category.toLowerCase()) - Number(a.name.toLowerCase() === category.toLowerCase())), [categories, direction, category]);
   const phoneCheck = buildMerchantPhone(phone, dial);
-  if (!tx) return null;
+  const t = current;
+  if (!tx || !t) return null;
+
+  const startEdit = () => { fillForm(t); setAttachDraft({ items: savedItems, removed: [] }); setMode('edit'); };
+  /** Cancel: nothing unsaved is kept; back to Details. */
+  const cancelEdit = () => { fillForm(t); setAttachDraft({ items: savedItems, removed: [] }); setShowMap(false); setMode('view'); };
+  const backToDetails = async () => {
+    const fresh = await refresh();
+    if (fresh) await loadAttachments(fresh);
+    setMode('view');
+  };
 
   // Switching type moves the amount between income and expense totals; keep the category valid for the new type.
   const chooseDirection = (d: Direction) => {
@@ -75,75 +151,111 @@ export function TransactionSheet({ tx, session, categories, colors, onClose, onC
 
   const save = async () => {
     setError('');
-    const value = Number(amount);
-    // Only rewrite the stored timestamp when the person actually changed the date or time; otherwise the original
-    // instant (including seconds) is left exactly as it was.
-    const whenChanged = date !== formatDateInput(tx.transaction_date) || time !== formatTimeInput(tx.transaction_date);
-    const iso = whenChanged ? parseLocalDateTime(date, time) : null;
-    if (!Number.isFinite(value) || value <= 0) { setError('Enter an amount greater than zero.'); return; }
-    if (whenChanged && !iso) { setError('Select a valid date and time.'); return; }
-    if (!phoneCheck.ok) { setError(phoneCheck.error); return; }
-    if (last4.trim() && !/^\d{3,4}$/.test(last4.trim())) { setError('Account: enter only the last 3 or 4 digits.'); return; }
+    const cat = categories.find((c) => c.type === direction && c.name.toLowerCase() === category.toLowerCase()) ?? categories.find((c) => c.name.toLowerCase() === category.toLowerCase());
+    const form: EditFormState = {
+      direction, merchant, amount, date, time, category, categoryId: cat && !cat.isCustom ? null : cat?.id ?? null,
+      payment, phone, dial, note, kind, bank, last4, location: locDraft, markReviewed,
+    };
+    // Only what changed is written; the stored timestamp keeps its exact instant unless the date or time was changed.
+    const planned = planEdit(t, form);
+    if (!planned.ok) { setError(planned.error); return; }
+    const attachmentsDirty = draftIsDirty(attachDraft);
+    if (!planned.changed && !attachmentsDirty) { setShowMap(false); setMode('view'); return; } // nothing to save
     setBusy(true);
     try {
-      const cat = categories.find((c) => c.type === direction && c.name.toLowerCase() === category.toLowerCase()) ?? categories.find((c) => c.name.toLowerCase() === category.toLowerCase());
-      await updateTransactionDetails(tx.id, {
-        direction,
-        counterparty: merchant, amount: value, ...(iso ? { transaction_date: iso } : {}), category, category_id: cat && !cat.isCustom ? null : cat?.id ?? null,
-        payment_method: payment, merchantPhone: { number: phone, dialCode: dial },
-      }, session);
-      const bankValue = bank.trim() || null; const last4Value = last4.trim() || null;
-      if (kind !== (tx.txn_kind ?? 'payment') || bankValue !== (tx.bank_name ?? null) || last4Value !== (tx.account_last4 ?? null)) {
-        await updateLedgerFields(tx.id, { txn_kind: kind, bank_name: bankValue, account_last4: last4Value }, session);
+      // Same transaction id: an update, never a new record. Synced by the existing engine.
+      if (planned.plan.details) await updateTransactionDetails(t.id, planned.plan.details, session);
+      if (planned.plan.ledger) await updateLedgerFields(t.id, planned.plan.ledger, session);
+      // Attachment changes apply to this same transaction id. Only removed items are removed.
+      if (attachmentsDirty) {
+        const res = await commitAttachmentChanges(getServiceDb(), expoAttachmentFs, session, t.id, draftChanges(attachDraft),
+          { remove: () => removeReceipt(getServiceDb(), expoReceiptFs, session, t.id) });
+        if (res.failed > 0) showToast(`${res.failed} attachment change${res.failed === 1 ? '' : 's'} could not be saved. Try again.`, 'warning', 'attach-failed');
+        if (session) void syncPendingTransactions(session).catch(() => undefined);
       }
       onChanged();
       notices.localSave('edit', !!session);
-      const merchantChanged = merchant.trim() !== tx.counterparty;
-      const categoryChanged = category !== tx.category && direction === tx.direction;
+      const before = t;
+      await backToDetails();
+      const merchantChanged = merchant.trim() !== before.counterparty;
+      const categoryChanged = category !== before.category && direction === before.direction;
       if (session && (merchantChanged || categoryChanged)) {
         Alert.alert(
           'Remember this merchant?',
-          merchantChanged ? `Future transactions from "${tx.counterparty}" will be named "${merchant.trim()}"${categoryChanged ? ` in ${category}` : ''}. Existing transactions are not changed.`
-            : `Future transactions from "${tx.counterparty}" will use ${category}. Existing transactions are not changed.`,
-          [{ text: 'Not now', style: 'cancel', onPress: onClose },
-            { text: 'Remember', onPress: () => { void rememberAlias(getServiceDb(), session.user.id, tx.counterparty, merchant.trim(), categoryChanged ? category : undefined).catch(() => undefined).finally(onClose); } }],
+          merchantChanged ? `Future transactions from "${before.counterparty}" will be named "${merchant.trim()}"${categoryChanged ? ` in ${category}` : ''}. Existing transactions are not changed.`
+            : `Future transactions from "${before.counterparty}" will use ${category}. Existing transactions are not changed.`,
+          [{ text: 'Not now', style: 'cancel' },
+            { text: 'Remember', onPress: () => { void rememberAlias(getServiceDb(), session.user.id, before.counterparty, merchant.trim(), categoryChanged ? category : undefined).catch(() => undefined); } }],
         );
-      } else onClose();
+      }
     } catch (e) { setError(e instanceof Error ? e.message : 'Could not save.'); }
     finally { setBusy(false); }
   };
 
-  const pickReceipt = async (source: 'camera' | 'gallery') => {
-    setNote('');
-    try {
-      const perm = source === 'camera' ? await ImagePicker.requestCameraPermissionsAsync() : await ImagePicker.requestMediaLibraryPermissionsAsync();
-      if (!perm.granted) { setNote(`${source === 'camera' ? 'Camera' : 'Photo'} permission was not granted. You can continue without a photo.`); return; }
-      const res = source === 'camera' ? await ImagePicker.launchCameraAsync({ quality: 0.7 }) : await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 0.7 });
-      if (res.canceled || !res.assets[0]) return;
-      setReceiptUri(await attachReceipt(getServiceDb(), expoReceiptFs, session, tx.id, res.assets[0].uri));
-      onChanged();
-    } catch (e) { setNote(e instanceof Error ? e.message : 'Could not attach the photo.'); }
-  };
-
-  const clearReceipt = async () => {
-    try { await removeReceipt(getServiceDb(), expoReceiptFs, session, tx.id); setReceiptUri(null); onChanged(); } catch (e) { setNote(e instanceof Error ? e.message : 'Could not remove.'); }
-  };
-
   const confirmDelete = () => Alert.alert('Delete transaction?', 'This removes it from your history and, when signed in, from your other devices.', [
     { text: 'Cancel', style: 'cancel' },
-    { text: 'Delete', style: 'destructive', onPress: () => { void deleteTransaction(tx.id, session).then(() => { onChanged(); onClose(); }); } },
+    { text: 'Delete', style: 'destructive', onPress: () => { void deleteTransaction(t.id, session).then(async () => {
+      await removeAttachmentsForTransaction(getServiceDb(), expoAttachmentFs, session, t.id).catch(() => undefined);
+      onChanged(); onClose();
+    }); } },
   ]);
 
-  const hasLoc = tx.location_lat != null && tx.location_lng != null;
+  const hasLoc = t.location_lat != null && t.location_lng != null;
+  const statusLine = `${sourceLabel(t)} · ${VERIFICATION_LABELS[t.verification_status ?? 'verified']} · ${t.user_id ? (t.sync_status === 'synced' ? 'Synced' : 'Waiting to sync') : 'Stored on this device only'}`;
+  const amountHeader = (d: Direction) => <>
+    <Text style={{ fontSize: 30, fontWeight: '700', color: d === 'income' ? palette.accentText : palette.expenseText, marginBottom: 4, fontVariant: ['tabular-nums'] }}>{d === 'income' ? '+' : '-'}{formatPaise(t.amount_paise)}</Text>
+    <Text style={{ color: colors.muted, marginBottom: 16 }}>{statusLine}</Text>
+  </>;
+
+  // ---------------------------------------------------------------- Transaction Details (read-only)
+  if (mode === 'view') {
+    const when = new Date(t.transaction_date);
+    const rows: [string, string | null | undefined][] = [
+      ['Type', t.direction === 'income' ? 'Income' : 'Expense'],
+      ['Category', t.category],
+      ['Date', when.toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' })],
+      ['Time', when.toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit' })],
+      ['Payment method', t.payment_method],
+      ['Counts as', (t.txn_kind ?? 'payment') !== 'payment' ? KIND_LABELS[t.txn_kind!] : null],
+      ['Bank', t.bank_name ? `${t.bank_name}${t.account_last4 ? ` ··${t.account_last4}` : ''}` : t.account_last4 ? `Account ··${t.account_last4}` : null],
+      ['Seen in', t.payment_app],
+      ['Merchant mobile', t.merchant_phone],
+      ['Location', hasLoc ? [t.location_name || 'Pinned location', t.location_address].filter(Boolean).join('\n') : null],
+      ['Note', t.description],
+      ['Reference', t.reference_id],
+    ];
+    const edit = <Pressable onPress={startEdit} hitSlop={12} accessibilityRole="button" accessibilityLabel="Edit transaction"
+      style={({ pressed }) => [{ width: 40, height: 40, borderRadius: 20, borderWidth: 1, alignItems: 'center', justifyContent: 'center', borderColor: colors.border, backgroundColor: colors.card, opacity: pressed ? 0.7 : 1 }]}>
+      <Pencil color={palette.accentText} size={18} />
+    </Pressable>;
+    return <Sheet visible onClose={onClose} title={t.counterparty} colors={colors} headerAction={edit}>
+      {amountHeader(t.direction)}
+      <View style={{ borderRadius: 14, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.card, paddingHorizontal: 14 }}>
+        {rows.filter(([, v]) => v && String(v).trim()).map(([label, value], i, all) => <View key={label} style={{ flexDirection: 'row', paddingVertical: 12, borderBottomWidth: i === all.length - 1 ? 0 : 1, borderBottomColor: colors.border, gap: 12 }}>
+          <Text style={{ color: colors.muted, width: 118, fontSize: 13 }}>{label}</Text>
+          <Text style={{ color: colors.text, flex: 1, fontSize: 14, fontWeight: '600' }} selectable>{value}</Text>
+        </View>)}
+      </View>
+      <AttachmentSection draft={attachDraft} onChange={setAttachDraft} colors={colors} signedIn={!!session} loading={attachLoading} readOnly />
+      <Text style={{ color: colors.muted, fontSize: 12, marginTop: 18 }}>Created {new Date(t.created_at).toLocaleString('en-IN')}</Text>
+    </Sheet>;
+  }
+
+  // ---------------------------------------------------------------- Edit Transaction
+  /** The location the edit form shows: the unsaved change if there is one, otherwise the saved location. */
+  const editLoc: LocationInput | null = locDraft !== undefined ? locDraft
+    : hasLoc ? { lat: t.location_lat!, lng: t.location_lng!, name: t.location_name, address: t.location_address } : null;
   const footer = <>
     {error ? <Text style={{ color: palette.expenseText, marginBottom: 8 }}>{error}</Text> : null}
-    <Button title="Save changes" onPress={() => void save()} busy={busy} />
+    <View style={{ flexDirection: 'row', gap: 10 }}>
+      <View style={{ flex: 1 }}><Button title="Cancel" kind="ghost" onPress={cancelEdit} disabled={busy} /></View>
+      <View style={{ flex: 2 }}><Button title="Save changes" onPress={() => void save()} busy={busy} /></View>
+    </View>
   </>;
-  return <Sheet visible onClose={onClose} title={tx.counterparty} colors={colors} footer={footer}>
-    <Text style={{ fontSize: 30, fontWeight: '700', color: direction === 'income' ? palette.accentText : palette.expenseText, marginBottom: 4, fontVariant: ['tabular-nums'] }}>{direction === 'income' ? '+' : '-'}{formatPaise(tx.amount_paise)}</Text>
-    <Text style={{ color: colors.muted, marginBottom: 16 }}>{sourceLabel(tx)} · {VERIFICATION_LABELS[tx.verification_status ?? 'verified']} · {tx.user_id ? (tx.sync_status === 'synced' ? 'Synced' : 'Waiting to sync') : 'Stored on this device only'}</Text>
+  return <Sheet visible onClose={cancelEdit} title="Edit transaction" colors={colors} footer={footer}>
+    {amountHeader(direction)}
 
-    <Labeled label="TYPE" colors={colors} hint={direction !== tx.direction ? `Will be saved as ${direction === 'income' ? 'income' : 'an expense'}.` : undefined}><TypeToggle value={direction} onChange={chooseDirection} colors={colors} /></Labeled>
+    <Labeled label="TYPE" colors={colors} hint={direction !== t.direction ? `Will be saved as ${direction === 'income' ? 'income' : 'an expense'}.` : undefined}><TypeToggle value={direction} onChange={chooseDirection} colors={colors} /></Labeled>
     <Labeled label="MERCHANT" colors={colors}><Input colors={colors} value={merchant} onChangeText={setMerchant} accessibilityLabel="Merchant" /></Labeled>
     <Labeled label={`AMOUNT (${currencySymbol()})`} colors={colors}><Input colors={colors} value={amount} onChangeText={setAmount} keyboardType="decimal-pad" accessibilityLabel="Amount" /></Labeled>
     <View style={{ flexDirection: 'row', gap: 10 }}>
@@ -154,7 +266,10 @@ export function TransactionSheet({ tx, session, categories, colors, onClose, onC
     <Labeled label="CATEGORY" colors={colors}>
       <ScrollView horizontal showsHorizontalScrollIndicator={false}>{typeCats.map((c) => <Chip key={c.id} label={c.name} active={category.toLowerCase() === c.name.toLowerCase()} color={c.color} onPress={() => setCategory(c.name)} colors={colors} />)}</ScrollView>
     </Labeled>
-    {(tx.verification_status === 'needs_review' || tx.verification_status === 'detected') && !tx.possible_duplicate_of ? <View style={{ marginBottom: 14 }}><Button title="Mark as reviewed" kind="ghost" onPress={() => { void updateLedgerFields(tx.id, { verification_status: 'verified' }, session).then(() => { onChanged(); onClose(); }).catch(() => setError('Could not save.')); }} /></View> : null}
+    {(t.verification_status === 'needs_review' || t.verification_status === 'detected') && !t.possible_duplicate_of ? <View style={{ marginBottom: 14 }}>
+      <Button title={markReviewed ? 'Will be marked as reviewed' : 'Mark as reviewed'} kind="ghost" onPress={() => setMarkReviewed((v) => !v)} />
+      {markReviewed ? <Text style={{ color: palette.accentText, fontSize: 12, marginTop: 4 }}>Applied with "Save changes". Tap again to undo.</Text> : null}
+    </View> : null}
     <Labeled label="COUNTS AS" colors={colors} hint={kind === 'transfer' ? 'Left out of income and expenses.' : kind === 'refund' || kind === 'reversal' ? 'Money back: not counted as income.' : undefined}>
       <ScrollView horizontal showsHorizontalScrollIndicator={false}>{(Object.keys(KIND_LABELS) as TransactionKind[]).map((k) => <Chip key={k} label={KIND_LABELS[k]} active={kind === k} onPress={() => setKind(k)} colors={colors} />)}</ScrollView>
     </Labeled>
@@ -162,7 +277,7 @@ export function TransactionSheet({ tx, session, categories, colors, onClose, onC
       <View style={{ flex: 2 }}><Labeled label="BANK" colors={colors}><Input colors={colors} value={bank} onChangeText={setBank} placeholder="Unknown" maxLength={60} accessibilityLabel="Bank" /></Labeled></View>
       <View style={{ flex: 1 }}><Labeled label="LAST 4" colors={colors}><Input colors={colors} value={last4} onChangeText={setLast4} placeholder="Unknown" keyboardType="number-pad" maxLength={4} accessibilityLabel="Account last 4 digits" /></Labeled></View>
     </View>
-    {tx.payment_app ? <Text style={{ color: colors.muted, marginBottom: 14 }}>Seen in {tx.payment_app}. The app does not show which bank paid.</Text> : null}
+    {t.payment_app ? <Text style={{ color: colors.muted, marginBottom: 14 }}>Seen in {t.payment_app}. The app does not show which bank paid.</Text> : null}
     <Labeled label="PAYMENT METHOD (OPTIONAL)" colors={colors}>
       <ScrollView horizontal showsHorizontalScrollIndicator={false}>{PAYMENT_METHODS.map((m) => <Chip key={m} label={m} active={payment === m} onPress={() => setPayment(payment === m ? null : m)} colors={colors} />)}</ScrollView>
     </Labeled>
@@ -177,32 +292,39 @@ export function TransactionSheet({ tx, session, categories, colors, onClose, onC
       {phone ? <Text onPress={() => setPhone('')} style={{ color: palette.accentText, fontWeight: '700', marginTop: 6 }}>Clear number</Text> : null}
     </Labeled>
 
-    <Labeled label="LOCATION (OPTIONAL)" colors={colors}>
-      {hasLoc ? <View style={{ marginBottom: 8 }}><Text style={{ color: colors.text, fontWeight: '700' }}>{tx.location_name || 'Pinned location'}</Text>{tx.location_address ? <Text style={{ color: colors.muted, fontSize: 12 }}>{tx.location_address}</Text> : null}</View> : <Text style={{ color: colors.muted, marginBottom: 8 }}>No location. Velnora never assumes where a payment happened.</Text>}
+    <Labeled label="LOCATION (OPTIONAL)" colors={colors} hint={locDraft !== undefined ? 'Location change is saved with "Save changes".' : undefined}>
+      {editLoc ? <View style={{ marginBottom: 8 }}><Text style={{ color: colors.text, fontWeight: '700' }}>{editLoc.name || 'Pinned location'}</Text>{editLoc.address ? <Text style={{ color: colors.muted, fontSize: 12 }}>{editLoc.address}</Text> : null}</View> : <Text style={{ color: colors.muted, marginBottom: 8 }}>No location. Velnora never assumes where a payment happened.</Text>}
       <View style={{ flexDirection: 'row', gap: 10 }}>
-        <View style={{ flex: 1 }}><Button title={hasLoc ? 'Edit location' : 'Add location'} kind="ghost" onPress={() => setShowMap(true)} /></View>
-        {hasLoc ? <View style={{ flex: 1 }}><Button title="Remove" kind="ghost" onPress={() => { void updateTransactionDetails(tx.id, { location: null }, session).then(onChanged); }} /></View> : null}
+        <View style={{ flex: 1 }}><Button title={editLoc ? 'Edit location' : 'Add location'} kind="ghost" onPress={() => setShowMap(true)} /></View>
+        {editLoc ? <View style={{ flex: 1 }}><Button title="Remove" kind="ghost" onPress={() => setLocDraft(null)} /></View> : null}
       </View>
     </Labeled>
 
-    <Labeled label="RECEIPT / PHOTO (OPTIONAL)" colors={colors}>
-      {receiptUri ? <Image source={{ uri: receiptUri }} style={{ width: '100%', height: 200, borderRadius: 14, marginBottom: 8, backgroundColor: colors.card }} resizeMode="cover" accessibilityLabel="Receipt photo" /> : null}
-      <View style={{ flexDirection: 'row', gap: 10 }}>
-        <View style={{ flex: 1 }}><Button title={receiptUri ? 'Retake' : 'Take photo'} kind="ghost" onPress={() => void pickReceipt('camera')} /></View>
-        <View style={{ flex: 1 }}><Button title={receiptUri ? 'Replace' : 'Gallery'} kind="ghost" onPress={() => void pickReceipt('gallery')} /></View>
-      </View>
-      {receiptUri ? <Text onPress={() => void clearReceipt()} style={{ color: palette.expenseText, fontWeight: '700', marginTop: 6 }}>Remove photo</Text> : null}
-      {note ? <Text style={{ color: colors.muted, marginTop: 6 }}>{note}</Text> : null}
-      <Text style={{ color: colors.muted, fontSize: 12, marginTop: 6 }}>{session ? 'Kept on this device and uploaded to your account when online.' : 'Guest photos stay on this device.'}</Text>
+    <Labeled label="NOTE (OPTIONAL)" colors={colors}>
+      <Input colors={colors} value={note} onChangeText={setNote} placeholder="What was this for?" maxLength={500} accessibilityLabel="Note" />
     </Labeled>
+
+    <View style={{ marginTop: -18, marginBottom: 14 }}>
+      <AttachmentSection draft={attachDraft} onChange={setAttachDraft} colors={colors} signedIn={!!session} loading={attachLoading} receipt={{
+        session, categories, excludeId: t.id,
+        current: { direction, merchant, amount, date, time, category },
+        // Reviewed and confirmed in the receipt sheet; they become the form's values (still editable, saved only with "Save changes").
+        onApply: (r) => {
+          chooseDirection(r.direction); setMerchant(r.merchant); setAmount(r.amount); setDate(r.date); setTime(r.time);
+          if (categories.some((c) => c.type === r.direction && c.name.toLowerCase() === r.category.toLowerCase())) setCategory(r.category);
+          if (r.note) setNote(r.note); // a note typed in the review; an empty one never clears the existing note
+        },
+      }} />
+      {draftIsDirty(attachDraft) ? <Text style={{ color: palette.accentText, fontSize: 12, marginTop: 6 }}>Attachment changes are saved with "Save changes".</Text> : null}
+    </View>
 
     <Labeled label="DETAILS" colors={colors}>
-      <Text style={{ color: colors.muted, fontSize: 12 }}>Created {new Date(tx.created_at).toLocaleString('en-IN')}{tx.reference_id ? `\nReference ${tx.reference_id}` : ''}{tx.description ? `\n${tx.description}` : ''}</Text>
+      <Text style={{ color: colors.muted, fontSize: 12 }}>Created {new Date(t.created_at).toLocaleString('en-IN')}{t.reference_id ? `\nReference ${t.reference_id}` : ''}</Text>
     </Labeled>
 
     <Button title="Delete transaction" kind="danger" onPress={confirmDelete} />
 
-    <LocationPicker visible={showMap} colors={colors} initial={hasLoc ? { lat: tx.location_lat!, lng: tx.location_lng!, name: tx.location_name, address: tx.location_address } : null}
-      onCancel={() => setShowMap(false)} onConfirm={(loc) => { setShowMap(false); void updateTransactionDetails(tx.id, { location: loc }, session).then(onChanged).catch((e) => setError(e instanceof Error ? e.message : 'Could not save location.')); }} />
+    <LocationPicker visible={showMap} colors={colors} initial={editLoc}
+      onCancel={() => setShowMap(false)} onConfirm={(loc) => { setShowMap(false); setLocDraft(loc); }} />
   </Sheet>;
 }
