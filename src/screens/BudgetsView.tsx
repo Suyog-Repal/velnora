@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { ActivityIndicator, Alert, ScrollView, Text, View } from 'react-native';
+import { Alert, ScrollView, Text, View } from 'react-native';
+import { SkeletonDashboard } from '../ui/motion';
 import { palette, shade, tint } from '../../theme';
 import { type } from '../../typography';
 import { Button, Card, CategoryIcon, Chip, EmptyBlock, HeroSurface, Input, Labeled, Segmented, Sheet, currencySymbol, formatPaise, type Colors } from '../ui/common';
@@ -62,7 +63,7 @@ export function BudgetsView({ scope, categories, colors, refreshKey }: { scope: 
     <Segmented colors={colors} value={month === currentMonth() ? 'this' : 'prev'} onChange={(v) => { setLoading(true); setMonth(v === 'this' ? currentMonth() : previousMonth(currentMonth())); }} options={[['this', 'This month'], ['prev', 'Last month']] as const} />
     <Text style={{ ...type.captionStrong, color: colors.muted, marginTop: 10, marginBottom: 12 }}>{label.toUpperCase()}</Text>
 
-    {loading ? <View style={{ alignItems: 'center', paddingVertical: 48 }}><ActivityIndicator color={palette.emerald} /><Text style={{ ...type.caption, color: colors.muted, marginTop: 10 }}>Loading your budgets…</Text></View>
+    {loading ? <SkeletonDashboard cardColor={colors.card} borderColor={colors.border} />
     : loadError ? <View><EmptyBlock title="Couldn't load budgets" text={loadError} colors={colors} /><Button title="Try again" kind="ghost" onPress={() => { setLoading(true); void load(); }} /></View>
     : rows.length === 0 ? <EmptyBlock title="No budgets yet" text="Set a monthly limit overall or for a category. Progress is calculated from your saved expenses." colors={colors} />
     : <View>

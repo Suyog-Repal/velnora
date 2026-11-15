@@ -1,5 +1,7 @@
 import { memo, useMemo, useState } from 'react';
-import { ActivityIndicator, Pressable, ScrollView, Text, View } from 'react-native';
+import { Pressable, ScrollView, Text, View } from 'react-native';
+import { useProgressiveCount } from '../ui/perf';
+import { SkeletonRows } from '../ui/motion';
 import { palette, radius, tint } from '../../theme';
 import { typo } from '../../typography';
 import { ArrowDownLeft, ArrowUpRight, CalendarDays, MapPin, ReceiptIcon, Search, WifiOff, X } from '../../icons';
@@ -30,9 +32,11 @@ export function filterTransactions(items: TransactionEntity[], f: { type: 'all' 
     (!q || t.counterparty.toLowerCase().includes(q) || (t.description ?? '').toLowerCase().includes(q) || t.category.toLowerCase().includes(q)));
 }
 
-type RowProps = { tx: TransactionEntity; color: string; icon?: string | null; colors: Colors; onPress: () => void; /** Inside a grouped list card: flat row with a divider instead of its own bordered card. */ grouped?: boolean; last?: boolean };
+type RowProps = { tx: TransactionEntity; color: string; icon?: string | null; colors: Colors;
+  /** Prefer onOpen (stable reference): an inline onPress defeats the row memo and re-renders every row. */
+  onPress?: () => void; onOpen?: (tx: TransactionEntity) => void; /** Inside a grouped list card: flat row with a divider instead of its own bordered card. */ grouped?: boolean; last?: boolean };
 
-function TransactionCardBase({ tx, color, icon, colors, onPress, grouped, last }: RowProps) {
+function TransactionCardBase({ tx, color, icon, colors, onPress, onOpen, grouped, last }: RowProps) {
   const income = tx.direction === 'income';
   const time = new Date(tx.transaction_date).toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit' });
   const hasLoc = tx.location_lat != null && tx.location_lng != null;
@@ -45,7 +49,7 @@ function TransactionCardBase({ tx, color, icon, colors, onPress, grouped, last }
     ? { borderBottomWidth: last ? 0 : 1, borderBottomColor: colors.border, paddingVertical: 12 }
     : { backgroundColor: colors.card, borderColor: colors.border, borderWidth: 1, borderRadius: radius.lg, padding: 14, marginBottom: 10 };
   const amountText = `${income ? '+' : '-'}${formatPaise(tx.amount_paise)}`;
-  return <Pressable accessibilityRole="button" accessibilityLabel={`${income ? 'Income' : 'Expense'}, ${tx.counterparty}, ${tx.category}, ${formatPaise(tx.amount_paise)}${needsReview ? ', needs review' : ''}${syncLabel ? `, ${syncLabel.toLowerCase()}` : ''}`} onPress={onPress}
+  return <Pressable accessibilityRole="button" accessibilityLabel={`${income ? 'Income' : 'Expense'}, ${tx.counterparty}, ${tx.category}, ${formatPaise(tx.amount_paise)}${needsReview ? ', needs review' : ''}${syncLabel ? `, ${syncLabel.toLowerCase()}` : ''}`} onPress={onPress ?? (onOpen ? () => onOpen(tx) : undefined)}
     android_ripple={{ color: tint(palette.emerald, 0.1) }}
     style={[{ flexDirection: 'row', alignItems: 'center', minHeight: 64 }, base]}>
     <CategoryIcon icon={icon} label={tx.counterparty} color={color} />
@@ -70,11 +74,13 @@ function TransactionCardBase({ tx, color, icon, colors, onPress, grouped, last }
 }
 export const TransactionCard = memo(TransactionCardBase);
 
-export function TransactionsView({ transactions, categories, colors, loading, online, onOpen, onAdd, initialCategory }: {
+export function TransactionsView({ transactions, categories, colors, loading, online, onOpen, onAdd, initialCategory, initialType = 'all' }: {
   transactions: TransactionEntity[]; categories: CategoryView[]; colors: Colors; loading: boolean; online: boolean;
   onOpen: (tx: TransactionEntity) => void; onAdd: () => void; initialCategory?: string | null;
+  /** Home income / expense cards open the list already filtered to that type. */
+  initialType?: 'all' | 'income' | 'expense';
 }) {
-  const [type, setType] = useState<'all' | 'income' | 'expense'>('all');
+  const [type, setType] = useState<'all' | 'income' | 'expense'>(initialType);
   const [category, setCategory] = useState<string | null>(initialCategory ?? null);
   const [query, setQuery] = useState('');
   // Applied date range (inclusive, local calendar dates) and the draft being edited in the sheet.
@@ -94,6 +100,8 @@ export function TransactionsView({ transactions, categories, colors, loading, on
     }
     return out;
   }, [shown]);
+  // First rows paint immediately; the rest follow in small chunks (restarts on every new filter / search).
+  const limit = useProgressiveCount(shown.length, `${type}|${category ?? ''}|${query}|${range?.from ?? ''}|${range?.to ?? ''}|${transactions.length}`);
   const usedCategories = useMemo(() => [...new Set(transactions.filter((t) => !t.deleted_at).map((t) => t.category))].sort(), [transactions]);
 
   const filtersActive = type !== 'all' || !!category || !!range || !!query.trim();
@@ -123,13 +131,16 @@ export function TransactionsView({ transactions, categories, colors, loading, on
       <Text style={{ ...typo.caption, color: colors.muted }} accessibilityLiveRegion="polite">{shown.length} transaction{shown.length === 1 ? '' : 's'}{filtersActive ? ' (filtered)' : ''}</Text>
       {filtersActive ? <Pressable onPress={clearAll} accessibilityRole="button" accessibilityLabel="Clear all filters and search" hitSlop={8} style={{ minHeight: 32, justifyContent: 'center' }}><Text style={{ ...typo.link, color: palette.accentText }}>Clear all</Text></Pressable> : null}
     </View> : null}
-    {loading ? <View style={{ alignItems: 'center', paddingVertical: 40 }}><ActivityIndicator color={palette.emerald} /><Text style={{ ...typo.caption, color: colors.muted, marginTop: 10 }}>Reading your saved transactions…</Text></View>
+    {loading && transactions.length === 0 ? <SkeletonRows count={7} cardColor={colors.card} borderColor={colors.border} />
       : transactions.length === 0 ? <View><EmptyBlock title="No transactions yet" text="Add your first income or expense. Everything is saved on this device first." colors={colors} /><Pressable onPress={onAdd} accessibilityRole="button" style={{ minHeight: 44, justifyContent: 'center' }}><Text style={{ color: palette.accentText, fontWeight: '700', textAlign: 'center' }}>Add transaction</Text></Pressable></View>
       : shown.length === 0 ? <View><EmptyBlock title={query.trim() ? 'No results' : 'Nothing matches'} text={query.trim() ? `No transactions match "${query.trim()}" with the current filters.` : range ? `No transactions between ${formatRange(range.from, range.to)} with the current filters. Try a wider date range or clear the filters.` : 'Try a different search or clear the filters.'} colors={colors} /><Pressable onPress={clearAll} accessibilityRole="button" style={{ minHeight: 44, justifyContent: 'center' }}><Text style={{ color: palette.accentText, fontWeight: '700', textAlign: 'center' }}>Clear filters</Text></Pressable></View>
-      : groups.map((g) => <View key={g.label}><SectionLabel colors={colors} style={{ marginTop: 12 }}>{g.label}</SectionLabel>
+      : (() => { let budget = limit; return groups.map((g) => {
+        if (budget <= 0) return null;
+        const items = g.items.slice(0, budget); budget -= items.length;
+        return <View key={g.label}><SectionLabel colors={colors} style={{ marginTop: 12 }}>{g.label}</SectionLabel>
         <View style={{ backgroundColor: colors.card, borderColor: colors.border, borderWidth: 1, borderRadius: radius.lg, paddingHorizontal: 14, overflow: 'hidden' }}>
-          {g.items.map((t, i) => <TransactionCard key={t.id} grouped last={i === g.items.length - 1} tx={t} icon={iconOf.get(t.category.toLowerCase())} colors={colors} color={colorOf.get(t.category.toLowerCase()) ?? palette.navy} onPress={() => onOpen(t)} />)}
-        </View></View>)}
+          {items.map((t, i) => <TransactionCard key={t.id} grouped last={i === g.items.length - 1} tx={t} icon={iconOf.get(t.category.toLowerCase())} colors={colors} color={colorOf.get(t.category.toLowerCase()) ?? palette.navy} onOpen={onOpen} />)}
+        </View></View>; }); })()}
     <Sheet visible={showDates} onClose={() => setShowDates(false)} title="Filter by date" colors={colors} footer={<>
       <Button title="Apply" disabled={!draftCheck.ok} onPress={() => { if (draft.from && draft.to && draftCheck.ok) { setRange({ from: draft.from, to: draft.to }); setShowDates(false); } }} />
       <Button title="Clear filter" kind="ghost" onPress={() => { setRange(null); setDraft({ from: null, to: null }); setShowDates(false); }} />

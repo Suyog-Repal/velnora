@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
-import { Modal, Pressable, StyleSheet, Text, View, type GestureResponderEvent } from 'react-native';
+import { Animated, Modal, Pressable, StyleSheet, Text, View, type GestureResponderEvent } from 'react-native';
 import { palette } from '../../theme';
 import { Clock } from '../../icons';
 import { formatDisplayTime, localHm, parseHm, toHm } from '../services/dateUtils';
 import { readableOn, type Colors } from './common';
+import { useEntrance } from './motion';
 
 const SIZE = 248;
 const C = SIZE / 2;
@@ -56,10 +57,11 @@ export function TimePickerModal({ visible, value, colors, onCancel, onConfirm, t
   const seg = (label: string, active: boolean, onPress: () => void, a11y: string) => <Pressable onPress={onPress} accessibilityRole="button" accessibilityLabel={a11y} accessibilityState={{ selected: active }}
     style={[s.segBtn, { backgroundColor: active ? accent : colors.card, borderColor: active ? accent : colors.border }]}><Text style={{ color: active ? onAccent : colors.text, fontWeight: '600', fontSize: 13 }}>{label}</Text></Pressable>;
 
+  const entrance = useEntrance(visible); // shared dialog entrance: fade + gentle scale
   return <Modal visible={visible} transparent animationType="fade" statusBarTranslucent onRequestClose={onCancel}>
     <View style={s.backdrop}>
       <Pressable style={StyleSheet.absoluteFill} onPress={onCancel} accessibilityLabel="Close time picker" />
-      <View style={[s.dialog, { backgroundColor: colors.canvas, borderColor: colors.border }]}>
+      <Animated.View style={[s.dialog, { backgroundColor: colors.canvas, borderColor: colors.border }, entrance]}>
         <Text style={[s.dialogTitle, { color: colors.muted }]}>{title.toUpperCase()}</Text>
         <View style={s.readout}>
           <Pressable onPress={() => setMode('hour')} accessibilityRole="button" accessibilityLabel={`Hour ${hour12}`} style={[s.digits, { backgroundColor: mode === 'hour' ? `${accent}26` : colors.card }]}><Text style={[s.digitText, { color: mode === 'hour' ? accent : colors.text }]}>{pad(hour12)}</Text></Pressable>
@@ -93,7 +95,7 @@ export function TimePickerModal({ visible, value, colors, onCancel, onConfirm, t
           <Pressable onPress={onCancel} accessibilityRole="button" style={s.textBtn}><Text style={{ color: colors.muted, fontWeight: '700' }}>Cancel</Text></Pressable>
           <Pressable onPress={() => onConfirm(toHm(hour24, minute))} accessibilityRole="button" style={s.textBtn}><Text style={{ color: accent, fontWeight: '700' }}>OK</Text></Pressable>
         </View>
-      </View>
+      </Animated.View>
     </View>
   </Modal>;
 }
@@ -112,7 +114,7 @@ export function TimeField({ value, onChange, colors, title, accessibilityLabel }
 }
 
 const s = StyleSheet.create({
-  backdrop: { flex: 1, backgroundColor: 'rgba(8,24,39,0.55)', alignItems: 'center', justifyContent: 'center', padding: 20 },
+  backdrop: { flex: 1, backgroundColor: 'rgba(5,8,7,0.55)', alignItems: 'center', justifyContent: 'center', padding: 20 },
   dialog: { width: '100%', maxWidth: 340, borderRadius: 24, borderWidth: StyleSheet.hairlineWidth, padding: 18, alignItems: 'center' },
   dialogTitle: { fontSize: 12, fontWeight: '600', letterSpacing: 1, alignSelf: 'flex-start' },
   readout: { flexDirection: 'row', alignItems: 'center', marginTop: 10, marginBottom: 16 },

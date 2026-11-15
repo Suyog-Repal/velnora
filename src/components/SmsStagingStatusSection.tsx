@@ -1,3 +1,4 @@
+import { palette } from '../../theme';
 import { useEffect, useState } from 'react';
 import { AppState, Pressable, StyleSheet, Text, View } from 'react-native';
 import { isNotificationAccessGranted, isSmsDetectionAvailable, openNotificationAccessSettings } from '../../sms';
@@ -42,7 +43,7 @@ export function SmsStagingStatusSection({ userId, colors, refreshKey }: { userId
     {status.isEmpty
       ? <Text style={[styles.caption, { color: colors.muted }]}>No SMS need attention.</Text>
       : <>
-        {status.dead > 0 && <Text style={styles.warn}>{status.dead} SMS could not be processed after repeated attempts.</Text>}
+        {status.dead > 0 && <Text style={[styles.warn, { color: palette.expenseText }]}>{status.dead} SMS could not be processed after repeated attempts.</Text>}
         {status.heldForOtherAccounts > 0 && <Text style={[styles.caption, { color: colors.muted }]}>{status.heldForOtherAccounts} SMS held for another account on this device.</Text>}
         {status.ownerless > 0 && <Text style={[styles.caption, { color: colors.muted }]}>{status.ownerless} SMS held because they arrived before any sign-in.</Text>}
       </>}
@@ -53,5 +54,5 @@ const styles = StyleSheet.create({
   box: { paddingVertical: 14, borderBottomWidth: 1, gap: 4 },
   title: { fontSize: 15, fontWeight: '700' },
   caption: { fontSize: 12 },
-  warn: { fontSize: 13, color: '#DC2626', fontWeight: '600' },
+  warn: { fontSize: 13, fontWeight: '600' }, // colour applied at render time (follows the theme)
 });

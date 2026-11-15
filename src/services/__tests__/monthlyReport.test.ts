@@ -11,6 +11,7 @@ import { buildCsv, buildMonthlyReport, csvCell, csvHeader, listReportMonths, pai
 import { donutSvg, escapeHtml, pieSlicesFor, renderReportHtml, reportPageCount, wrapLines } from '../monthlyReportHtml.ts';
 import { exportReportCsv, exportReportPdf, safeErrorCode, saveExportedFile, type ExportedFile, type ReportExportPort } from '../monthlyReportExport.ts';
 import { REPORT_LOGO_PNG_BASE64 } from '../reportLogo.ts';
+import { palette } from '../../../tokens.ts';
 import { categoryBreakdown } from '../analyticsService.ts';
 import { getCashFlowSummary } from '../cashFlowService.ts';
 import { monthRange } from '../budgetService.ts';
@@ -268,7 +269,9 @@ async function pdfHtmlContent() {
   // Branding: the real logo asset, embedded once.
   assert.equal(REPORT_LOGO_PNG_BASE64, readFileSync(new URL('../../../assets/android-icon-foreground.png', import.meta.url)).toString('base64'), 'embedded logo equals the app logo asset (run scripts/generate-report-logo.mjs if this fails)');
   assert.equal(html.split(REPORT_LOGO_PNG_BASE64).length - 1, 1);
-  assert.ok(html.includes('#10243E'), 'Velnora navy header');
+  // The report header follows the brand colour token (charcoal-green since the theme redesign; navy before it).
+  assert.ok(html.includes(palette.navy), 'Velnora brand header colour');
+  assert.ok(!html.includes('#10243E'), 'retired navy brand colour is no longer used');
 
   // Refund column appears only when the month has refunds.
   assert.ok(html.includes('<th class="num">Refund</th>'));

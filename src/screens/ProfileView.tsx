@@ -3,6 +3,7 @@ import { Alert, Animated, Easing, Pressable, Text, View } from 'react-native';
 import { ACCENTS, palette, type AccentId, type ThemeMode } from '../../theme';
 import { Bell, Check, ChevronRight, FileText, LogOut, MessageSquare, ReceiptIcon, Settings, Sliders, TagIcon as Tag, UserRound, WalletCards, WifiOff } from '../../icons';
 import { currencySymbol, formatPaise, type Colors } from '../ui/common';
+import { readableOn } from '../ui/common';
 import { useSmsPermission } from '../ui/useSmsPermission';
 import { useCapturePermissions } from '../ui/useCapturePermissions';
 import { countsAsExpense } from '../services/ledgerRules';
@@ -57,7 +58,7 @@ export function ModeSwitch({ mode, setMode, colors }: { mode: ThemeMode; setMode
   return <View onLayout={(e) => setWidth(e.nativeEvent.layout.width)} style={{ flexDirection: 'row', backgroundColor: colors.canvas, borderRadius: 14, padding: 4, borderWidth: 1, borderColor: colors.border }}>
     {inner > 0 ? <Animated.View pointerEvents="none" style={{ position: 'absolute', top: 4, left: 4, width: inner / MODES.length, bottom: 4, borderRadius: 11, backgroundColor: palette.emerald, transform: [{ translateX: x }] }} /> : null}
     {MODES.map((m) => <Pressable key={m.id} onPress={() => setMode(m.id)} accessibilityRole="button" accessibilityState={{ selected: mode === m.id }} style={{ flex: 1, minHeight: 40, alignItems: 'center', justifyContent: 'center' }}>
-      <Text style={{ fontWeight: '600', fontSize: 13, color: mode === m.id ? '#FFFFFF' : colors.muted }}>{m.label}</Text>
+      <Text style={{ fontWeight: '600', fontSize: 13, color: mode === m.id ? readableOn(palette.emerald) : colors.muted }}>{m.label}</Text>
     </Pressable>)}
   </View>;
 }
@@ -75,7 +76,7 @@ export function Swatch({ id, main, label, active, onPress, colors }: { id: Accen
 
 function Stat({ label, value, colors }: { label: string; value: string; colors: Colors }) {
   return <View style={{ flex: 1, backgroundColor: 'rgba(255,255,255,0.08)', borderRadius: 14, paddingVertical: 10, paddingHorizontal: 12 }}>
-    <Text style={{ color: '#B9C9D7', fontSize: 12, fontWeight: '600', letterSpacing: 0.6 }}>{label}</Text>
+    <Text style={{ color: palette.onNavyMuted, fontSize: 12, fontWeight: '600', letterSpacing: 0.6 }}>{label}</Text>
     <Text style={{ color: '#FFFFFF', fontSize: 16, fontWeight: '600', marginTop: 4 }} numberOfLines={1} adjustsFontSizeToFit>{value}</Text>
   </View>;
 }
@@ -142,11 +143,11 @@ export function ProfileView({ session, colors, mode, accent, transactions, onlin
           </Animated.View>
           <View style={{ flex: 1, marginLeft: 14 }}>
             <Text style={{ color: '#FFFFFF', fontSize: 22, fontWeight: '700' }} numberOfLines={1}>{name}</Text>
-            <Text style={{ color: '#C8D5DF', fontSize: 13, marginTop: 2 }} numberOfLines={1}>{session?.user.email ?? 'Not signed in'}</Text>
+            <Text style={{ color: palette.onNavySoft, fontSize: 13, marginTop: 2 }} numberOfLines={1}>{session?.user.email ?? 'Not signed in'}</Text>
           </View>
         </View>
         <View style={{ flexDirection: 'row', alignItems: 'center', alignSelf: 'flex-start', marginTop: 14, backgroundColor: 'rgba(255,255,255,0.1)', borderRadius: 14, paddingHorizontal: 10, paddingVertical: 5 }}>
-          {session && !online ? <WifiOff size={12} color="#FFFFFF" /> : <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: !session ? '#F5C451' : stats.pending > 0 ? '#F5C451' : '#4ADE80' }} />}
+          {session && !online ? <WifiOff size={12} color="#FFFFFF" /> : <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: !session ? '#E8B95F' : stats.pending > 0 ? '#E8B95F' : '#4ADE80' }} />}
           <Text style={{ color: '#FFFFFF', fontSize: 12, fontWeight: '700', marginLeft: 6 }}>{status}</Text>
         </View>
         <View style={{ flexDirection: 'row', gap: 10, marginTop: 16 }}>
@@ -160,7 +161,7 @@ export function ProfileView({ session, colors, mode, accent, transactions, onlin
       <View style={{ marginTop: 16, backgroundColor: colors.card, borderColor: colors.border, borderWidth: 1, borderRadius: 20, padding: 16 }}>
         <Text style={{ color: colors.text, fontWeight: '600', fontSize: 16 }}>Sync across devices</Text>
         <Text style={{ color: colors.muted, marginTop: 4, marginBottom: 12 }}>Your data is stored only on this device. Create a free account to back it up and sync. You choose what to import.</Text>
-        <Tap onPress={onCreate} style={{ backgroundColor: palette.emerald, borderRadius: 14, minHeight: 48, alignItems: 'center', justifyContent: 'center' }}><Text style={{ color: '#FFFFFF', fontWeight: '700' }}>Create an account</Text></Tap>
+        <Tap onPress={onCreate} style={{ backgroundColor: palette.emerald, borderRadius: 14, minHeight: 48, alignItems: 'center', justifyContent: 'center' }}><Text style={{ color: readableOn(palette.emerald), fontWeight: '700' }}>Create an account</Text></Tap>
         <Tap onPress={onSignIn} style={{ minHeight: 44, alignItems: 'center', justifyContent: 'center', marginTop: 4 }}><Text style={{ color: palette.accentText, fontWeight: '700' }}>I already have an account</Text></Tap>
       </View>
     </Reveal> : null}

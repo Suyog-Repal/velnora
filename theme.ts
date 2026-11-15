@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useColorScheme } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { ACCENTS, palette, type AccentId, type ThemeMode } from './tokens';
+import { ACCENTS, DEFAULT_THEME_MODE, palette, parseThemeMode, type AccentId, type ThemeMode } from './tokens';
 
 // Pure design tokens (palette, spacing, semantic roles, contrast helpers) live in tokens.ts so they are testable in Node.
 export * from './tokens';
@@ -9,18 +9,24 @@ export * from './tokens';
 export const themeStorageKey = 'velnora.theme.v1';
 export const accentStorageKey = 'velnora.accent.v1';
 
-export function useThemeMode(): [ThemeMode, (mode: ThemeMode) => void] {
-  const [mode, setMode] = useState<ThemeMode>('light');
+/**
+ * [mode, setMode, ready]. `ready` turns true once the stored preference has been read, so the app can wait for it
+ * instead of drawing the first frame in the default theme and then switching (no wrong-theme flash at startup).
+ */
+export function useThemeMode(): [ThemeMode, (mode: ThemeMode) => void, boolean] {
+  const [mode, setMode] = useState<ThemeMode>(DEFAULT_THEME_MODE);
+  const [ready, setReady] = useState(false);
   useEffect(() => {
     void AsyncStorage.getItem(themeStorageKey).then((value) => {
-      if (value === 'light' || value === 'dark' || value === 'system') setMode(value);
-    }).catch(() => undefined);
+      const stored = parseThemeMode(value);
+      if (stored) setMode(stored);
+    }).catch(() => undefined).finally(() => setReady(true));
   }, []);
   const update = (next: ThemeMode) => {
     setMode(next);
     void AsyncStorage.setItem(themeStorageKey, next).catch(() => undefined);
   };
-  return [mode, update];
+  return [mode, update, ready];
 }
 
 export function useAccent(): [AccentId, (id: AccentId) => void] {

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { AppState, Modal, Pressable, StyleSheet, Text, View } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { palette } from '../../theme';
+import { isDarkScheme, palette } from '../../theme';
 import { Bell, MessageSquare, WalletCards } from '../../icons';
 import {
   APP_NOTIFICATIONS_PROMPT_KEY, LAST_GRANTS_KEY, NOTIFICATION_ACCESS_PROMPT_KEY, SMS_PROMPT_STORAGE_KEY,
@@ -124,19 +124,23 @@ export function PermissionSetup({ enabled }: { enabled: boolean }) {
 
   const copy = step ? COPY[step] : null;
   const accent = palette.emerald;
+  const dark = isDarkScheme();
+  const surface = dark ? palette.darkElevated : palette.card;
+  const ink = dark ? palette.darkText : palette.ink;
+  const sub = dark ? palette.darkMuted : palette.muted;
   const Icon = copy?.icon ?? Bell;
   return <Modal visible={!!copy && !systemDialogOpen} transparent animationType="fade" statusBarTranslucent onRequestClose={() => { if (step) finish(step, 'declined'); }}>
     <View style={s.backdrop}>
-      <View style={s.card} accessibilityViewIsModal>
+      <View style={[s.card, { backgroundColor: surface, borderColor: dark ? palette.darkBorder : 'transparent', borderWidth: dark ? 1 : 0 }]} accessibilityViewIsModal>
         <View style={[s.iconWrap, { backgroundColor: `${accent}22` }]}><Icon size={30} color={accent} /></View>
-        <Text style={s.title} accessibilityRole="header">{copy?.title}</Text>
-        <Text style={s.body}>{waitingForSettings ? 'Notification access is still off. Turn on Velnora in the list, then come back.' : copy?.body}</Text>
-        <Text style={s.fine}>{copy?.fine}</Text>
+        <Text style={[s.title, { color: ink }]} accessibilityRole="header">{copy?.title}</Text>
+        <Text style={[s.body, { color: sub }]}>{waitingForSettings ? 'Notification access is still off. Turn on Velnora in the list, then come back.' : copy?.body}</Text>
+        <Text style={[s.fine, { color: sub }]}>{copy?.fine}</Text>
         <Pressable onPress={() => void allow()} accessibilityRole="button" style={({ pressed }) => [s.primary, { backgroundColor: accent, opacity: pressed ? 0.85 : 1 }]}>
           <Text style={{ color: readableOn(accent), fontWeight: '600', fontSize: 15 }}>{copy?.allow}</Text>
         </Pressable>
         <Pressable onPress={() => { if (step) finish(step, 'declined'); }} accessibilityRole="button" style={s.secondary}>
-          <Text style={{ color: palette.muted, fontWeight: '700' }}>Not now</Text>
+          <Text style={{ color: sub, fontWeight: '700' }}>Not now</Text>
         </Pressable>
       </View>
     </View>
@@ -144,7 +148,7 @@ export function PermissionSetup({ enabled }: { enabled: boolean }) {
 }
 
 const s = StyleSheet.create({
-  backdrop: { flex: 1, backgroundColor: 'rgba(8,24,39,0.6)', alignItems: 'center', justifyContent: 'center', padding: 22 },
+  backdrop: { flex: 1, backgroundColor: 'rgba(5,8,7,0.62)', alignItems: 'center', justifyContent: 'center', padding: 22 },
   card: { width: '100%', maxWidth: 380, borderRadius: 26, backgroundColor: '#FFFFFF', padding: 24, alignItems: 'center' },
   iconWrap: { width: 64, height: 64, borderRadius: 32, alignItems: 'center', justifyContent: 'center', marginBottom: 16 },
   title: { fontSize: 20, fontWeight: '700', color: palette.ink, textAlign: 'center' },

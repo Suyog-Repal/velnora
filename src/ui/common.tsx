@@ -3,13 +3,23 @@ import { Animated, Easing, Keyboard, KeyboardAvoidingView, Modal, Platform, Pres
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import NetInfo from '@react-native-community/netinfo';
 import Svg, { Circle, Defs, LinearGradient, Path, Stop } from 'react-native-svg';
-import { palette, radius, space, tint } from '../../theme';
+import { palette, radius, space, themeColors as buildThemeColors, tint } from '../../theme';
+/** Builds the Colors roles for a scheme from the central tokens (single source for App and tests). */
+export const themeColors = (dark: boolean): Required<Colors> => buildThemeColors(dark);
 import { type } from '../../typography';
+import { MOTION, useReduceMotion } from './motion';
 import { ArrowDownLeft, ArrowUpRight, CATEGORY_ICON_MAP, Search, X } from '../../icons';
 import type { Direction } from '../db/types';
 import { formatMinor } from './currency';
 
-export type Colors = { canvas: string; card: string; border: string; text: string; muted: string };
+/**
+ * Per-scheme colour roles passed to every screen. The first five are the original roles; the rest are the richer surfaces of
+ * the redesigned theme (optional so older call sites and tests that build a Colors object keep working).
+ */
+export type Colors = {
+  canvas: string; card: string; border: string; text: string; muted: string;
+  canvas2?: string; elevated?: string; input?: string; nav?: string; faint?: string;
+};
 
 export { currencySymbol } from './currency';
 export const formatPaise = (paise: number): string => formatMinor(paise);
@@ -40,7 +50,7 @@ function luminance(hex: string): number {
   const ch = [(n >> 16) & 255, (n >> 8) & 255, n & 255].map((v) => { const c = v / 255; return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; });
   return 0.2126 * ch[0] + 0.7152 * ch[1] + 0.0722 * ch[2];
 }
-const DARK_INK = '#0B1726';
+const DARK_INK = '#101211'; // charcoal ink (dark theme background) for text on bright fills
 /** White or dark ink, whichever has the higher contrast on `bg` (works for every accent and category colour). */
 export function readableOn(bg: string): string {
   const l = luminance(bg);
@@ -66,7 +76,7 @@ export function TypeToggle({ value, onChange, colors, expenseLabel = 'Expense', 
     const fg = active ? readableOn(fill) : colors.muted;
     return <Pressable key={d} onPress={() => onChange(d)} accessibilityRole="radio" accessibilityState={{ selected: active, checked: active }} accessibilityLabel={label}
       style={({ pressed }) => [ui.typeOption, { backgroundColor: active ? fill : colors.card, borderColor: active ? fill : colors.border, opacity: pressed ? 0.85 : 1 }]}>
-      <View style={[ui.typeIcon, { backgroundColor: active ? (fg === '#FFFFFF' ? 'rgba(255,255,255,0.18)' : 'rgba(11,23,38,0.12)') : 'transparent' }]}><Icon color={active ? fg : (d === 'expense' ? palette.danger : palette.emerald)} size={16} strokeWidth={2} /></View>
+      <View style={[ui.typeIcon, { backgroundColor: active ? (fg === '#FFFFFF' ? 'rgba(255,255,255,0.18)' : 'rgba(16,18,17,0.12)') : 'transparent' }]}><Icon color={active ? fg : (d === 'expense' ? palette.danger : palette.emerald)} size={16} strokeWidth={2} /></View>
       <Text style={{ color: active ? fg : colors.text, ...type.link }}>{label}</Text>
     </Pressable>;
   };
@@ -101,7 +111,7 @@ export function SectionLabel({ children, colors, style }: { children: string; co
 /** Search input with a visible focus state. */
 export function SearchField({ colors, value, onChangeText, placeholder, accessibilityLabel }: { colors: Colors; value: string; onChangeText: (t: string) => void; placeholder: string; accessibilityLabel?: string }) {
   const [focused, setFocused] = useState(false);
-  return <View style={[ui.search, { backgroundColor: colors.card, borderColor: focused ? palette.emerald : colors.border, borderWidth: focused ? 1.5 : 1 }]}>
+  return <View style={[ui.search, { backgroundColor: colors.input ?? colors.card, borderColor: focused ? palette.emerald : colors.border, borderWidth: focused ? 1.5 : 1 }]}>
     <Search size={18} color={focused ? palette.emerald : colors.muted} strokeWidth={2} />
     <TextInput value={value} onChangeText={onChangeText} placeholder={placeholder} placeholderTextColor={colors.muted} accessibilityLabel={accessibilityLabel ?? placeholder}
       onFocus={() => setFocused(true)} onBlur={() => setFocused(false)} returnKeyType="search" style={[ui.searchInput, { color: colors.text }]} />
@@ -123,7 +133,7 @@ export function Input({ colors, ...props }: TextInputProps & { colors: Colors })
   const [focused, setFocused] = useState(false);
   return <TextInput placeholderTextColor={colors.muted} {...props}
     onFocus={(e) => { setFocused(true); props.onFocus?.(e); }} onBlur={(e) => { setFocused(false); props.onBlur?.(e); }}
-    style={[ui.input, { borderColor: focused ? palette.emerald : colors.border, borderWidth: focused ? 1.5 : 1, backgroundColor: colors.card, color: colors.text }, props.style]} />;
+    style={[ui.input, { borderColor: focused ? palette.emerald : colors.border, borderWidth: focused ? 1.5 : 1, backgroundColor: colors.input ?? colors.card, color: colors.text }, props.style]} />;
 }
 
 /** True while the software keyboard is on screen. */
@@ -152,11 +162,14 @@ export function Sheet({ visible, onClose, title, colors, children, footer, heade
   const scrollRef = useRef<ComponentRef<typeof ScrollView>>(null);
   const contentRef = useRef<ComponentRef<typeof View>>(null);
   const rise = useRef(new Animated.Value(0)).current;
+  const reduceMotion = useReduceMotion();
   useEffect(() => {
     if (!visible) return;
+    rise.stopAnimation();
+    if (reduceMotion) { rise.setValue(1); return; }
     rise.setValue(0);
-    Animated.timing(rise, { toValue: 1, duration: 260, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start();
-  }, [visible, rise]);
+    Animated.timing(rise, { toValue: 1, duration: MOTION.sheet, easing: MOTION.easeOut, useNativeDriver: true }).start();
+  }, [visible, rise, reduceMotion]);
   // After the keyboard opens (and the sheet shrinks), bring the focused field back into view.
   useEffect(() => {
     if (!keyboard) return;
@@ -200,7 +213,7 @@ export const ui = StyleSheet.create({
   label: { ...type.label, marginBottom: 6 },
   hint: { ...type.caption, marginTop: 4 },
   input: { minHeight: 48, borderWidth: 1, borderRadius: radius.md, paddingHorizontal: 14, ...type.body },
-  backdrop: { flex: 1, backgroundColor: 'rgba(8,24,39,0.55)', justifyContent: 'flex-end' },
+  backdrop: { flex: 1, backgroundColor: 'rgba(5,8,7,0.55)', justifyContent: 'flex-end' },
   sheet: { borderTopLeftRadius: radius.xl + 2, borderTopRightRadius: radius.xl + 2, maxHeight: '92%', flexShrink: 1, overflow: 'hidden', borderWidth: StyleSheet.hairlineWidth, borderBottomWidth: 0 },
   sheetScroll: { flexGrow: 0, flexShrink: 1 },
   grabber: { alignSelf: 'center', width: 40, height: 4, borderRadius: 2, marginTop: 10 },
@@ -229,7 +242,6 @@ export function HeroSurface({ children, style, accessibilityLabel, onPress }: { 
     <Svg style={StyleSheet.absoluteFill} width="100%" height="100%" pointerEvents="none">
       <Defs><LinearGradient id="velnoraHero" x1="0" y1="0" x2="1" y2="1"><Stop offset="0" stopColor={palette.heroStart} /><Stop offset="1" stopColor={palette.heroEnd} /></LinearGradient></Defs>
       <Path d="M0 0H2000V2000H0Z" fill="url(#velnoraHero)" />
-      <Circle cx="92%" cy="6%" r="80" fill="#FFFFFF" fillOpacity={0.06} />
     </Svg>
     {children}
   </>;

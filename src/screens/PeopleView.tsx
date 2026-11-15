@@ -1,11 +1,12 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useState } from 'react';
 import { Alert, Pressable, ScrollView, Text, View } from 'react-native';
 import { palette, radius, tint } from '../../theme';
 import { typo } from '../../typography';
 import { ArrowDownLeft, ArrowUpRight } from '../../icons';
-import { Button, CategoryIcon, Chip, EmptyBlock, Initial, Input, Labeled, SearchField, Segmented, Sheet, currencySymbol, formatPaise, type Colors } from '../ui/common';
+import { Button, CategoryIcon, Chip, EmptyBlock, Initial, Input, Labeled, SearchField, Segmented, Sheet, currencySymbol, formatPaise, type Colors, readableOn } from '../ui/common';
 import { Reveal, Tap } from './ProfileView';
 import { TransactionCard } from './TransactionsView';
+import { useProgressiveCount } from '../ui/perf';
 import { aggregatePeople, personTransactions, totalsOf, type PersonAggregate } from '../services/peopleService';
 import {
   createExpected, deleteExpected, isOverdue, listExpected, markSettled, outstandingPaise, recordPayment, recordPaymentWithTransaction, summarizeExpected, updateExpected,
@@ -31,12 +32,30 @@ function Tile({ label, value, sub, color, colors, icon }: { label: string; value
   </View>;
 }
 
-export function PeopleView({ transactions, categories, session, colors, refreshKey, onOpenTx, onChanged, onAddTransaction }: {
+/** One person row. Memoised with a stable onOpen, so progressive list growth never re-renders rows already shown. */
+const PersonRow = memo(function PersonRow({ p, last, colors, onOpen }: { p: PersonAggregate; last: boolean; colors: Colors; onOpen: (key: string) => void }) {
+  return <Tap onPress={() => onOpen(p.key)} label={`${p.name}, ${p.count} transaction${p.count === 1 ? '' : 's'}`}
+            style={{ flexDirection: 'row', alignItems: 'center', minHeight: 64, paddingVertical: 12, borderBottomWidth: last ? 0 : 1, borderBottomColor: colors.border }}>
+            <Initial label={p.name} color={palette.emerald} size={40} />
+            <View style={{ flex: 1, marginHorizontal: 12, minWidth: 0 }}>
+              <Text numberOfLines={1} style={{ ...typo.cardTitle, color: colors.text }}>{p.name}</Text>
+              <Text numberOfLines={1} style={{ ...typo.caption, color: colors.muted, marginTop: 2 }}>{p.count} transaction{p.count === 1 ? '' : 's'} · last {fmtDate(p.lastAt)}</Text>
+            </View>
+            <View style={{ alignItems: 'flex-end', flexShrink: 0, maxWidth: '40%' }}>
+              {p.incomingPaise > 0 ? <Text style={{ color: palette.accentText, ...typo.amountSm }} numberOfLines={1} adjustsFontSizeToFit>+{formatPaise(p.incomingPaise)}</Text> : null}
+              {p.outgoingPaise > 0 ? <Text style={{ color: palette.expenseText, ...typo.amountSm }} numberOfLines={1} adjustsFontSizeToFit>-{formatPaise(p.outgoingPaise)}</Text> : null}
+            </View>
+  </Tap>;
+});
+
+export function PeopleView({ transactions, categories, session, colors, refreshKey, onOpenTx, onChanged, onAddTransaction, initialTab = 'people' }: {
   transactions: TransactionEntity[]; categories: CategoryView[]; session: Session | null; colors: Colors; refreshKey: number;
   onOpenTx: (tx: TransactionEntity) => void; onChanged: () => void; onAddTransaction: () => void;
+  /** Home "Expected Payment" shortcut opens the existing Expected section directly. */
+  initialTab?: 'people' | 'expected';
 }) {
   const scope = session?.user.id ?? null;
-  const [tab, setTab] = useState<'people' | 'expected'>('people');
+  const [tab, setTab] = useState<'people' | 'expected'>(initialTab);
   const [expected, setExpected] = useState<ExpectedPayment[]>([]);
   const [personKey, setPersonKey] = useState<string | null>(null);
   const [query, setQuery] = useState('');
@@ -49,7 +68,10 @@ export function PeopleView({ transactions, categories, session, colors, refreshK
 
   const people = useMemo(() => aggregatePeople(transactions), [transactions]);
   const all = useMemo(() => totalsOf(transactions), [transactions]);
-  const shown = people.filter((p) => !query.trim() || p.name.toLowerCase().includes(query.trim().toLowerCase()));
+  const q = query.trim().toLowerCase();
+  const shown = useMemo(() => (q ? people.filter((p) => p.name.toLowerCase().includes(q)) : people), [people, q]);
+  // First rows paint immediately; the rest follow in small chunks (restarts on a new search).
+  const limit = useProgressiveCount(shown.length, `${q}|${people.length}`);
   const person = people.find((p) => p.key === personKey) ?? null;
   const detail = expected.find((e) => e.id === detailId) ?? null;
   const summary = useMemo(() => summarizeExpected(expected), [expected]);
@@ -68,18 +90,7 @@ export function PeopleView({ transactions, categories, session, colors, refreshK
       {people.length === 0 ? <View><EmptyBlock title="No people yet" text="People appear here from the merchants and names on your transactions." colors={colors} /><Pressable onPress={onAddTransaction}><Text style={{ color: palette.accentText, fontWeight: '700', textAlign: 'center' }}>Add transaction</Text></Pressable></View>
         : shown.length === 0 ? <EmptyBlock title="No match" text="No one matches that search." colors={colors} />
         : <View style={{ backgroundColor: colors.card, borderColor: colors.border, borderWidth: 1, borderRadius: radius.lg, paddingHorizontal: 14, overflow: 'hidden' }}>
-          {shown.map((p, i) => <Tap key={p.key} onPress={() => setPersonKey(p.key)} label={`${p.name}, ${p.count} transaction${p.count === 1 ? '' : 's'}`}
-            style={{ flexDirection: 'row', alignItems: 'center', minHeight: 64, paddingVertical: 12, borderBottomWidth: i === shown.length - 1 ? 0 : 1, borderBottomColor: colors.border }}>
-            <Initial label={p.name} color={palette.emerald} size={40} />
-            <View style={{ flex: 1, marginHorizontal: 12, minWidth: 0 }}>
-              <Text numberOfLines={1} style={{ ...typo.cardTitle, color: colors.text }}>{p.name}</Text>
-              <Text numberOfLines={1} style={{ ...typo.caption, color: colors.muted, marginTop: 2 }}>{p.count} transaction{p.count === 1 ? '' : 's'} · last {fmtDate(p.lastAt)}</Text>
-            </View>
-            <View style={{ alignItems: 'flex-end', flexShrink: 0, maxWidth: '40%' }}>
-              {p.incomingPaise > 0 ? <Text style={{ color: palette.accentText, ...typo.amountSm }} numberOfLines={1} adjustsFontSizeToFit>+{formatPaise(p.incomingPaise)}</Text> : null}
-              {p.outgoingPaise > 0 ? <Text style={{ color: palette.expenseText, ...typo.amountSm }} numberOfLines={1} adjustsFontSizeToFit>-{formatPaise(p.outgoingPaise)}</Text> : null}
-            </View>
-          </Tap>)}
+          {shown.slice(0, limit).map((p, i) => <PersonRow key={p.key} p={p} last={i === shown.length - 1} colors={colors} onOpen={setPersonKey} />)}
         </View>}
     </View> : <ExpectedTab expected={expected} summary={summary} colors={colors} onAdd={() => setForm({})} onOpen={(e) => setDetailId(e.id)} />}
 
@@ -177,7 +188,7 @@ function PersonSheet({ person, transactions, categories, expected, colors, onClo
       <Chip label="Outgoing" active={dir === 'expense'} onPress={() => setDir('expense')} colors={colors} color={palette.danger} />
     </View>
     {list.length === 0 ? <EmptyBlock title="No transactions" text="Nothing matches this filter." colors={colors} /> : list.map((t) =>
-      <TransactionCard key={t.id} tx={t} colors={colors} color={colorOf.get(t.category.toLowerCase()) ?? palette.navy} icon={iconOf.get(t.category.toLowerCase())} onPress={() => onOpenTx(t)} />)}
+      <TransactionCard key={t.id} tx={t} colors={colors} color={colorOf.get(t.category.toLowerCase()) ?? palette.navy} icon={iconOf.get(t.category.toLowerCase())} onOpen={onOpenTx} />)}
   </Sheet>;
 }
 
@@ -242,7 +253,7 @@ function ExpectedDetail({ item, scope, colors, onClose, onChanged, onEdit }: { i
     {item.status === 'pending' ? <View style={{ marginBottom: 8 }}>
       <Labeled label={recv ? 'RECORD A PAYMENT RECEIVED' : 'RECORD A PAYMENT MADE'} colors={colors}><Input colors={colors} value={amount} onChangeText={setAmount} keyboardType="decimal-pad" /></Labeled>
       <Pressable onPress={() => setAsTx(!asTx)} accessibilityRole="checkbox" accessibilityState={{ checked: asTx }} style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
-        <View style={{ width: 22, height: 22, borderRadius: 6, borderWidth: 2, borderColor: palette.emerald, backgroundColor: asTx ? palette.emerald : 'transparent', alignItems: 'center', justifyContent: 'center', marginRight: 10 }}>{asTx ? <Text style={{ color: '#FFFFFF', fontWeight: '700' }}>✓</Text> : null}</View>
+        <View style={{ width: 22, height: 22, borderRadius: 6, borderWidth: 2, borderColor: palette.emerald, backgroundColor: asTx ? palette.emerald : 'transparent', alignItems: 'center', justifyContent: 'center', marginRight: 10 }}>{asTx ? <Text style={{ color: readableOn(palette.emerald), fontWeight: '700' }}>✓</Text> : null}</View>
         <Text style={{ color: colors.text, flex: 1 }}>Also add it as a {recv ? 'income' : 'expense'} transaction</Text></Pressable>
       <Button title="Record payment" onPress={() => void pay()} busy={busy} />
       <Button title="Mark as fully paid" kind="ghost" onPress={() => void run(() => markSettled(getServiceDb(), scope, item.id))} disabled={busy} />

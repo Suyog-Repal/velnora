@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ComponentRef, type ReactNode } from 'react';
+import { memo, useEffect, useMemo, useRef, useState, type ComponentRef, type ReactNode } from 'react';
 import { Pressable, ScrollView, Text, View } from 'react-native';
 import { ChevronLeft, ChevronRight } from '../../icons';
 import { palette, radius } from '../../theme';
@@ -12,6 +12,7 @@ import {
   type SeriesBucket, type SeriesView, type TxnPoint,
 } from '../services/cashFlowSeries';
 import type { Colors } from '../ui/common';
+import { readableOn } from '../ui/common';
 
 /** Day-wise / week-wise / month-wise income-vs-expense chart, drawn with plain Views (no chart dependency). */
 
@@ -28,7 +29,7 @@ function compact(paise: number): string {
   return String(Math.round(r));
 }
 
-export function SpendingOverview({ scope, refreshKey, colors, renderTransaction, transactions }: {
+export const SpendingOverview = memo(function SpendingOverview({ scope, refreshKey, colors, renderTransaction, transactions }: {
   scope: string | null;
   /** Changes whenever transactions are added / edited / deleted / synced, so the chart re-queries. */
   refreshKey: unknown;
@@ -113,7 +114,7 @@ export function SpendingOverview({ scope, refreshKey, colors, renderTransaction,
         const on = view === v.id;
         return <Pressable key={v.id} onPress={() => setView(v.id)} accessibilityRole="tab" accessibilityState={{ selected: on }}
           style={{ flex: 1, minHeight: 36, alignItems: 'center', justifyContent: 'center', borderRadius: 18, backgroundColor: on ? palette.emerald : 'transparent' }}>
-          <Text style={{ ...type.chip, color: on ? palette.navy : colors.muted }}>{v.label}</Text>
+          <Text style={{ ...type.chip, color: on ? readableOn(palette.emerald) : colors.muted }}>{v.label}</Text>
         </Pressable>;
       })}
     </View>
@@ -138,7 +139,7 @@ export function SpendingOverview({ scope, refreshKey, colors, renderTransaction,
         </View> : null}
       </>}
   </View>;
-}
+});
 
 function Summary({ label, value, dot, colors }: { label: string; value: string; dot: string; colors: Colors }) {
   return <View style={{ flex: 1, flexDirection: 'row', alignItems: 'center', gap: 8, padding: 10, borderRadius: 12, backgroundColor: colors.canvas, borderWidth: 1, borderColor: colors.border }}>

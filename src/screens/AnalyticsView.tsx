@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { ActivityIndicator, Text, View } from 'react-native';
+import { useCallback, useEffect, useMemo, useState, useRef } from 'react';
+import { Text, View } from 'react-native';
+import { SkeletonDashboard } from '../ui/motion';
 import { palette } from '../../theme';
 import { type } from '../../typography';
 import { Button, Card, EmptyBlock, Segmented, formatPaise, type Colors } from '../ui/common';
@@ -13,8 +14,10 @@ import { currentMonth, monthRange } from '../services/budgetService';
 import { getServiceDb } from '../services/transactionService';
 import { MonthlyReportView } from './MonthlyReportView';
 
-export function AnalyticsView({ scope, colors, refreshKey, onDrill }: { scope: string | null; colors: Colors; refreshKey: number; onDrill: (category: string) => void }) {
-  const [section, setSection] = useState<'spending' | 'report'>('spending');
+export function AnalyticsView({ scope, colors, refreshKey, onDrill, initialSection = 'spending' }: { scope: string | null; colors: Colors; refreshKey: number; onDrill: (category: string) => void;
+  /** Home "Monthly Report" shortcut opens the existing report section directly. */
+  initialSection?: 'spending' | 'report' }) {
+  const [section, setSection] = useState<'spending' | 'report'>(initialSection);
   const [period, setPeriod] = useState<'this' | 'prev' | 'custom'>('this');
   const [from, setFrom] = useState<string | null>(null); const [to, setTo] = useState<string | null>(null);
   const [customRange, setCustomRange] = useState<{ start: string; end: string; label: string } | null>(null);
@@ -22,6 +25,7 @@ export function AnalyticsView({ scope, colors, refreshKey, onDrill }: { scope: s
   const [data, setData] = useState<CategoryBreakdown | null>(null);
   const [icons, setIcons] = useState<Map<string, string | null>>(new Map());
   const [loading, setLoading] = useState(true);
+  const loadedRange = useRef('');
   const [loadError, setLoadError] = useState('');
   const [selected, setSelected] = useState<string | null>(null);
 
@@ -30,6 +34,9 @@ export function AnalyticsView({ scope, colors, refreshKey, onDrill }: { scope: s
     const range = period === 'this' ? monthRange(cm) : period === 'prev' ? monthRange(previousMonth(cm)) : customRange;
     setSelected(null); setLoadError('');
     if (!range) { setData(null); setLoading(false); return; }
+    const rangeKey = `${range.start}|${range.end}|${scope ?? ''}`;
+    if (loadedRange.current !== rangeKey) setData(null); // new period: placeholder, never the previous period's figures
+    loadedRange.current = rangeKey;
     setLoading(true);
     try {
       const db = getServiceDb();
@@ -65,7 +72,7 @@ export function AnalyticsView({ scope, colors, refreshKey, onDrill }: { scope: s
       <Button title="Apply" onPress={applyCustom} disabled={!from || !to || (from > to)} />
     </Card> : null}
 
-    {loading ? <View style={{ alignItems: 'center', paddingVertical: 48 }}><ActivityIndicator color={palette.emerald} /><Text style={{ ...type.caption, color: colors.muted, marginTop: 10 }}>Loading your spending…</Text></View>
+    {loading && !data ? <SkeletonDashboard cardColor={colors.card} borderColor={colors.border} />
       : loadError ? <View style={{ marginTop: 14 }}><EmptyBlock title="Couldn't load analytics" text={loadError} colors={colors} /><Button title="Try again" kind="ghost" onPress={() => void load()} /></View>
       : !data || data.isEmpty
         ? <View style={{ marginTop: 14 }}><EmptyBlock title={period === 'custom' && !customRange ? 'Pick a date range' : `No spending in ${periodLabel}`} text={period === 'custom' && !customRange ? 'Choose start and end dates to see where your money went.' : 'Add expenses and they will be grouped by category here.'} colors={colors} /></View>

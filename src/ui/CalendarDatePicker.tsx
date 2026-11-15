@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
-import { Modal, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Animated, Modal, Pressable, StyleSheet, Text, View } from 'react-native';
 import { palette } from '../../theme';
 import { CalendarDays, ChevronLeft, ChevronRight } from '../../icons';
 import { MONTH_NAMES, WEEKDAYS_SHORT, formatDisplayDate, isWithin, localYmd, monthCells, parseYmd, shiftMonth, toYmd, validateRange, type Ymd } from '../services/dateUtils';
 import { readableOn, type Colors } from './common';
+import { useEntrance } from './motion';
 
 /**
  * The one calendar used everywhere (add/edit transaction, Transactions date filter, Analytics custom range).
@@ -58,10 +59,11 @@ export function DatePickerModal({ visible, title = 'Select date', value, min, ma
 }) {
   const [draft, setDraft] = useState<Ymd | null>(value);
   useEffect(() => { if (visible) setDraft(value ?? (isWithin(localYmd(), min, max) ? localYmd() : min ?? max ?? localYmd())); }, [visible]); // eslint-disable-line react-hooks/exhaustive-deps
+  const entrance = useEntrance(visible); // shared dialog entrance: fade + gentle scale
   return <Modal visible={visible} transparent animationType="fade" statusBarTranslucent onRequestClose={onCancel}>
     <View style={s.backdrop}>
       <Pressable style={StyleSheet.absoluteFill} onPress={onCancel} accessibilityLabel="Close date picker" />
-      <View style={[s.dialog, { backgroundColor: colors.canvas, borderColor: colors.border }]}>
+      <Animated.View style={[s.dialog, { backgroundColor: colors.canvas, borderColor: colors.border }, entrance]}>
         <Text style={[s.dialogTitle, { color: colors.muted }]}>{title.toUpperCase()}</Text>
         <Text style={[s.dialogValue, { color: colors.text }]}>{draft ? formatDisplayDate(draft) : 'Select a date'}</Text>
         <CalendarDatePicker value={draft} onChange={setDraft} min={min} max={max} colors={colors} />
@@ -71,7 +73,7 @@ export function DatePickerModal({ visible, title = 'Select date', value, min, ma
           <Pressable onPress={onCancel} accessibilityRole="button" style={s.textBtn}><Text style={{ color: colors.muted, fontWeight: '700' }}>Cancel</Text></Pressable>
           <Pressable disabled={!draft} onPress={() => draft && onConfirm(draft)} accessibilityRole="button" style={[s.textBtn, { opacity: draft ? 1 : 0.4 }]}><Text style={{ color: palette.accentText, fontWeight: '700' }}>OK</Text></Pressable>
         </View>
-      </View>
+      </Animated.View>
     </View>
   </Modal>;
 }
@@ -123,7 +125,7 @@ const s = StyleSheet.create({
   grid: { flexDirection: 'row', flexWrap: 'wrap' },
   cell: { width: `${100 / 7}%`, aspectRatio: 1, alignItems: 'center', justifyContent: 'center' },
   day: { width: '86%', aspectRatio: 1, borderRadius: 999, alignItems: 'center', justifyContent: 'center' },
-  backdrop: { flex: 1, backgroundColor: 'rgba(8,24,39,0.55)', alignItems: 'center', justifyContent: 'center', padding: 20 },
+  backdrop: { flex: 1, backgroundColor: 'rgba(5,8,7,0.55)', alignItems: 'center', justifyContent: 'center', padding: 20 },
   dialog: { width: '100%', maxWidth: 380, borderRadius: 24, borderWidth: StyleSheet.hairlineWidth, padding: 18 },
   dialogTitle: { fontSize: 12, fontWeight: '600', letterSpacing: 1 },
   dialogValue: { fontSize: 22, fontWeight: '700', marginTop: 4, marginBottom: 12 },

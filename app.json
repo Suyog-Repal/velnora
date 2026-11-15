@@ -5,7 +5,7 @@
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
-    "userInterfaceStyle": "dark",
+    "userInterfaceStyle": "automatic",
     "ios": {
       "supportsTablet": true
     },
@@ -46,7 +46,10 @@
         {
           "locationWhenInUsePermission": "Velnora uses your location only when you tap 'Use my location' to place a pin for a transaction. It never tracks you in the background."
         }
-      ]
+      ],
+      "expo-secure-store",
+      "expo-sharing",
+      "expo-status-bar"
     ],
     "web": {
       "favicon": "./assets/favicon.png"

@@ -25,9 +25,13 @@ from app.auth import current_user
 from app.db.models import User as UserModel
 
 try:  # optional: better text. The service works without it.
-    import fitz  # type: ignore[import-not-found]  # PyMuPDF
+    # PyMuPDF. `pymupdf` is the supported module name (>= 1.24.3); the legacy `fitz` alias is deprecated in 2.x.
+    import pymupdf as fitz  # type: ignore[import-not-found]
 except Exception:  # pragma: no cover - depends on the environment
-    fitz = None
+    try:
+        import fitz  # type: ignore[import-not-found, no-redef]
+    except Exception:
+        fitz = None
 
 router = APIRouter(prefix="/api/v1/statements", tags=["statements"])
 

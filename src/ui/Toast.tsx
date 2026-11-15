@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Animated, Easing, StyleSheet, Text, View } from 'react-native';
 import { palette } from '../../theme';
+import { MOTION, useReduceMotion } from './motion';
 import { Check, WifiOff } from '../../icons';
 import { createSyncNotifier, type ToastKind } from '../services/syncNotices';
 
@@ -27,6 +28,9 @@ export function ToastHost({ bottom = 96 }: { bottom?: number }) {
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastShown = useRef<{ key: string; message: string; at: number } | null>(null);
 
+  const reduce = useReduceMotion();
+  const reduceRef = useRef(reduce);
+  reduceRef.current = reduce;
   useEffect(() => {
     listener = (t) => {
       const last = lastShown.current;
@@ -35,9 +39,10 @@ export function ToastHost({ bottom = 96 }: { bottom?: number }) {
       lastShown.current = { key: t.key, message: t.message, at: Date.now() };
       setItem(t);
       if (timer.current) clearTimeout(timer.current);
-      opacity.setValue(0);
-      Animated.timing(opacity, { toValue: 1, duration: 180, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start();
-      timer.current = setTimeout(() => Animated.timing(opacity, { toValue: 0, duration: 220, useNativeDriver: true }).start(({ finished }) => { if (finished) setItem(null); }), DURATION_MS);
+      opacity.stopAnimation();
+      opacity.setValue(reduceRef.current ? 1 : 0);
+      if (!reduceRef.current) Animated.timing(opacity, { toValue: 1, duration: MOTION.fast, easing: MOTION.easeOut, useNativeDriver: true }).start();
+      timer.current = setTimeout(() => Animated.timing(opacity, { toValue: 0, duration: reduceRef.current ? 0 : MOTION.base, useNativeDriver: true }).start(({ finished }) => { if (finished) setItem(null); }), DURATION_MS);
     };
     return () => { listener = null; if (timer.current) clearTimeout(timer.current); };
   }, [opacity]);
@@ -45,7 +50,7 @@ export function ToastHost({ bottom = 96 }: { bottom?: number }) {
   if (!item) return null;
   const warn = item.kind === 'warning';
   return <View pointerEvents="none" style={[s.wrap, { bottom }]}>
-    <Animated.View accessibilityLiveRegion="polite" accessibilityRole="alert" style={[s.toast, { opacity, backgroundColor: palette.navy, transform: [{ translateY: opacity.interpolate({ inputRange: [0, 1], outputRange: [12, 0] }) }] }]}>
+    <Animated.View accessibilityLiveRegion="polite" accessibilityRole="alert" style={[s.toast, { opacity, backgroundColor: palette.navy, transform: [{ translateY: opacity.interpolate({ inputRange: [0, 1], outputRange: [12, 0] }) }, { scale: opacity.interpolate({ inputRange: [0, 1], outputRange: [0.96, 1] }) }] }]}>
       {warn ? <WifiOff size={16} color="#F5C77E" /> : <Check size={16} color={palette.emerald} strokeWidth={3} />}
       <Text style={s.text}>{item.message}</Text>
     </Animated.View>

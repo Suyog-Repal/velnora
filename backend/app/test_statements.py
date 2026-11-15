@@ -120,7 +120,7 @@ def test_every_page_is_reported_and_a_page_that_cannot_be_read_is_named() -> Non
         def close(self):
             real.close()
 
-    import fitz  # the same library the endpoint uses
+    import pymupdf as fitz  # the same library the endpoint uses
 
     real = fitz.open(stream=pdf, filetype='pdf')
     original = statements.fitz.open
