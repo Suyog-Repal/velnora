@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState, type ComponentRef, type ReactNode } from 'react';
-import { Animated, Easing, Keyboard, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View, type TextInputProps, type TextStyle, type ViewStyle } from 'react-native';
+import { useEffect, useMemo, useRef, useState, type ComponentRef, type ReactNode } from 'react';
+import { Animated, Easing, Keyboard, KeyboardAvoidingView, Modal, PanResponder, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View, type TextInputProps, type TextStyle, type ViewStyle } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import NetInfo from '@react-native-community/netinfo';
 import Svg, { Circle, Defs, LinearGradient, Path, Stop } from 'react-native-svg';
@@ -152,24 +152,38 @@ export function useKeyboardVisible(): boolean {
 /**
  * Bottom sheet used for every form in the app.
  *
- * Keyboard handling (one mechanism only): the modal is drawn edge-to-edge, so Android does not resize it for the
- * keyboard; the full-screen KeyboardAvoidingView measures how much of it the keyboard covers and pads exactly that
- * much (0 if the window did resize). The sheet is capped at 92% of the remaining height, its body scrolls, and the
- * optional `footer` (primary action) sits outside the scroll area so it always stays above the keyboard.
+ * Keyboard handling: the modal is drawn edge-to-edge; KeyboardAvoidingView pads exactly the
+ * keyboard height. The sheet is capped at 92 % of the remaining height, its body scrolls, and
+ * the optional `footer` sits outside the scroll area so it always stays above the keyboard.
+ *
+ * Swipe-to-dismiss: a PanResponder on the grabber pill + header area tracks downward drags.
+ * The sheet follows the finger and dismisses when dy > 100 px or velocity > 0.5. If the
+ * gesture falls short it springs back. The ScrollView is never involved, so scroll and
+ * swipe never conflict. All enter/exit animations (including backdrop) are driven by `rise`
+ * and `dragY` so the Modal uses animationType="none".
  */
 export function Sheet({ visible, onClose, title, colors, children, footer, headerAction }: { visible: boolean; onClose: () => void; title: string; colors: Colors; children: ReactNode; footer?: ReactNode; /** Optional button shown left of the close button (e.g. edit). */ headerAction?: ReactNode }) {
   const keyboard = useKeyboardVisible();
   const scrollRef = useRef<ComponentRef<typeof ScrollView>>(null);
   const contentRef = useRef<ComponentRef<typeof View>>(null);
   const rise = useRef(new Animated.Value(0)).current;
+  const dragY = useRef(new Animated.Value(0)).current;
   const reduceMotion = useReduceMotion();
+  // Stable refs so the PanResponder (created once) always reads the latest callbacks/flags.
+  const onCloseRef = useRef(onClose);
+  useEffect(() => { onCloseRef.current = onClose; }, [onClose]);
+  const reduceMotionRef = useRef(reduceMotion);
+  useEffect(() => { reduceMotionRef.current = reduceMotion; }, [reduceMotion]);
+
   useEffect(() => {
+    dragY.setValue(0);
     if (!visible) return;
     rise.stopAnimation();
     if (reduceMotion) { rise.setValue(1); return; }
     rise.setValue(0);
     Animated.timing(rise, { toValue: 1, duration: MOTION.sheet, easing: MOTION.easeOut, useNativeDriver: true }).start();
-  }, [visible, rise, reduceMotion]);
+  }, [visible, rise, dragY, reduceMotion]);
+
   // After the keyboard opens (and the sheet shrinks), bring the focused field back into view.
   useEffect(() => {
     if (!keyboard) return;
@@ -180,15 +194,64 @@ export function Sheet({ visible, onClose, title, colors, children, footer, heade
     }, 80);
     return () => clearTimeout(t);
   }, [keyboard]);
-  // A Modal is its own Android window, so it needs its own SafeAreaProvider; without it the bottom inset reads 0 and the
-  // footer buttons slide under the system navigation bar.
-  return <Modal visible={visible} transparent animationType="fade" statusBarTranslucent navigationBarTranslucent onRequestClose={onClose}>
+
+  // Animated fade-out used by X button, backdrop tap, and Android back.
+  // Lives in a ref so it is stable and safely closes over the Animated.Value refs.
+  const animatedClose = useRef(() => {
+    if (reduceMotionRef.current) { dragY.setValue(0); onCloseRef.current(); return; }
+    rise.stopAnimation(); dragY.stopAnimation(); dragY.setValue(0);
+    Animated.timing(rise, { toValue: 0, duration: 200, useNativeDriver: true })
+      .start(() => { onCloseRef.current(); });
+  }).current;
+
+  // Swipe-down PanResponder — attached only to grabber + header, never to the ScrollView.
+  // onMoveShouldSetPanResponder (not onStart) means taps on header buttons work normally.
+  const panResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => false,
+      onMoveShouldSetPanResponder: (_, gs) => gs.dy > 5 && gs.dy > Math.abs(gs.dx),
+      onPanResponderGrant: () => { Keyboard.dismiss(); dragY.setValue(0); },
+      onPanResponderMove: (_, gs) => { if (gs.dy > 0) dragY.setValue(gs.dy); },
+      onPanResponderRelease: (_, gs) => {
+        if (gs.dy > 100 || (gs.vy > 0.5 && gs.dy > 10)) {
+          if (reduceMotionRef.current) { dragY.setValue(0); onCloseRef.current(); return; }
+          Animated.parallel([
+            Animated.timing(dragY, { toValue: 600, duration: 220, useNativeDriver: true, easing: Easing.in(Easing.cubic) }),
+            Animated.timing(rise, { toValue: 0, duration: 200, useNativeDriver: true }),
+          ]).start(() => { dragY.setValue(0); onCloseRef.current(); });
+        } else {
+          Animated.spring(dragY, { toValue: 0, useNativeDriver: true, tension: 65, friction: 9 }).start();
+        }
+      },
+      onPanResponderTerminate: () => {
+        Animated.spring(dragY, { toValue: 0, useNativeDriver: true, tension: 65, friction: 9 }).start();
+      },
+    })
+  ).current;
+
+  // Combined translateY: entrance slide (48 → 0 as rise goes 0 → 1) + live drag offset.
+  // rise and dragY are stable Animated.Value refs — deps never change so this runs once.
+  const sheetTranslateY = useMemo(
+    () => Animated.add(rise.interpolate({ inputRange: [0, 1], outputRange: [48, 0] }), dragY),
+    [rise, dragY],
+  );
+
+  // A Modal is its own Android window, so it needs its own SafeAreaProvider; without it the
+  // bottom inset reads 0 and footer buttons slide under the system navigation bar.
+  // animationType="none": all enter/exit animations are driven by 'rise' and 'dragY'.
+  return <Modal visible={visible} transparent animationType="none" statusBarTranslucent navigationBarTranslucent onRequestClose={animatedClose}>
     <SafeAreaProvider style={{ flex: 1 }}>
-    <KeyboardAvoidingView behavior="padding" style={ui.backdrop}>
-      <Pressable style={StyleSheet.absoluteFill} onPress={onClose} accessibilityLabel="Close" />
-      <Animated.View style={[ui.sheet, { backgroundColor: colors.canvas, borderColor: colors.border, opacity: rise, transform: [{ translateY: rise.interpolate({ inputRange: [0, 1], outputRange: [48, 0] }) }] }]}>
-        <View style={[ui.grabber, { backgroundColor: colors.border }]} />
-        <View style={ui.sheetHeader}><Text style={[ui.sheetTitle, { color: colors.text, flex: 1 }]} numberOfLines={1}>{title}</Text>{headerAction ? <View style={{ marginRight: 10 }}>{headerAction}</View> : null}<Pressable onPress={onClose} hitSlop={14} accessibilityRole="button" accessibilityLabel="Close" style={[ui.closeButton, { backgroundColor: colors.card, borderColor: colors.border }]}><X color={colors.muted} size={18} /></Pressable></View>
+    <KeyboardAvoidingView behavior="padding" style={{ flex: 1, justifyContent: 'flex-end' }}>
+      {/* Backdrop — opacity is tied to 'rise' so it fades in on open and out on any close path */}
+      <Animated.View style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(5,8,7,0.55)', opacity: rise }]} pointerEvents="none" />
+      {/* Tapping outside the sheet triggers animated close */}
+      <Pressable style={StyleSheet.absoluteFill} onPress={animatedClose} accessibilityLabel="Close" />
+      <Animated.View style={[ui.sheet, { backgroundColor: colors.canvas, borderColor: colors.border, opacity: rise, transform: [{ translateY: sheetTranslateY }] }]}>
+        {/* Swipe-down target: grabber pill + header row only — never conflicts with scroll */}
+        <View {...panResponder.panHandlers}>
+          <View style={[ui.grabber, { backgroundColor: colors.border }]} />
+          <View style={ui.sheetHeader}><Text style={[ui.sheetTitle, { color: colors.text, flex: 1 }]} numberOfLines={1}>{title}</Text>{headerAction ? <View style={{ marginRight: 10 }}>{headerAction}</View> : null}<Pressable onPress={animatedClose} hitSlop={14} accessibilityRole="button" accessibilityLabel="Close" style={[ui.closeButton, { backgroundColor: colors.card, borderColor: colors.border }]}><X color={colors.muted} size={18} /></Pressable></View>
+        </View>
         <ScrollView ref={scrollRef} style={ui.sheetScroll} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" contentContainerStyle={{ paddingHorizontal: 20, paddingTop: 14, paddingBottom: footer ? 12 : 28 }}>
           <View ref={contentRef} collapsable={false}>{children}</View>
         </ScrollView>
