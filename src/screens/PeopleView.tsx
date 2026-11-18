@@ -4,6 +4,7 @@ import { palette, radius, tint } from '../../theme';
 import { typo } from '../../typography';
 import { ArrowDownLeft, ArrowUpRight } from '../../icons';
 import { Button, CategoryIcon, Chip, EmptyBlock, Initial, Input, Labeled, SearchField, Segmented, Sheet, currencySymbol, formatPaise, type Colors, readableOn } from '../ui/common';
+import { DateField } from '../ui/CalendarDatePicker';
 import { Reveal, Tap } from './ProfileView';
 import { TransactionCard } from './TransactionsView';
 import { useProgressiveCount } from '../ui/perf';
@@ -226,7 +227,12 @@ function ExpectedForm({ state, people, scope, colors, onClose, onSaved }: {
     </Labeled>
     <Labeled label={`AMOUNT (${currencySymbol()})`} colors={colors}><Input colors={colors} value={amount} onChangeText={setAmount} keyboardType="decimal-pad" placeholder="0.00" /></Labeled>
     <Labeled label="REASON / NOTE (OPTIONAL)" colors={colors}><Input colors={colors} value={note} onChangeText={setNote} placeholder="e.g. Dinner split, loan, rent share" maxLength={200} /></Labeled>
-    <Labeled label="EXPECTED BY (OPTIONAL)" colors={colors} hint="Format YYYY-MM-DD. Leave empty if there's no date."><Input colors={colors} value={due} onChangeText={setDue} placeholder="YYYY-MM-DD" autoCapitalize="none" /></Labeled>
+    <Labeled label="EXPECTED BY (OPTIONAL)" colors={colors} hint="Tap to pick a date. Leave empty if there's no date.">
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+        <View style={{ flex: 1 }}><DateField value={due || null} onChange={(ymd) => setDue(ymd)} colors={colors} title="Expected by" placeholder="Select date (optional)" /></View>
+        {due ? <Pressable onPress={() => setDue('')} hitSlop={8} accessibilityRole="button" accessibilityLabel="Clear date" style={{ padding: 6 }}><Text style={{ color: colors.muted, fontSize: 20, lineHeight: 20 }}>×</Text></Pressable> : null}
+      </View>
+    </Labeled>
     {error ? <Text style={{ color: palette.expenseText, marginBottom: 8 }}>{error}</Text> : null}
     <Button title={edit ? 'Save changes' : 'Add'} onPress={() => void save()} busy={busy} />
   </Sheet>;
