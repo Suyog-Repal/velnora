@@ -1,23 +1,22 @@
 import type { Session } from '../db/types.ts';
+import { refreshFailureKind } from './sessionRefresh.ts';
 
-export type RestoreStatus = 'refreshed' | 'offline' | 'expired';
+export type RestoreStatus = 'refreshed' | 'offline' | 'unverified' | 'expired';
 export interface RestoreResult { session: Session | null; status: RestoreStatus }
-
-/** Server answers that definitively mean "this refresh token is no longer valid". */
-const REJECTION_STATUSES = new Set([400, 401, 403, 422]);
 
 /**
  * Restores a stored session at launch without destroying it on a transient failure.
  * - refresh succeeds            -> new session
  * - network / 5xx / unknown     -> keep the stored session (local data stays usable; refresh is retried later)
- * - server rejects the token    -> session ended (caller clears tokens only; local data is never touched)
+ * - 401 from the refresh        -> session ended (caller clears tokens only; local data is never touched)
+ * - 400 / 403 / 422             -> 'unverified': keep the stored session (the server did not judge the token); the app tells the person
  */
 export async function restoreSession(stored: Session, refresh: (s: Session) => Promise<Session>): Promise<RestoreResult> {
   try {
     return { session: await refresh(stored), status: 'refreshed' };
   } catch (err) {
-    const status = typeof err === 'object' && err !== null && 'status' in err ? (err as { status?: number }).status : undefined;
-    if (typeof status === 'number' && REJECTION_STATUSES.has(status)) return { session: null, status: 'expired' };
-    return { session: stored, status: 'offline' };
+    const kind = refreshFailureKind(err);
+    if (kind === 'rejected') return { session: null, status: 'expired' };
+    return { session: stored, status: kind === 'unverifiable' ? 'unverified' : 'offline' };
   }
 }

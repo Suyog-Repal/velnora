@@ -11,14 +11,31 @@ export interface RefreshableSession {
   user: { id: string };
 }
 
-const REJECTION_STATUSES = new Set([400, 401, 403, 422]);
+/**
+ * What a failed refresh means. ONLY a 401 from the refresh endpoint ends the session: it is the server's own answer for "this
+ * refresh token is revoked, expired or unknown". Anything else says nothing certain about the token:
+ *   rejected      401: sign in again
+ *   unverifiable  400 / 403 / 422: the server (or something in front of it, e.g. a proxy or firewall) refused the request
+ *                 without judging the token. Keep the session, stay offline-first, and let the person retry or sign in again.
+ *   transient     network failure, timeout, 5xx, 429, anything else: keep the session and try again later
+ */
+export type RefreshFailureKind = 'rejected' | 'unverifiable' | 'transient';
+
+export function refreshFailureKind(err: unknown): RefreshFailureKind {
+  const status = typeof err === 'object' && err !== null && 'status' in err ? (err as { status?: number }).status : undefined;
+  if (status === 401) return 'rejected';
+  if (status === 400 || status === 403 || status === 422) return 'unverifiable';
+  return 'transient';
+}
 
 export interface SessionRefresherDeps<S extends RefreshableSession> {
   loadStored: () => Promise<S | null>;
   refresh: (session: S) => Promise<S>; // must persist the new session
   onRefreshed?: (session: S) => void;
-  /** The server definitively rejected the refresh token: the user must sign in again. */
+  /** The server answered 401 to the refresh: the user must sign in again. */
   onRejected?: (session: S) => void;
+  /** The refresh got 400 / 403 / 422: the session is kept; the app shows "Can't verify your sign-in". */
+  onUnverifiable?: (session: S) => void;
 }
 
 export function createSessionRefresher<S extends RefreshableSession>(deps: SessionRefresherDeps<S>) {
@@ -38,8 +55,9 @@ export function createSessionRefresher<S extends RefreshableSession>(deps: Sessi
           deps.onRefreshed?.(next);
           return next;
         } catch (err) {
-          const status = typeof err === 'object' && err !== null && 'status' in err ? (err as { status?: number }).status : undefined;
-          if (typeof status === 'number' && REJECTION_STATUSES.has(status)) deps.onRejected?.(base);
+          const kind = refreshFailureKind(err);
+          if (kind === 'rejected') deps.onRejected?.(base);
+          else if (kind === 'unverifiable') deps.onUnverifiable?.(base);
           return null;
         }
       } finally {

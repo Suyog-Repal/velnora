@@ -4,7 +4,7 @@ import { runMigrations } from '../../db/migrations.ts';
 import { TransactionRepository } from '../../db/repositories/transactionRepository.ts';
 import { SyncQueueRepository } from '../../db/repositories/syncQueueRepository.ts';
 import { SyncEngine } from '../syncEngine.ts';
-import { createSessionRefresher } from '../sessionRefresh.ts';
+import { createSessionRefresher, refreshFailureKind } from '../sessionRefresh.ts';
 
 // Fake backend: only the CURRENT token is accepted, anything else is the real 401 shape.
 let validToken = 'fresh-token';
@@ -122,6 +122,40 @@ async function main() {
     const other = createSessionRefresher({ loadStored: async () => ({ ...fresh, user: { id: 'someone-else' } }), refresh: async () => { calls++; return fresh; } });
     assert.equal(await other(expired), null);
     assert.equal(calls, 0);
+  }
+
+  // 7. Only a 401 from refresh ends the session; 400 / 403 / 422 keep it and are reported separately; anything else is transient.
+  {
+    assert.equal(refreshFailureKind({ status: 401 }), 'rejected');
+    for (const status of [400, 403, 422]) assert.equal(refreshFailureKind({ status }), 'unverifiable', String(status));
+    for (const err of [{ status: 500 }, { status: 502 }, { status: 503 }, { status: 429 }, { status: 404 }, { kind: 'connection' }, { kind: 'timeout' }, new Error('boom'), null, undefined, 'text']) {
+      assert.equal(refreshFailureKind(err), 'transient', JSON.stringify(err));
+    }
+    for (const [status, rejectedCalls, unverifiableCalls] of [[401, 1, 0], [400, 0, 1], [403, 0, 1], [422, 0, 1], [500, 0, 0], [undefined, 0, 0]] as const) {
+      let rejected = 0; let unverifiable = 0;
+      const refresher = createSessionRefresher({
+        loadStored: async () => expired,
+        refresh: async () => { throw Object.assign(new Error('refresh failed'), status === undefined ? { kind: 'connection' } : { status }); },
+        onRejected: () => { rejected++; },
+        onUnverifiable: () => { unverifiable++; },
+      });
+      assert.equal(await refresher(expired), null, `status ${status}`);
+      assert.equal(rejected, rejectedCalls, `onRejected for ${status}`);
+      assert.equal(unverifiable, unverifiableCalls, `onUnverifiable for ${status}`);
+    }
+    // A 403 on refresh during a sync leaves the queue untouched and never loops.
+    const { engine, queue } = await setup(3);
+    let refreshCalls = 0; let rejected = 0; let unverifiable = 0;
+    engine.setSessionRefresher(createSessionRefresher({
+      loadStored: async () => expired,
+      refresh: async () => { refreshCalls++; throw Object.assign(new Error('forbidden'), { status: 403 }); },
+      onRejected: () => { rejected++; },
+      onUnverifiable: () => { unverifiable++; },
+    }));
+    const summary = await engine.triggerSync(expired);
+    assert.equal(refreshCalls, 1); assert.equal(rejected, 0); assert.equal(unverifiable, 1);
+    assert.equal(summary.pushed, 0);
+    assert.equal(await queue.getPendingCount(), 3);
   }
 
   console.log('sessionRefresh tests passed');

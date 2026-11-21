@@ -116,6 +116,11 @@ async function sessionRestore() {
   assert.equal((await restoreSession(stored, async () => { throw s500; })).status, 'offline');
   const s401 = Object.assign(new Error('x'), { kind: 'client', status: 401 });
   assert.deepEqual(await restoreSession(stored, async () => { throw s401; }), { session: null, status: 'expired' });
+  // Only a 401 ends the session. 400 / 403 / 422 keep it (the server did not judge the token) and are reported as 'unverified'.
+  for (const status of [400, 403, 422]) {
+    const refusal = Object.assign(new Error('x'), { kind: 'client', status });
+    assert.deepEqual(await restoreSession(stored, async () => { throw refusal; }), { session: stored, status: 'unverified' }, `${status} keeps the session`);
+  }
   const s429 = Object.assign(new Error('x'), { kind: 'client', status: 429 });
   assert.equal((await restoreSession(stored, async () => { throw s429; })).status, 'offline', 'rate limiting is not a rejection');
 }

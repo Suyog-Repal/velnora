@@ -5,6 +5,8 @@ import Svg, { Circle, Defs, LinearGradient, Path, Stop } from 'react-native-svg'
 import { useCallback, useEffect, useMemo, useRef, useState, type ComponentRef } from 'react';
 import { clearSession, flushPendingSession, loadSession, login, logout, refreshSessionShared as refreshSession, register, requestPasswordReset, saveSession, type Session } from './auth';
 import { restoreSession } from './src/services/sessionRestore';
+import { refreshFailureKind } from './src/services/sessionRefresh';
+import { SignInCheckNotice } from './src/ui/SignInCheckNotice';
 import { getGuestDataSummary, importGuestData, isGuestModeChosen, setGuestModeChosen } from './src/services/guestModeService';
 import { addSmsStagedListener, configureSupportedSenderPatterns, getNativeCheckIn, getNativeReviewNotifier } from './sms';
 import { confirmCheckInToday, setCheckInPort, syncCheckInSchedule } from './src/services/dailyCheckIn';
@@ -139,6 +141,9 @@ function AppInner() {
   const [showAuth, setShowAuth] = useState(false);
   const [dbReady, setDbReady] = useState(false);
   const [sessionStale, setSessionStale] = useState(false);
+  // The server refused to check the sign-in (400 / 403 / 422) without calling it invalid: the session is kept and this notice is shown.
+  const [verifyProblem, setVerifyProblem] = useState(false);
+  const [verifyBusy, setVerifyBusy] = useState(false);
   const [importPrompt, setImportPrompt] = useState<{ count: number } | null>(null);
   const [importBusy, setImportBusy] = useState(false);
   const [importNotice, setImportNotice] = useState('');
@@ -268,6 +273,7 @@ function AppInner() {
         setSession((current) => (current?.user.id === rejected.user.id ? null : current));
         endSessionToSignIn();
       },
+      onUnverifiable: () => setVerifyProblem(true), // keep the session; the notice offers Retry / Sign in again
     });
     sessionRefresher.current = refresher;
     setSyncSessionRefresher((stale) => refresher(stale as Session)); // the app only ever passes full Sessions to triggerSync
@@ -285,6 +291,7 @@ function AppInner() {
       if (!stored) return;
       void restoreSession(stored, refreshSession).then(async (result) => {
         if (result.status === 'expired') { await clearSession(); endSessionToSignIn(); }
+        if (result.status === 'unverified') setVerifyProblem(true);
         // Only apply this to the session it was started for (the person may have signed out meanwhile).
         setSession((current) => (current?.refresh_token === stored.refresh_token ? result.session : current));
         setSessionStale(result.status === 'offline');
@@ -378,26 +385,43 @@ function AppInner() {
     return () => { live = false; };
   }, [dbReady, scope, transactions, dataTick]);
 
-  // A session restored while offline may hold an expired access token: retry the refresh when the app is active.
+  // A session restored while offline (or one the server could not verify) may hold an expired access token: try the refresh again.
+  // Only a 401 ends the session. 400 / 403 / 422 keep it and show "Can't verify your sign-in"; a network failure just waits.
+  const checkSignIn = useCallback(async (current: Session): Promise<'ok' | 'unverified' | 'ended' | 'unreachable'> => {
+    try {
+      const next = await refreshSession(current);
+      setSession((s) => (s && s.user.id === next.user.id ? next : s)); setSessionStale(false); setVerifyProblem(false);
+      return 'ok';
+    } catch (err) {
+      const kind = refreshFailureKind(err);
+      if (kind === 'rejected') { await clearSession(); setSession(null); setSessionStale(false); setVerifyProblem(false); endSessionToSignIn(); return 'ended'; }
+      if (kind === 'unverifiable') { setVerifyProblem(true); return 'unverified'; }
+      return 'unreachable';
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
-    if (!session || !sessionStale) return;
+    if (!session || !(sessionStale || verifyProblem)) return;
     let cancelled = false;
-    const retry = async () => {
-      try {
-        const next = await refreshSession(session);
-        if (!cancelled) { setSession(next); setSessionStale(false); }
-      } catch (err) {
-        const status = (err as { status?: number })?.status;
-        if (!cancelled && (status === 400 || status === 401 || status === 403 || status === 422)) {
-          await clearSession(); setSession(null); setSessionStale(false);
-          endSessionToSignIn();
-        }
-      }
-    };
-    void retry();
-    const sub = AppState.addEventListener('change', (state) => { if (state === 'active') void retry(); });
+    const retry = () => { if (!cancelled) void checkSignIn(session); };
+    retry();
+    const sub = AppState.addEventListener('change', (state) => { if (state === 'active') retry(); });
     return () => { cancelled = true; sub.remove(); };
-  }, [session, sessionStale]);
+  }, [session, sessionStale, verifyProblem, checkSignIn]);
+  const retrySignInCheck = async () => {
+    if (!session || verifyBusy) return;
+    setVerifyBusy(true);
+    const result = await checkSignIn(session);
+    setVerifyBusy(false);
+    if (result === 'unverified') showToast("Still can't verify your sign-in. Try again later or sign in again.", 'warning', 'verify-retry');
+    else if (result === 'unreachable') showToast("Couldn't reach Velnora. Check your connection and try again.", 'warning', 'verify-retry');
+  };
+  // The person chose to sign in again: the stored tokens are cleared (local data stays), like after a 401 but with its own wording.
+  const signInAgainFromNotice = async () => {
+    await clearSession().catch(() => undefined);
+    setAuthNotice("Sign in again to keep syncing. Your data on this device is preserved.");
+    void setGuestModeChosen(false).catch(() => undefined);
+    setGuestMode(false); setSession(null); setSessionStale(false); setVerifyProblem(false); setAuthScreen('signin'); setShowAuth(true);
+  };
 
   // A refreshed session that secure storage refused to write is kept in memory and retried (auth.ts); also try when the app returns.
   useEffect(() => {
@@ -606,8 +630,9 @@ function AppInner() {
       : <View style={styles.header}><View><Text style={[styles.overline, { color: palette.accentText }]}>VELNORA</Text><Text style={[styles.title, { color: colors.text }]}>{tab.charAt(0).toUpperCase() + tab.slice(1)}</Text></View><Pressable style={[styles.iconButton, { backgroundColor: colors.card, borderColor: colors.border }]} onPress={() => changeTab('profile')}><Text style={[styles.avatarText, { color: colors.text }]}>{session ? session.user.full_name.charAt(0).toUpperCase() : 'G'}</Text></Pressable></View>}
       {!session && <Text style={[styles.caption, { color: colors.muted, marginBottom: 12 }]}>Guest mode · data stays on this device and is not synced.</Text>}
       {importNotice ? <Text style={styles.noticeText}>{importNotice}</Text> : null}
-      {tab === 'home' ? <SyncStatus offline={!!session && sessionStale} colors={colors} />
-        : session && sessionStale ? <Text style={[styles.caption, { color: colors.muted, marginBottom: 12 }]}>Offline · working from local data; sync resumes when you reconnect.</Text> : null}
+      {session && verifyProblem ? <SignInCheckNotice colors={colors} busy={verifyBusy} onRetry={() => void retrySignInCheck()} onSignInAgain={() => void signInAgainFromNotice()} /> : null}
+      {tab === 'home' ? <SyncStatus offline={!!session && sessionStale && !verifyProblem} colors={colors} />
+        : session && sessionStale && !verifyProblem ? <Text style={[styles.caption, { color: colors.muted, marginBottom: 12 }]}>Offline · working from local data; sync resumes when you reconnect.</Text> : null}
       <Animated.View style={{ opacity: enter.interpolate({ inputRange: [0, 1], outputRange: [0.55, 1] }), transform: [{ translateX: enter.interpolate({ inputRange: [0, 1], outputRange: [slideDir.current * TAB_ENTER.offsetDp, 0] }) }] }}>
       {visited.has('home') && <KeepAlive active={tab === 'home'}><HomeScreen scope={scope} onOpen={setOpenTx} transactions={transactions} cashFlow={cashFlow} health={ledgerHealth} onReview={() => setShowReview(true)} colors={colors} dark={dark} onAddExpense={() => openForm('expense')} onViewAll={() => navTo('transactions')} onAnalytics={() => navTo('analytics')}
         onTransactions={(type) => { navTo('transactions'); setTxPreset(type); }} onQuickAccess={(id) => quickAccess(id)} /></KeepAlive>}
