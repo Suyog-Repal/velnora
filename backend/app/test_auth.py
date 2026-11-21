@@ -78,3 +78,61 @@ def test_transaction_requires_owner_and_is_scoped() -> None:
     assert client.get(f"/api/v1/transactions/{transaction_id}", headers=second_headers).status_code == 404
     assert client.get("/api/v1/me", headers={"Authorization": "Bearer invalid"}).status_code == 401
     assert first["user"]["id"] != second["user"]["id"]
+
+
+def test_concurrent_refresh_with_one_token_lets_only_one_request_win() -> None:
+    """Two requests presenting the same refresh token at once: exactly one may consume it."""
+    import threading
+
+    payload, _ = register_user()
+    token = payload["refresh_token"]
+    workers = 6
+    barrier = threading.Barrier(workers)
+    codes: list[int] = []
+    bodies: list[dict] = []
+
+    def attempt() -> None:
+        local = TestClient(app)
+        barrier.wait()
+        response = local.post("/api/v1/auth/refresh", json={"refresh_token": token})
+        codes.append(response.status_code)
+        if response.status_code == 200:
+            bodies.append(response.json())
+
+    threads = [threading.Thread(target=attempt) for _ in range(workers)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert sorted(codes) == [200] + [401] * (workers - 1)
+    # The winner's new refresh token works, and the original one stays spent.
+    assert client.post("/api/v1/auth/refresh", json={"refresh_token": bodies[0]["refresh_token"]}).status_code == 200
+    assert client.post("/api/v1/auth/refresh", json={"refresh_token": token}).status_code == 401
+
+
+def test_failed_rotation_rolls_back_so_the_old_token_still_works(monkeypatch) -> None:
+    """If issuing the new pair fails after the old token was claimed, nothing is committed: the caller keeps a usable token."""
+    from . import main as main_module
+
+    payload, _ = register_user()
+    token = payload["refresh_token"]
+
+    def broken_issue(*_args, **_kwargs):
+        raise RuntimeError("simulated failure while issuing the new pair")
+
+    monkeypatch.setattr(main_module, "issue_tokens", broken_issue)
+    failing = TestClient(app, raise_server_exceptions=False)
+    assert failing.post("/api/v1/auth/refresh", json={"refresh_token": token}).status_code == 500
+    monkeypatch.undo()
+
+    retried = client.post("/api/v1/auth/refresh", json={"refresh_token": token})
+    assert retried.status_code == 200
+    assert retried.json()["refresh_token"] != token
+
+
+def test_refresh_rejects_unknown_and_expired_tokens() -> None:
+    payload, _ = register_user()
+    assert client.post("/api/v1/auth/refresh", json={"refresh_token": "x" * 40}).status_code == 401
+    # An access token is not a refresh token.
+    assert client.post("/api/v1/auth/refresh", json={"refresh_token": payload["access_token"]}).status_code == 401

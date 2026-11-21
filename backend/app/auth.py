@@ -104,10 +104,13 @@ def create_token(user_id: UUID, token_type: str, lifetime: timedelta) -> str:
     )
 
 
-def issue_tokens(user: User, db: Optional[Session] = None) -> tuple[str, str]:
+def issue_tokens(user: User, db: Optional[Session] = None, commit: bool = True) -> tuple[str, str]:
     """
     Issue a new access token and refresh token pair.
     Persists the hashed refresh token into PostgreSQL refresh_tokens table.
+
+    ``commit=False`` (only with a caller-supplied ``db``) leaves the new row uncommitted so the caller can make it part of a
+    larger transaction, e.g. refresh rotation, where revoking the old token and issuing the new one must succeed or fail together.
     """
     access_token = create_token(user.id, "access", timedelta(minutes=ACCESS_TOKEN_MINUTES))
     refresh_token = create_token(user.id, "refresh", timedelta(days=REFRESH_TOKEN_DAYS))
@@ -122,7 +125,8 @@ def issue_tokens(user: User, db: Optional[Session] = None) -> tuple[str, str]:
 
     if db is not None:
         db.add(record)
-        db.commit()
+        if commit:
+            db.commit()
     else:
         SessionLocal = get_session_factory()
         with SessionLocal() as session:

@@ -16,7 +16,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select, and_, or_, text
+from sqlalchemy import and_, or_, select, text, update
 from sqlalchemy.orm import Session
 
 from app.config import configure_logging, get_settings
@@ -224,23 +224,33 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)) -> AuthResponse:
 def refresh(payload: RefreshRequest, db: Session = Depends(get_db)) -> AuthResponse:
     user = decode_token(payload.refresh_token, "refresh", db=db)
     token_h = hash_token(payload.refresh_token)
-
-    stmt = select(RefreshTokenModel).where(
-        RefreshTokenModel.token_hash == token_h,
-        RefreshTokenModel.user_id == user.id,
-    )
-    token_row = db.scalar(stmt)
     now = datetime.now(timezone.utc)
 
-    if not token_row or token_row.revoked_at is not None or token_row.expires_at < now:
-        raise HTTPException(status_code=401, detail="Invalid or revoked session")
-
-    # Rotate refresh token: revoke previous token
-    token_row.revoked_at = now
-    db.commit()
-
-    # Issue new pair
-    access_token, refresh_token = issue_tokens(user, db=db)
+    # Rotation is one transaction: claim the old token and insert the new one, then commit once. A failure anywhere in
+    # between rolls both back, so the caller keeps a token that still works (the old one) instead of losing the session.
+    # The claim is a conditional UPDATE (revoked_at IS NULL): PostgreSQL makes a second concurrent request wait for the
+    # first to commit and then re-check the condition, so exactly one request can consume a given token.
+    try:
+        claimed = db.execute(
+            update(RefreshTokenModel)
+            .where(
+                RefreshTokenModel.token_hash == token_h,
+                RefreshTokenModel.user_id == user.id,
+                RefreshTokenModel.revoked_at.is_(None),
+                RefreshTokenModel.expires_at > now,
+            )
+            .values(revoked_at=now)
+        )
+        if claimed.rowcount != 1:
+            db.rollback()
+            raise HTTPException(status_code=401, detail="Invalid or revoked session")
+        access_token, refresh_token = issue_tokens(user, db=db, commit=False)
+        db.commit()
+    except HTTPException:
+        raise
+    except Exception:
+        db.rollback()
+        raise
     return AuthResponse(user=user_response(user), access_token=access_token, refresh_token=refresh_token)
 
 
