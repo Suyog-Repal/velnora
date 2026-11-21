@@ -974,6 +974,15 @@ def sync_push(
         if result.status == "error" and result.error_code is None:
             result.error_code = classify_item_error(result.error)
 
+    # TEMP-SYNC-DEBUG (remove after diagnosis): one line per push. Counts and codes only, never values.
+    _by_status: Dict[str, int] = {}
+    _by_code: Dict[str, int] = {}
+    for _r in results:
+        _by_status[_r.status] = _by_status.get(_r.status, 0) + 1
+        if _r.status == "error":
+            _by_code[_r.error_code or "none"] = _by_code.get(_r.error_code or "none", 0) + 1
+    logger.warning("sync-debug push batch=%d results=%d status=%s error_codes=%s", len(request.items), len(results), _by_status, _by_code)
+
     db.commit()
     return SyncPushResponse(results=results, server_time=now)
 

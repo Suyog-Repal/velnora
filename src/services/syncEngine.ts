@@ -577,6 +577,8 @@ export class SyncEngine {
         apiBaseUrl,
       );
     } catch (err) {
+      // TEMP-SYNC-DEBUG (remove after diagnosis): one line per failed attempt. No payload values.
+      console.log(`[sync-debug] push FAILED batch=${pushItems.length} http=${err instanceof SyncApiError ? (err.status ?? err.kind) : 'unknown'} body=${err instanceof Error ? err.message.slice(0, 300) : String(err).slice(0, 300)}`);
       if (err instanceof SyncApiError) {
         // 401 Unauthorized: Do not retry immediately; abort sync cycle
         if (err.status === 401) {
@@ -633,6 +635,14 @@ export class SyncEngine {
     let pushed = 0;
     let conflicts = 0;
     const errors: string[] = [];
+
+    // TEMP-SYNC-DEBUG (remove after diagnosis): one line per successful HTTP exchange. No payload values.
+    if (serverResp && Array.isArray(serverResp.results)) {
+      const byStatus: Record<string, number> = {};
+      const byCode: Record<string, number> = {};
+      for (const r of serverResp.results) { byStatus[r.status] = (byStatus[r.status] ?? 0) + 1; if (r.status === 'error') { const k = r.error_code ?? (r.error ?? 'none').slice(0, 80); byCode[k] = (byCode[k] ?? 0) + 1; } }
+      console.log(`[sync-debug] push OK http=200 batch=${pushItems.length} results=${serverResp.results.length} status=${JSON.stringify(byStatus)} errors=${JSON.stringify(byCode)}`);
+    }
 
     // A response that is not the documented shape acknowledges nothing: keep everything pending and back off.
     if (!serverResp || !Array.isArray(serverResp.results)) {
