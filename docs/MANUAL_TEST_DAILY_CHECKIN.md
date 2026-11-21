@@ -19,8 +19,8 @@ TIMEZONE_CHANGED, TIME_SET), `VelnoraCheckInService` (not exported) and `RECEIVE
 ## Setup
 
 1. Open Velnora, choose Guest or sign in, allow notifications.
-2. Profile > Preferences: **Daily check-in** reads "Daily at 9:00 PM". Tap the row to turn it off and on again; the
-   **Check-in time** row appears when on. Turning it on while notifications are blocked asks for permission.
+2. Profile > Settings > Notifications: **Daily check-in** switch is on and a **Check-in time** row (9:00 PM) sits inside the
+   same card. Turn the switch off and on again; the time row hides and shows. Turning it on while notifications are blocked asks for permission.
 3. Set the check-in time to **3 minutes from now** (the clock dial lets you pick any minute).
 
 ## Tests
@@ -37,7 +37,7 @@ TIMEZONE_CHANGED, TIME_SET), `VelnoraCheckInService` (not exported) and `RECEIVE
 | 8 | Reboot the device without opening Velnora; set time 3 minutes ahead before rebooting. | After boot, the check-in still fires (alarm re-armed by the boot receiver). |
 | 9 | Change the device timezone / manual time. | Next alarm follows the new local time. Check with `adb shell dumpsys alarm \| grep -A3 velnora`. |
 | 10 | `adb install -r` a fresh build over the old one (app update). | Alarm survives (MY_PACKAGE_REPLACED). |
-| 11 | Revoke the notification permission, then wait for the time. | Nothing is posted; no crash. Profile row says "Allow Velnora notifications to receive this". |
+| 11 | Revoke the notification permission, then wait for the time. | Nothing is posted; no crash. Settings > Notifications shows "Notifications are blocked" with an **Open settings** action, and the switches read off. |
 | 12 | Sign-in account: save a quick entry offline, then go online. | Entry syncs; guest data never syncs. |
 
 Changing the check-in time (or switching the check-in back on) resets "done for today", so a later time still notifies

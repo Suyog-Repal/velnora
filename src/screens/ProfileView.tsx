@@ -1,52 +1,21 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Alert, Animated, Easing, Pressable, Text, View } from 'react-native';
 import { ACCENTS, palette, type AccentId, type ThemeMode } from '../../theme';
-import { Bell, Check, ChevronRight, FileText, LogOut, MessageSquare, ReceiptIcon, Settings, Sliders, TagIcon as Tag, UserRound, WalletCards, WifiOff } from '../../icons';
-import { currencySymbol, formatPaise, type Colors } from '../ui/common';
+import { Check, FileText, LogOut, ReceiptIcon, Settings, ShieldCheck, Sliders, TagIcon as Tag, UserRound, WalletCards, WifiOff } from '../../icons';
+import { formatPaise, Sheet, type Colors } from '../ui/common';
 import { readableOn } from '../ui/common';
-import { useSmsPermission } from '../ui/useSmsPermission';
-import { useCapturePermissions } from '../ui/useCapturePermissions';
+import { Group, NavRow, Tap } from '../ui/rows';
 import { countsAsExpense } from '../services/ledgerRules';
-import { getServiceDb } from '../services/transactionService';
-import { getReviewPref, reviewPrefLabel, runReviewPass, setReviewPref, type ReviewNotificationPref } from '../services/reviewNotifications';
-import { checkInLabel, getCheckInPrefs, setCheckInPrefs, syncCheckInSchedule, type CheckInPrefs } from '../services/dailyCheckIn';
-import { TimePickerModal } from '../ui/TimePicker';
-import { appNotificationsLabel, notificationAccessLabel, smsPermissionLabel } from '../services/smsPermissionPolicy';
 import type { Session, TransactionEntity } from '../db/types';
+
+// Tap and Group now live with the shared rows; re-exported so existing imports keep working.
+export { Group, Tap };
 
 /** Fades + lifts a block in; blocks are staggered by `index` so the page assembles instead of popping in. */
 export function Reveal({ index, children }: { index: number; children: ReactNode }) {
   const v = useRef(new Animated.Value(0)).current;
   useEffect(() => { Animated.timing(v, { toValue: 1, duration: 420, delay: 60 + index * 70, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start(); }, [v, index]);
   return <Animated.View style={{ opacity: v, transform: [{ translateY: v.interpolate({ inputRange: [0, 1], outputRange: [18, 0] }) }] }}>{children}</Animated.View>;
-}
-
-/** Pressable that gives tactile feedback (springs down on press, back on release). */
-export function Tap({ onPress, children, disabled, style, label }: { onPress?: () => void; children: ReactNode; disabled?: boolean; style?: object; label?: string }) {
-  const scale = useRef(new Animated.Value(1)).current;
-  const to = (value: number) => Animated.spring(scale, { toValue: value, friction: 7, tension: 220, useNativeDriver: true }).start();
-  return <Pressable disabled={disabled || !onPress} onPress={onPress} onPressIn={() => to(0.97)} onPressOut={() => to(1)} accessibilityRole={onPress ? 'button' : undefined} accessibilityLabel={label}>
-    <Animated.View style={[{ transform: [{ scale }] }, style]}>{children}</Animated.View>
-  </Pressable>;
-}
-
-export function Group({ title, colors, children }: { title: string; colors: Colors; children: ReactNode }) {
-  return <View style={{ marginTop: 22 }}>
-    <Text style={{ color: colors.muted, fontSize: 12, fontWeight: '600', letterSpacing: 0.8, marginBottom: 8, marginLeft: 4 }}>{title.toUpperCase()}</Text>
-    <View style={{ backgroundColor: colors.card, borderColor: colors.border, borderWidth: 1, borderRadius: 20, overflow: 'hidden' }}>{children}</View>
-  </View>;
-}
-
-export function Row({ icon, title, value, colors, onPress, last, tone }: { icon: ReactNode; title: string; value?: string; colors: Colors; onPress?: () => void; last?: boolean; tone?: 'danger' }) {
-  const tint = tone === 'danger' ? palette.danger : palette.emerald;
-  return <Tap onPress={onPress} label={title} style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, paddingVertical: 13, borderBottomWidth: last ? 0 : 1, borderBottomColor: colors.border }}>
-    <View style={{ width: 38, height: 38, borderRadius: 12, backgroundColor: `${tint}1F`, alignItems: 'center', justifyContent: 'center' }}>{icon}</View>
-    <View style={{ flex: 1, marginLeft: 12 }}>
-      <Text style={{ color: tone === 'danger' ? palette.expenseText : colors.text, fontWeight: '700', fontSize: 15 }}>{title}</Text>
-      {value ? <Text style={{ color: colors.muted, fontSize: 12, marginTop: 2 }}>{value}</Text> : null}
-    </View>
-    {onPress ? <ChevronRight size={18} color={colors.muted} /> : null}
-  </Tap>;
 }
 
 const MODES: { id: ThemeMode; label: string }[] = [{ id: 'light', label: 'Light' }, { id: 'dark', label: 'Dark' }, { id: 'system', label: 'System' }];
@@ -107,11 +76,9 @@ export function profileStats(transactions: TransactionEntity[], now = new Date()
   return { count, spentPaise, pending, failed };
 }
 
-export function ProfileView({ session, colors, mode, accent, transactions, online, onOpenSettings, onOpenCurrency, currencyLabel, onOpenCategories, onOpenAliases, onOpenReview, onOpenAccounts, onOpenImport, onOpenImportPdf, reviewCount, onSignIn, onCreate, onLogout, accountSections }: {
-  session: Session | null; colors: Colors; mode: ThemeMode; accent: AccentId;
-  transactions: TransactionEntity[]; online: boolean; onOpenSettings: () => void; onOpenCurrency: () => void; currencyLabel: string; onOpenCategories: () => void; onOpenAliases: () => void; onOpenReview: () => void; onOpenAccounts: () => void; onOpenImport: () => void; onOpenImportPdf: () => void; reviewCount: number; onSignIn: () => void; onCreate: () => void; onLogout: () => void;
-  /** Real, existing account controls (delete local data, SMS status) rendered inside the Privacy card. */
-  accountSections?: ReactNode;
+export function ProfileView({ session, colors, transactions, online, onOpenSettings, onOpenPrivacy, onOpenCategories, onOpenAliases, onOpenReview, onOpenAccounts, onOpenImport, onOpenImportPdf, reviewCount, onSignIn, onCreate, onLogout }: {
+  session: Session | null; colors: Colors;
+  transactions: TransactionEntity[]; online: boolean; onOpenSettings: () => void; onOpenPrivacy: () => void; onOpenCategories: () => void; onOpenAliases: () => void; onOpenReview: () => void; onOpenAccounts: () => void; onOpenImport: () => void; onOpenImportPdf: () => void; reviewCount: number; onSignIn: () => void; onCreate: () => void; onLogout: () => void;
 }) {
   const stats = profileStats(transactions);
   const name = session?.user.full_name ?? 'Guest';
@@ -119,32 +86,9 @@ export function ProfileView({ session, colors, mode, accent, transactions, onlin
   const avatarPulse = useRef(new Animated.Value(0)).current;
   useEffect(() => { Animated.timing(avatarPulse, { toValue: 1, duration: 700, delay: 120, easing: Easing.out(Easing.back(1.6)), useNativeDriver: true }).start(); }, [avatarPulse]);
   let i = 0;
-  const sms = useSmsPermission();
-  const capture = useCapturePermissions();
-  const [reviewPref, setReviewPrefState] = useState<ReviewNotificationPref>('all');
-  useEffect(() => { void getReviewPref(getServiceDb()).then(setReviewPrefState).catch(() => undefined); }, []);
-  const cycleReviewPref = () => {
-    const next: ReviewNotificationPref = reviewPref === 'all' ? 'duplicates' : reviewPref === 'duplicates' ? 'off' : 'all';
-    setReviewPrefState(next);
-    // Turning reminders on while Android blocks notifications: ask now (Android 13+ dialog) or send to Settings if it was refused for good.
-    if (next !== 'off' && capture.appNotificationsAvailable && !capture.appNotifications) void capture.toggleAppNotifications();
-    void setReviewPref(getServiceDb(), next).then(() => runReviewPass(getServiceDb(), session?.user.id ?? null)).catch(() => undefined);
-  };
-  const [checkIn, setCheckInState] = useState<CheckInPrefs>({ enabled: true, time: '21:00' });
-  const [pickCheckInTime, setPickCheckInTime] = useState(false);
-  useEffect(() => { void getCheckInPrefs(getServiceDb()).then(setCheckInState).catch(() => undefined); }, []);
-  const updateCheckIn = (change: Partial<CheckInPrefs>) => {
-    setCheckInState((current) => ({ ...current, ...change }));
-    // Ask for notification permission the moment the check-in is switched on (Android 13+ dialog, or Settings if refused for good).
-    if (change.enabled && capture.appNotificationsAvailable && !capture.appNotifications) void capture.toggleAppNotifications();
-    void setCheckInPrefs(getServiceDb(), change).then(() => syncCheckInSchedule(getServiceDb())).catch(() => undefined);
-  };
-  // Granted → open Android's permission page to manage it. Not granted → ask; if that does not work, explain and offer Settings.
-  const onSmsPress = () => {
-    if (!sms.available) return;
-    if (sms.granted) { sms.openSettings(); return; }
-    void sms.requestWithGuidance(true);
-  };
+  const [importChoice, setImportChoice] = useState(false);
+  // Close the choice first, then open the chosen import flow (both are modal sheets).
+  const chooseImport = (open: () => void) => { setImportChoice(false); open(); };
 
   return <View>
     <Reveal index={i++}>
@@ -181,29 +125,20 @@ export function ProfileView({ session, colors, mode, accent, transactions, onlin
 
     <Reveal index={i++}>
       <Group title="Your data" colors={colors}>
-        <Row icon={<Tag size={18} color={palette.emerald} />} title="Categories" value="Create, edit and organise" colors={colors} onPress={onOpenCategories} />
-        <Row icon={<Sliders size={18} color={palette.emerald} />} title="Merchant names" value={session ? 'Corrections Velnora remembers' : 'Sign in to use'} colors={colors} onPress={onOpenAliases} />
-        <Row icon={<Check size={18} color={palette.emerald} />} title="Review transactions" value={reviewCount > 0 ? `${reviewCount} missing a category or details` : 'Nothing to review'} colors={colors} onPress={onOpenReview} />
-        <Row icon={<WalletCards size={18} color={palette.emerald} />} title="Accounts" value="Found from your bank messages" colors={colors} onPress={onOpenAccounts} />
-        <Row icon={<ReceiptIcon size={18} color={palette.emerald} />} title="Import CSV" value="Add or match from a CSV file" colors={colors} onPress={onOpenImport} />
-        <Row icon={<FileText size={18} color={palette.emerald} />} title="Import PDF Statement" value="Import transactions from your bank statement PDF." colors={colors} onPress={onOpenImportPdf} last />
+        <NavRow icon={<Tag size={18} color={palette.emerald} />} title="Categories" subtitle="Create, edit and organise" colors={colors} onPress={onOpenCategories} />
+        <NavRow icon={<Sliders size={18} color={palette.emerald} />} title="Merchant names" subtitle="Corrections Velnora remembers" colors={colors} onPress={onOpenAliases} />
+        <NavRow icon={<Check size={18} color={palette.emerald} />} title="Review transactions" subtitle="Payments that need a category or details" badge={reviewCount} colors={colors} onPress={onOpenReview} />
+        <NavRow icon={<WalletCards size={18} color={palette.emerald} />} title="Accounts" subtitle="Found from your bank messages" colors={colors} onPress={onOpenAccounts} />
+        <NavRow icon={<FileText size={18} color={palette.emerald} />} title="Import" subtitle="From a CSV file or a PDF statement" colors={colors} onPress={() => setImportChoice(true)} last />
       </Group>
     </Reveal>
 
     <Reveal index={i++}>
-      <Group title="Preferences" colors={colors}>
-        <Row icon={<Settings size={18} color={palette.emerald} />} title="Settings" value={`Theme · ${mode === 'system' ? 'System' : mode === 'dark' ? 'Dark' : 'Light'}, ${ACCENTS.find((x) => x.id === accent)?.label ?? ''} accent`} colors={colors} onPress={onOpenSettings} />
-        <Row icon={<MessageSquare size={18} color={palette.emerald} />} title="Bank SMS detection" value={smsPermissionLabel(sms)} colors={colors} onPress={sms.available ? onSmsPress : undefined} />
-        <Row icon={<WalletCards size={18} color={palette.emerald} />} title="Payment-app alerts" value={notificationAccessLabel({ available: capture.accessAvailable, granted: capture.access })} colors={colors} onPress={capture.accessAvailable ? () => { capture.openAccessSettings(); } : undefined} />
-        <Row icon={<Bell size={18} color={palette.emerald} />} title="Velnora notifications" value={appNotificationsLabel({ available: capture.appNotificationsAvailable, granted: capture.appNotifications })} colors={colors} onPress={capture.appNotificationsAvailable ? () => { void capture.toggleAppNotifications(); } : undefined} />
-        <Row icon={<Check size={18} color={palette.emerald} />} title="Review reminders" value={reviewPrefLabel(reviewPref, !capture.appNotificationsAvailable || capture.appNotifications)} colors={colors} onPress={cycleReviewPref} />
-        <Row icon={<Bell size={18} color={palette.emerald} />} title="Daily check-in" value={checkInLabel(checkIn, !capture.appNotificationsAvailable || capture.appNotifications)} colors={colors} onPress={() => updateCheckIn({ enabled: !checkIn.enabled })} />
-        {checkIn.enabled ? <Row icon={<Bell size={18} color={palette.emerald} />} title="Check-in time" value={checkInLabel({ enabled: true, time: checkIn.time })} colors={colors} onPress={() => setPickCheckInTime(true)} /> : null}
-        <Row icon={<Text style={{ color: palette.accentText, fontWeight: '600', fontSize: 16 }}>{currencySymbol()}</Text>} title="Currency" value={currencyLabel} colors={colors} onPress={onOpenCurrency} last />
+      <Group colors={colors}>
+        <NavRow icon={<Settings size={18} color={palette.emerald} />} title="Settings" subtitle="Appearance, capture, notifications, currency" colors={colors} onPress={onOpenSettings} last={!session} />
+        {session ? <NavRow icon={<ShieldCheck size={18} color={palette.emerald} />} title="Privacy & data" subtitle="Delete local data, how messages are read" colors={colors} onPress={onOpenPrivacy} last /> : null}
       </Group>
     </Reveal>
-
-    {session && accountSections ? <Reveal index={i++}><Group title="Privacy & data" colors={colors}><View style={{ paddingHorizontal: 14 }}>{accountSections}</View></Group></Reveal> : null}
 
     {session ? <Reveal index={i++}>
       <View style={{ marginTop: 22 }}>
@@ -214,7 +149,12 @@ export function ProfileView({ session, colors, mode, accent, transactions, onlin
       </View>
     </Reveal> : null}
 
-    <TimePickerModal visible={pickCheckInTime} value={checkIn.time} colors={colors} title="Daily check-in time" onCancel={() => setPickCheckInTime(false)} onConfirm={(hm) => { setPickCheckInTime(false); updateCheckIn({ time: hm }); }} />
+    <Sheet visible={importChoice} onClose={() => setImportChoice(false)} title="Import transactions" colors={colors}>
+      <Group colors={colors}>
+        <NavRow icon={<ReceiptIcon size={18} color={palette.emerald} />} title="CSV file" subtitle="Add or match from a CSV file" colors={colors} onPress={() => chooseImport(onOpenImport)} />
+        <NavRow icon={<FileText size={18} color={palette.emerald} />} title="PDF statement" subtitle="Import from your bank statement PDF" colors={colors} onPress={() => chooseImport(onOpenImportPdf)} last />
+      </Group>
+    </Sheet>
 
     <Text style={{ color: colors.muted, textAlign: 'center', marginTop: 24, fontSize: 12 }}>Velnora · Personal Finance & Expense Tracker</Text>
   </View>;

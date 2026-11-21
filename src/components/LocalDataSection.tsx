@@ -1,6 +1,8 @@
 import { palette } from '../../theme';
 import { useMemo, useState } from 'react';
 import { Modal, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActionRow } from '../ui/rows';
+import { Trash } from '../../icons';
 import { LocalDataDeletionController } from '../services/localDataController';
 import { purgeStagedSmsForUser } from '../services/smsStagingService';
 
@@ -14,17 +16,9 @@ export function LocalDataSection({ userId, colors, onDeleted }: { userId: string
   const unsynced = controller.summary?.unsyncedCount ?? 0;
 
   return <>
-    <Pressable
-      accessibilityRole="button"
-      style={[styles.row, { borderBottomColor: colors.border }]}
-      onPress={async () => { await controller.request(); rerender(); }}
-    >
-      <View style={{ flex: 1 }}>
-        <Text style={[styles.title, { color: colors.text }]}>Delete local data</Text>
-        <Text style={[styles.caption, { color: colors.muted }]}>Remove this account's transactions from this device</Text>
-      </View>
-    </Pressable>
-    {controller.phase === 'error' && <Text style={[styles.error, { color: palette.expenseText }]}>{controller.error}</Text>}
+    <ActionRow tone="danger" icon={<Trash size={18} color={palette.danger} />} title="Delete local data" subtitle="Remove this account's transactions from this device" last colors={colors}
+      onPress={async () => { await controller.request(); rerender(); }} />
+    {controller.phase === 'error' && <Text style={[styles.error, { color: palette.expenseText, paddingHorizontal: 14, paddingBottom: 12 }]}>{controller.error}</Text>}
     <Modal visible={open} transparent animationType="fade" onRequestClose={() => { controller.cancel(); rerender(); }}>
       <View style={styles.backdrop}><View style={[styles.dialog, { backgroundColor: colors.card }]}>
         <Text style={[styles.title, { color: colors.text }]}>Delete local data?</Text>

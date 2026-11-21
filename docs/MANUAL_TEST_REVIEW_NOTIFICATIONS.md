@@ -17,7 +17,7 @@ Confirm the merged manifest has `VelnoraReviewActionReceiver` and `VelnoraReview
 ## Setup
 
 1. Open Velnora, choose Guest (or sign in), and allow SMS and notifications when asked (Android 13+ shows a dialog).
-2. Profile > Preferences: "Review reminders" should read "On · when a payment needs you".
+2. Profile > Settings > Notifications: the "Review reminders" switch is on and "Remind me about" is **All payments**.
 3. Create some history so suggestions exist: add 3 expenses to the merchant `RAHUL KUMAR` under **Groceries**, and a few
    other expenses under **Food & Dining**.
 4. Fake bank SMS needs no SIM. On an emulator:

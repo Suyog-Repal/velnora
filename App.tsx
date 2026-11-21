@@ -20,7 +20,7 @@ import { applyAccent, applyScheme, elevation, isDarkScheme, layout, radius, tint
 import { ProfileView } from './src/screens/ProfileView';
 import { PeopleView } from './src/screens/PeopleView';
 import { findOpenForPerson, outstandingPaise, recordPayment } from './src/services/expectedPaymentService';
-import { CurrencySheet, SettingsPage } from './src/screens/SettingsPages';
+import { PrivacyPage, SettingsPage } from './src/screens/SettingsPages';
 import { CURRENCIES } from './src/ui/currency';
 import { ArrowDownLeft, ArrowUpRight, Bell, Chart, ChevronRight, CirclePlus, Eye, EyeOff, Home, KeyRound, LayoutGrid, LockKeyhole, LogOut, PiggyBank, Plus, Search, Settings, Sliders, Target, UserRound, Users, WalletCards, X } from './icons';
 import {
@@ -154,7 +154,7 @@ function AppInner() {
   const [drillCategory, setDrillCategory] = useState<string | null>(null);
   const [dataTick, setDataTick] = useState(0);
   const [showSettings, setShowSettings] = useState(false);
-  const [showCurrency, setShowCurrency] = useState(false);
+  const [showPrivacy, setShowPrivacy] = useState(false);
   const online = useOnline();
   const scope = session?.user.id ?? null;
   const greeting = useGreeting();
@@ -609,10 +609,9 @@ function AppInner() {
       {visited.has('analytics') && <KeepAlive active={tab === 'analytics'}><AnalyticsView key={analyticsPreset} scope={scope} colors={colors} refreshKey={dataTick} initialSection={analyticsPreset} onDrill={(c) => { setDrillCategory(c); changeTab('transactions'); }} /></KeepAlive>}
       {visited.has('budgets') && <KeepAlive active={tab === 'budgets'}><BudgetsView scope={scope} categories={catViews} colors={colors} refreshKey={dataTick} /></KeepAlive>}
             {visited.has('people') && <KeepAlive active={tab === 'people'}><PeopleView key={peoplePreset} initialTab={peoplePreset} transactions={transactions} categories={catViews} session={session} colors={colors} refreshKey={dataTick} onOpenTx={setOpenTx} onChanged={() => void reloadData()} onAddTransaction={() => openForm('expense')} /></KeepAlive>}
-      {visited.has('profile') && <KeepAlive active={tab === 'profile'}><ProfileView session={session} colors={colors} mode={mode} accent={accent} transactions={transactions} online={online} onOpenSettings={() => setShowSettings(true)} onOpenCurrency={() => setShowCurrency(true)} currencyLabel={(() => { const c = CURRENCIES.find((x) => x.code === currency); return c ? `${c.name} (${c.symbol.trim()})` : currency; })()}
+      {visited.has('profile') && <KeepAlive active={tab === 'profile'}><ProfileView session={session} colors={colors} transactions={transactions} online={online} onOpenSettings={() => setShowSettings(true)} onOpenPrivacy={() => setShowPrivacy(true)}
         onOpenCategories={() => setShowCats(true)} onOpenAliases={() => setShowAliases(true)} reviewCount={ledgerHealth.needsReviewCount} onOpenReview={() => setShowReview(true)} onOpenAccounts={() => setShowAccounts(true)} onOpenImport={() => setShowImport('csv')} onOpenImportPdf={() => setShowImport('pdf')} onSignIn={() => openAuth('signin')} onCreate={() => openAuth('signup')}
-        onLogout={async () => { if (!session) return; await clearReviewNotifications(getServiceDb(), session.user.id).catch(() => undefined); await logout(session); setSession(null); setSessionStale(false); setTransactions([]); setAuthScreen('welcome'); setShowAuth(true); }}
-        accountSections={session ? <><LocalDataSection userId={session.user.id} colors={colors} onDeleted={() => { setTransactions([]); setSmsStatusTick((n) => n + 1); }} /><SmsStagingStatusSection userId={session.user.id} colors={colors} refreshKey={smsStatusTick} /></> : null} /></KeepAlive>}
+        onLogout={async () => { if (!session) return; await clearReviewNotifications(getServiceDb(), session.user.id).catch(() => undefined); await logout(session); setSession(null); setSessionStale(false); setTransactions([]); setAuthScreen('welcome'); setShowAuth(true); }} /></KeepAlive>}
       </Animated.View>
     </View></ScrollView>
     {tab !== 'profile' && !keyboard && <Pressable style={({ pressed }) => [styles.fab, { bottom: layout.navHeight + insets.bottom + 16, backgroundColor: fabColors().bg }, pressed && { opacity: 0.9, transform: [{ scale: 0.96 }] }]} onPress={() => openForm('expense')} accessibilityRole="button" accessibilityLabel="Add transaction"><Plus color={fabColors().fg} size={24} strokeWidth={2.4} /></Pressable>}
@@ -679,8 +678,10 @@ function AppInner() {
     }} />
   </Sheet>
   <TransactionSheet key={openTx?.id ?? 'none'} tx={openTx} initialMode={openTxMode} session={session} categories={catViews} colors={colors} onClose={() => setOpenTx(null)} onChanged={() => void reloadData()} />
-  <SettingsPage visible={showSettings} onClose={() => setShowSettings(false)} colors={colors} mode={mode} setMode={setMode} accent={accent} setAccent={setAccent} />
-  <CurrencySheet visible={showCurrency} onClose={() => setShowCurrency(false)} colors={colors} code={currency} setCode={setCurrency} />
+  <SettingsPage visible={showSettings} onClose={() => setShowSettings(false)} colors={colors} mode={mode} setMode={setMode} accent={accent} setAccent={setAccent} scope={scope} currency={currency} setCurrency={setCurrency} />
+  <PrivacyPage visible={showPrivacy && !!session} onClose={() => setShowPrivacy(false)} colors={colors}
+    deleteSection={session ? <LocalDataSection userId={session.user.id} colors={colors} onDeleted={() => { setTransactions([]); setSmsStatusTick((n) => n + 1); }} /> : null}
+    smsSection={session ? <SmsStagingStatusSection userId={session.user.id} colors={colors} refreshKey={smsStatusTick} /> : null} />
   <CategoryManager visible={showCats} scope={scope} colors={colors} onClose={() => setShowCats(false)} onChanged={() => void reloadData()} />
   <MerchantNamesManager visible={showAliases} userId={scope} colors={colors} onClose={() => setShowAliases(false)} />
   </SafeAreaView>;
