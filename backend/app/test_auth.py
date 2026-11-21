@@ -1,10 +1,39 @@
-from uuid import uuid4
+from datetime import datetime, timedelta, timezone
+from typing import Optional
+from uuid import UUID, uuid4
 
 from fastapi.testclient import TestClient
+from sqlalchemy import func, select
 
+from .auth import hash_token
+from .db.models import RefreshToken, User
+from .db.session import get_session_factory
 from .main import app
 
 client = TestClient(app)
+
+
+def row_for(token: str) -> Optional[RefreshToken]:
+    with get_session_factory()() as session:
+        return session.scalar(select(RefreshToken).where(RefreshToken.token_hash == hash_token(token)))
+
+
+def age_revocation(token: str, seconds: int) -> None:
+    """Pretend the token was rotated `seconds` ago."""
+    with get_session_factory()() as session:
+        row = session.scalar(select(RefreshToken).where(RefreshToken.token_hash == hash_token(token)))
+        assert row is not None and row.revoked_at is not None
+        row.revoked_at = datetime.now(timezone.utc) - timedelta(seconds=seconds)
+        session.commit()
+
+
+def token_count(user_id: str) -> int:
+    with get_session_factory()() as session:
+        return session.scalar(select(func.count()).select_from(RefreshToken).where(RefreshToken.user_id == UUID(user_id)))
+
+
+def refresh(token: str):
+    return client.post("/api/v1/auth/refresh", json={"refresh_token": token})
 
 
 def register_user() -> tuple[dict, dict[str, str]]:
@@ -62,6 +91,7 @@ def test_refresh_rotation_and_logout_revocation() -> None:
     refreshed = client.post("/api/v1/auth/refresh", json={"refresh_token": payload["refresh_token"]})
     assert refreshed.status_code == 200
     rotated = refreshed.json()
+    age_revocation(payload["refresh_token"], 61)  # outside the reuse grace the spent token is rejected
     assert client.post("/api/v1/auth/refresh", json={"refresh_token": payload["refresh_token"]}).status_code == 401
     assert client.post("/api/v1/auth/logout", headers={"Authorization": f"Bearer {rotated['access_token']}"}, json={"refresh_token": rotated["refresh_token"]}).status_code == 204
     assert client.post("/api/v1/auth/refresh", json={"refresh_token": rotated["refresh_token"]}).status_code == 401
@@ -80,35 +110,105 @@ def test_transaction_requires_owner_and_is_scoped() -> None:
     assert first["user"]["id"] != second["user"]["id"]
 
 
-def test_concurrent_refresh_with_one_token_lets_only_one_request_win() -> None:
-    """Two requests presenting the same refresh token at once: exactly one may consume it."""
+def _race(token: str, workers: int) -> list[int]:
     import threading
 
-    payload, _ = register_user()
-    token = payload["refresh_token"]
-    workers = 6
     barrier = threading.Barrier(workers)
     codes: list[int] = []
-    bodies: list[dict] = []
 
     def attempt() -> None:
         local = TestClient(app)
         barrier.wait()
-        response = local.post("/api/v1/auth/refresh", json={"refresh_token": token})
-        codes.append(response.status_code)
-        if response.status_code == 200:
-            bodies.append(response.json())
+        codes.append(local.post("/api/v1/auth/refresh", json={"refresh_token": token}).status_code)
 
     threads = [threading.Thread(target=attempt) for _ in range(workers)]
     for thread in threads:
         thread.start()
     for thread in threads:
         thread.join()
+    return sorted(codes)
 
-    assert sorted(codes) == [200] + [401] * (workers - 1)
-    # The winner's new refresh token works, and the original one stays spent.
-    assert client.post("/api/v1/auth/refresh", json={"refresh_token": bodies[0]["refresh_token"]}).status_code == 200
-    assert client.post("/api/v1/auth/refresh", json={"refresh_token": token}).status_code == 401
+
+def test_concurrent_refresh_with_one_token_rotates_once_and_grants_one_grace_use() -> None:
+    """Six simultaneous requests with one unused token: one rotates it, one gets the single grace use, the rest are rejected."""
+    payload, _ = register_user()
+    assert _race(payload["refresh_token"], 6) == [200, 200, 401, 401, 401, 401]
+    assert row_for(payload["refresh_token"]) is None  # the grace use consumed the rotated row
+
+
+def test_concurrent_grace_reuse_gives_exactly_one_success() -> None:
+    payload, _ = register_user()
+    assert refresh(payload["refresh_token"]).status_code == 200  # rotated; the original is now inside the grace window
+    assert _race(payload["refresh_token"], 6) == [200, 401, 401, 401, 401, 401]
+
+
+def test_grace_reuse_inside_60_seconds_works_once_and_never_touches_revoked_at() -> None:
+    payload, _ = register_user()
+    token = payload["refresh_token"]
+    first = refresh(token)
+    assert first.status_code == 200
+    assert row_for(token).revoked_at is not None
+
+    again = refresh(token)  # inside the grace window: a fresh pair
+    assert again.status_code == 200
+    assert again.json()["refresh_token"] not in (token, first.json()["refresh_token"])
+    assert row_for(token) is None  # consumed by deletion; revoked_at was never rewritten
+    assert refresh(token).status_code == 401  # single use
+    assert refresh(first.json()["refresh_token"]).status_code == 200  # the tokens issued meanwhile still work
+    assert refresh(again.json()["refresh_token"]).status_code == 200
+
+
+def test_reuse_after_60_seconds_is_rejected_and_the_row_is_left_alone() -> None:
+    payload, _ = register_user()
+    token = payload["refresh_token"]
+    assert refresh(token).status_code == 200
+    age_revocation(token, 61)
+    assert refresh(token).status_code == 401
+    row = row_for(token)
+    assert row is not None and row.revoked_at is not None  # a rejected attempt changes nothing
+
+
+def test_reuse_after_sign_out_is_rejected_and_sign_out_deletes_the_row() -> None:
+    payload, _ = register_user()
+    token = payload["refresh_token"]
+    headers = {"Authorization": f"Bearer {payload['access_token']}"}
+    assert client.post("/api/v1/auth/logout", headers=headers, json={"refresh_token": token}).status_code == 204
+    assert row_for(token) is None
+    assert refresh(token).status_code == 401
+
+
+def test_the_token_rotated_just_before_sign_out_cannot_start_a_new_session() -> None:
+    payload, _ = register_user()
+    old = payload["refresh_token"]
+    rotated = refresh(old).json()  # `old` is now inside its grace window
+    headers = {"Authorization": f"Bearer {rotated['access_token']}"}
+    assert client.post("/api/v1/auth/logout", headers=headers, json={"refresh_token": rotated["refresh_token"]}).status_code == 204
+    assert row_for(old) is None and row_for(rotated["refresh_token"]) is None
+    assert refresh(old).status_code == 401
+    assert refresh(rotated["refresh_token"]).status_code == 401
+
+
+def test_sign_out_without_a_token_deletes_every_refresh_token_of_the_user() -> None:
+    payload, _ = register_user()
+    user_id = payload["user"]["id"]
+    second = client.post("/api/v1/auth/login", json={"email": payload["user"]["email"], "password": "SecurePass1"}).json()
+    rotated = refresh(second["refresh_token"]).json()  # leaves a rotated row as well
+    assert token_count(user_id) >= 3
+    assert client.post("/api/v1/auth/logout", headers={"Authorization": f"Bearer {rotated['access_token']}"}, json={}).status_code == 204
+    assert token_count(user_id) == 0
+    for token in (payload["refresh_token"], second["refresh_token"], rotated["refresh_token"]):
+        assert refresh(token).status_code == 401
+
+
+def test_deleting_the_account_deletes_its_refresh_tokens() -> None:
+    payload, _ = register_user()
+    user_id = UUID(payload["user"]["id"])
+    assert token_count(payload["user"]["id"]) == 1
+    with get_session_factory()() as session:
+        session.delete(session.get(User, user_id))
+        session.commit()
+    assert token_count(payload["user"]["id"]) == 0
+    assert refresh(payload["refresh_token"]).status_code == 401
 
 
 def test_failed_rotation_rolls_back_so_the_old_token_still_works(monkeypatch) -> None:

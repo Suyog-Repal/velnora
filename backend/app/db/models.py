@@ -213,6 +213,8 @@ class RefreshToken(Base):
     token_hash = Column(String(255), unique=True, nullable=False, index=True)
     device_id = Column(String(120), nullable=True)
     expires_at = Column(DateTime(timezone=True), nullable=False, index=True)
+    # Set ONLY by refresh rotation (see /api/v1/auth/refresh). Sign-out and account deletion delete the row instead, so a
+    # row with revoked_at set always means "rotated", which is what the 60-second reuse grace relies on.
     revoked_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
 

@@ -35,6 +35,11 @@ JWT_SECRET = _settings.jwt_secret_key
 ACCESS_TOKEN_MINUTES = _settings.jwt_access_token_expire_minutes
 REFRESH_TOKEN_DAYS = _settings.jwt_refresh_token_expire_days
 
+# A refresh token that was revoked by ROTATION may be presented again for this long and still gets a fresh pair. This covers
+# a response that was lost after the server rotated (dropped connection, app killed before saving). Each rotated token can
+# be used this way once: the use consumes (deletes) the row. See the rule at the revocation code in main.py.
+REFRESH_REUSE_GRACE = timedelta(seconds=60)
+
 
 def hash_token(token: str) -> str:
     """Compute SHA-256 hash of raw token for safe database persistence."""

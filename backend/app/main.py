@@ -16,7 +16,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import and_, or_, select, text, update
+from sqlalchemy import and_, delete, or_, select, text, update
 from sqlalchemy.orm import Session
 
 from app.config import configure_logging, get_settings
@@ -33,6 +33,7 @@ from .auth import (
     ForgotPasswordRequest,
     LoginRequest,
     LogoutRequest,
+    REFRESH_REUSE_GRACE,
     RefreshRequest,
     RegisterRequest,
     UserRecord,
@@ -225,25 +226,25 @@ def refresh(payload: RefreshRequest, db: Session = Depends(get_db)) -> AuthRespo
     user = decode_token(payload.refresh_token, "refresh", db=db)
     token_h = hash_token(payload.refresh_token)
     now = datetime.now(timezone.utc)
+    mine = (RefreshTokenModel.token_hash == token_h, RefreshTokenModel.user_id == user.id, RefreshTokenModel.expires_at > now)
 
     # Rotation is one transaction: claim the old token and insert the new one, then commit once. A failure anywhere in
     # between rolls both back, so the caller keeps a token that still works (the old one) instead of losing the session.
-    # The claim is a conditional UPDATE (revoked_at IS NULL): PostgreSQL makes a second concurrent request wait for the
-    # first to commit and then re-check the condition, so exactly one request can consume a given token.
+    # Both claims below are single conditional statements: PostgreSQL makes a concurrent request wait for the first to
+    # commit and then re-check the condition, so a given token can be claimed (and later grace-used) by exactly one request.
     try:
-        claimed = db.execute(
-            update(RefreshTokenModel)
-            .where(
-                RefreshTokenModel.token_hash == token_h,
-                RefreshTokenModel.user_id == user.id,
-                RefreshTokenModel.revoked_at.is_(None),
-                RefreshTokenModel.expires_at > now,
-            )
-            .values(revoked_at=now)
-        )
-        if claimed.rowcount != 1:
-            db.rollback()
-            raise HTTPException(status_code=401, detail="Invalid or revoked session")
+        # RULE: a revoked row (revoked_at set) exists ONLY because of rotation, and this statement is the only code that
+        # sets revoked_at. Every other way a refresh token ends (sign-out, revoke-all, account deletion) DELETES the row.
+        # The grace branch below relies on this: it treats any recently revoked row as "rotated", never "signed out".
+        rotated = db.execute(update(RefreshTokenModel).where(*mine, RefreshTokenModel.revoked_at.is_(None)).values(revoked_at=now))
+        if rotated.rowcount != 1:
+            # Reuse grace: a token rotated less than REFRESH_REUSE_GRACE ago (a lost response, or the request that just beat
+            # this one) may be used ONCE more. The use deletes the row, so revoked_at is never touched and a second use,
+            # concurrent or later, finds nothing and is rejected.
+            graced = db.execute(delete(RefreshTokenModel).where(*mine, RefreshTokenModel.revoked_at >= now - REFRESH_REUSE_GRACE))
+            if graced.rowcount != 1:
+                db.rollback()
+                raise HTTPException(status_code=401, detail="Invalid or revoked session")
         access_token, refresh_token = issue_tokens(user, db=db, commit=False)
         db.commit()
     except HTTPException:
@@ -256,26 +257,15 @@ def refresh(payload: RefreshRequest, db: Session = Depends(get_db)) -> AuthRespo
 
 @app.post("/api/v1/auth/logout", status_code=status.HTTP_204_NO_CONTENT)
 def logout(payload: LogoutRequest, user: UserModel = Depends(current_user), db: Session = Depends(get_db)) -> None:
-    now = datetime.now(timezone.utc)
+    # Sign-out DELETES the refresh-token rows (it never sets revoked_at; see the RULE in /refresh). Rows rotated within the
+    # grace window are removed too, otherwise the token that was current a moment before sign-out could still be used to
+    # start a new session.
+    grace_start = datetime.now(timezone.utc) - REFRESH_REUSE_GRACE
+    stmt = delete(RefreshTokenModel).where(RefreshTokenModel.user_id == user.id)
     if payload.refresh_token:
-        token_h = hash_token(payload.refresh_token)
-        stmt = select(RefreshTokenModel).where(
-            RefreshTokenModel.token_hash == token_h,
-            RefreshTokenModel.user_id == user.id,
-        )
-        token_row = db.scalar(stmt)
-        if token_row and token_row.revoked_at is None:
-            token_row.revoked_at = now
-            db.commit()
-    else:
-        # Revoke all active refresh tokens for the user
-        stmt = select(RefreshTokenModel).where(
-            RefreshTokenModel.user_id == user.id,
-            RefreshTokenModel.revoked_at.is_(None),
-        )
-        for row in db.scalars(stmt).all():
-            row.revoked_at = now
-        db.commit()
+        stmt = stmt.where(or_(RefreshTokenModel.token_hash == hash_token(payload.refresh_token), RefreshTokenModel.revoked_at >= grace_start))
+    db.execute(stmt)  # no token named: every token of the user ends
+    db.commit()
 
 
 @app.post("/api/v1/auth/forgot-password")
