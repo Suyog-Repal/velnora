@@ -4,7 +4,7 @@
  * Android Keystore (see docs/MANUAL_TEST_AUTH_RESILIENCE.md).
  */
 import assert from 'node:assert/strict';
-import { createSessionStore, defaultBackoffMs, isValidSession, type SessionStorePort } from '../sessionPersistence.ts';
+import { createSessionStore, createWriteFailureInjector, defaultBackoffMs, isValidSession, parseDebugFailCount, type SessionStorePort } from '../sessionPersistence.ts';
 import { createSharedRefresh, type RefreshableSession } from '../sessionRefresh.ts';
 
 interface S extends RefreshableSession { tag?: string }
@@ -190,6 +190,59 @@ async function main() {
     await store.clear();
     assert.equal(port.value, null);
     assert.equal(port.removed, 1);
+  });
+
+  await test('debug switch: the env value is parsed strictly, anything unusable means off', () => {
+    assert.equal(parseDebugFailCount('3'), 3);
+    assert.equal(parseDebugFailCount(' 6 '), 6);
+    for (const off of [undefined, '', '0', '-1', '2.5', 'abc', '3x', '51', '1e3', 'true']) assert.equal(parseDebugFailCount(off), 0, String(off));
+  });
+
+  await test('debug switch: disabled it returns the real port untouched', async () => {
+    const port = new FakeStore();
+    const injector = createWriteFailureInjector(0);
+    assert.equal(injector.enabled, false);
+    assert.equal(injector.wrap(port), port, 'the very same object: no wrapper, no behaviour change');
+    injector.arm();
+    await injector.wrap(port).write('x');
+    assert.equal(port.value, 'x');
+  });
+
+  await test('debug switch: nothing fails until armed (sign-in is unaffected), then exactly N writes fail, once per run', async () => {
+    const port = new FakeStore();
+    const injector = createWriteFailureInjector(2);
+    const wrapped = injector.wrap(port);
+    await wrapped.write('login');                     // before the first refresh: passes
+    assert.equal(port.value, 'login');
+    injector.arm();
+    await assert.rejects(wrapped.write('a'), /simulated/);
+    await assert.rejects(wrapped.write('b'), /simulated/);
+    await wrapped.write('c');                         // the third write goes through
+    assert.equal(port.value, 'c');
+    injector.arm();                                   // a later refresh does not re-arm it
+    await wrapped.write('d');
+    assert.equal(port.value, 'd');
+    assert.equal(await wrapped.read(), 'd');
+    await wrapped.remove();
+    assert.equal(port.value, null);
+  });
+
+  await test('debug switch with the real store: the refreshed session stays in memory through N failures, then is written', async () => {
+    const port = new FakeStore(); const clock = fakeClock();
+    const injector = createWriteFailureInjector(3);
+    port.value = JSON.stringify(session('r1'));
+    const store = createSessionStore<S>(injector.wrap(port), { schedule: clock.schedule });
+    await store.save(session('r1'));                  // sign-in works
+    injector.arm();                                   // what auth.ts does on a successful refresh
+    assert.equal(await store.persistIssued(session('r2')), 'deferred');
+    assert.equal((await store.load())!.refresh_token, 'r2');
+    await clock.runNext(); await clock.runNext();     // failures 2 and 3
+    assert.equal(store.hasPending(), true);
+    assert.equal((await store.load())!.refresh_token, 'r2', 'still signed in with the new tokens');
+    await clock.runNext();                            // write 4 succeeds
+    assert.equal(store.hasPending(), false);
+    assert.equal(JSON.parse(port.value!).refresh_token, 'r2');
+    assert.deepEqual(clock.delays(), [1000, 2000, 4000]);
   });
 
   await test('with the shared refresh: after a refresh whose save failed, the next refresh uses the NEW token and never re-sends the spent one', async () => {

@@ -50,6 +50,37 @@ export interface SessionStoreOptions<S = unknown> {
   onEvent?: (event: 'save_session_ok' | 'save_session_fail' | 'load_session', detail?: { retry?: number; result?: LoadStatus }) => void;
 }
 
+/**
+ * DEBUG ONLY. Lets a developer see the "secure storage refuses the refreshed session" path on a real device, which Android
+ * cannot be made to do from outside. The first N writes after the first refresh throw; every other write passes through.
+ * It does nothing unless N is a positive number, and auth.ts only ever passes a positive N in a development build.
+ */
+export function parseDebugFailCount(value: string | undefined): number {
+  const n = Number((value ?? '').trim());
+  return Number.isInteger(n) && n > 0 && n <= 50 ? n : 0;
+}
+
+export function createWriteFailureInjector(count: number) {
+  let remaining = 0;
+  let armed = false;
+  return {
+    enabled: count > 0,
+    /** Called when a refresh succeeds: from now on the next `count` writes fail (once per run, so sign-in itself is unaffected). */
+    arm(): void { if (count > 0 && !armed) { armed = true; remaining = count; } },
+    wrap(port: SessionStorePort): SessionStorePort {
+      if (count <= 0) return port; // not enabled: the real port, untouched
+      return {
+        read: () => port.read(),
+        remove: () => port.remove(),
+        write: async (value: string) => {
+          if (remaining > 0) { remaining -= 1; throw new Error('debug: simulated secure-store write failure'); }
+          return port.write(value);
+        },
+      };
+    },
+  };
+}
+
 export const defaultBackoffMs = (attempt: number): number => Math.min(60_000, 1000 * 2 ** Math.max(0, attempt - 1));
 
 const defaultSchedule = (fn: () => void, ms: number): (() => void) => {

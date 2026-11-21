@@ -59,15 +59,32 @@ the stub (login is passed through), then:
 | B4 | **Unreadable sign-in:** needs a corrupt stored value, which cannot be made from outside the app. Only the unit tests cover it; if you have a debug build you can overwrite the secure-store entry `velnora.session.v1` with junk using a temporary one-line script. | "Your saved sign-in couldn't be read on this device…". The stored value is NOT deleted (diagnostics: `load_session result=parse_error`). |
 | B5 | Receive a bank SMS while the app is closed, then open it. | The transaction is captured and you are still signed in (background tasks never end a session). Diagnostics show `headless_task task=capture_drain session_present=true`. |
 
-## C. Failed secure-store save (needs a debug switch, not yet in the app)
+## C. Failed secure-store save (debug switch)
 
-Android cannot be made to fail a Keystore write from outside the app, and the app has no switch for it yet. The unit tests
-(`sessionPersistence.test.ts`) prove the behaviour with a fake store: the new tokens stay in memory, the write is retried
-1 s, 2 s, 4 s ... up to 60 s, a foreground event retries at once, and the spent token is never re-sent.
-To test it on a device a small debug-only "fail the next N session saves" setting is needed; ask for it before relying on C.
-With it, the expected result would be: after a refresh with a failing save you stay signed in for the whole run
-(`save_session_fail retry=...` repeating in diagnostics), and once saves work again `save_session_ok` appears and a restart
-keeps you signed in.
+Android cannot be made to fail a Keystore write from outside, so a development build has a switch. It exists ONLY in a
+development build: `auth.ts` honours it only when `__DEV__` is true, so a release APK ignores it even if the variable is set.
+
+Start Metro with the variable set (it is read when the app is bundled, so restart Metro with a clean cache), then run the
+debug app on the device:
+
+```
+set EXPO_PUBLIC_DEBUG_FAIL_SESSION_SAVES=6        (PowerShell: $env:EXPO_PUBLIC_DEBUG_FAIL_SESSION_SAVES = '6')
+npx expo start --clear
+```
+
+The log shows `[Velnora] DEBUG: session saves are set to fail after the first refresh`. Signing in is not affected; the first N
+session writes AFTER the first refresh fail (retries count), once per run. With N = 6 the failures last about a minute
+(retries at 1, 2, 4, 8, 16, 32 s), which is long enough to watch. Restarting the app resets the counter.
+
+| # | Steps | Expected |
+|---|-------|----------|
+| C1 | Sign in, force-close and reopen (the launch refresh runs). Use the app for a minute: add a transaction, switch tabs. | You stay signed in the whole run; nothing is wrong on screen. |
+| C2 | Profile > Privacy & data > Copy diagnostics. | `refresh_http status=200`, then `save_session_fail retry=0`, `retry=1`, `retry=2` ... and, after about a minute, `save_session_ok retry=6`. |
+| C3 | Right after `save_session_ok`, force-close and reopen. | Still signed in, and a normal `refresh_http status=200`. The new tokens really were written. |
+| C4 | While saves are still failing (within the first ~30 s), put the app in the background and bring it back. | A foreground event retries immediately (an extra `save_session_fail`/`save_session_ok` appears at once). |
+| C5 | **Known limit:** while saves are failing, force-close the app (the unsaved new tokens die with the process), then reopen within 60 s. | Stored token is the OLD one, already rotated. The backend's 60-second reuse grace accepts it once: Render log `outcome=within_grace`, you stay signed in. After more than 60 s the old token is refused (401) and you get "Your session has ended". |
+| C6 | Remove the variable, restart Metro with `--clear`. | No DEBUG warning and no failed saves. |
+| C7 | Build a release APK (or an EAS/Gradle release) with the variable set. | No effect at all (ignored because it is not a development build). |
 
 ## D. Server side (Render logs)
 

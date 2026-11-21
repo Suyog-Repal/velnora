@@ -5,7 +5,7 @@ import { purgeStagedSmsForUser } from './src/services/smsStagingService.ts';
 import type { AuthUser, Session } from './src/db/types.ts';
 import { resolveApiUrl } from './src/services/apiConfig.ts';
 import { createSharedRefresh } from './src/services/sessionRefresh.ts';
-import { createSessionStore, isValidSession } from './src/services/sessionPersistence.ts';
+import { createSessionStore, createWriteFailureInjector, isValidSession, parseDebugFailCount } from './src/services/sessionPersistence.ts';
 import { diag } from './src/services/diagnostics.ts';
 import { AUTH_PATHS, AuthRequestError, apiRequest, expectSession, registerBody, type RequestErrorKind } from './src/services/apiClient.ts';
 
@@ -40,11 +40,16 @@ configureApiBaseUrl(API_URL); // sync requests that pass no explicit URL now use
 
 // Reads and writes of the session go through one store: a refreshed session that secure storage refuses to write is kept in
 // memory and retried (see sessionPersistence.ts), never dropped.
-const sessionStore = createSessionStore<Session>({
+// DEBUG ONLY: EXPO_PUBLIC_DEBUG_FAIL_SESSION_SAVES=N makes the first N session writes after the first refresh fail, to test the
+// keep-in-memory-and-retry path on a device. Honoured only in a development build (__DEV__); a release build ignores it entirely.
+const failureInjector = createWriteFailureInjector(typeof __DEV__ !== 'undefined' && __DEV__ ? parseDebugFailCount(process.env.EXPO_PUBLIC_DEBUG_FAIL_SESSION_SAVES) : 0);
+if (failureInjector.enabled) console.warn('[Velnora] DEBUG: session saves are set to fail after the first refresh (EXPO_PUBLIC_DEBUG_FAIL_SESSION_SAVES). Development builds only.');
+
+const sessionStore = createSessionStore<Session>(failureInjector.wrap({
   read: () => SecureStore.getItemAsync(SESSION_KEY),
   write: (value) => SecureStore.setItemAsync(SESSION_KEY, value),
   remove: () => SecureStore.deleteItemAsync(SESSION_KEY),
-}, {
+}), {
   validate: (value): value is Session => isValidSession(value),
   // Event names and a result word only; never the session (diagnostics.ts refuses anything else).
   onEvent: (event, detail) => diag(event, event === 'load_session' ? { result: detail?.result } : { retry: detail?.retry }),
@@ -87,6 +92,7 @@ export async function refreshSession(session: Session): Promise<Session> {
     throw err;
   }
   // The server has already rotated the token: these are the only valid tokens now. A failed write must not lose them.
+  failureInjector.arm(); // debug builds only: no effect otherwise
   await sessionStore.persistIssued(next);
   return next;
 }
