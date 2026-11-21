@@ -4,7 +4,7 @@
  * Android Keystore (see docs/MANUAL_TEST_AUTH_RESILIENCE.md).
  */
 import assert from 'node:assert/strict';
-import { createSessionStore, defaultBackoffMs, type SessionStorePort } from '../sessionPersistence.ts';
+import { createSessionStore, defaultBackoffMs, isValidSession, type SessionStorePort } from '../sessionPersistence.ts';
 import { createSharedRefresh, type RefreshableSession } from '../sessionRefresh.ts';
 
 interface S extends RefreshableSession { tag?: string }
@@ -17,7 +17,8 @@ class FakeStore implements SessionStorePort {
   alwaysFail = false;
   writes = 0;
   removed = 0;
-  async read() { return this.value; }
+  failReads = false;
+  async read() { if (this.failReads) throw new Error('keystore not ready'); return this.value; }
   async write(v: string) { this.writes += 1; if (this.alwaysFail || this.failWrites > 0) { if (this.failWrites > 0) this.failWrites -= 1; throw new Error('keystore unavailable'); } this.value = v; }
   async remove() { this.removed += 1; this.value = null; }
 }
@@ -55,7 +56,7 @@ async function main() {
     const port = new FakeStore(); const clock = fakeClock(); const events: string[] = [];
     port.value = JSON.stringify(session('r1')); // the OLD, now-rotated token is what storage still holds
     port.failWrites = 2;
-    const store = createSessionStore<S>(port, { schedule: clock.schedule, onEvent: (e) => events.push(e) });
+    const store = createSessionStore<S>(port, { schedule: clock.schedule, onEvent: (e) => { if (e !== 'load_session') events.push(e); } });
 
     assert.equal(await store.persistIssued(session('r2')), 'deferred');
     assert.equal(store.hasPending(), true);
@@ -136,13 +137,59 @@ async function main() {
     assert.equal(JSON.parse(port.value!).refresh_token, 'fresh-login');
   });
 
-  await test('load: nothing stored gives null; unreadable JSON is removed and gives null (unchanged behaviour until the validation step)', async () => {
-    const port = new FakeStore();
-    const store = createSessionStore<S>(port);
-    assert.equal(await store.load(), null);
+  const full = { user: { id: 'u1', full_name: 'A B', email: 'a@x.com' }, access_token: 'acc', refresh_token: 'ref', token_type: 'bearer' };
+
+  await test('session shape: only a complete session is accepted', () => {
+    assert.equal(isValidSession(full), true);
+    assert.equal(isValidSession({ ...full, token_type: undefined }), true, 'token_type is optional');
+    for (const bad of [null, undefined, 'x', 5, [], {}, { ...full, access_token: '' }, { ...full, refresh_token: undefined }, { ...full, refresh_token: 7 },
+      { ...full, user: null }, { ...full, user: { ...full.user, id: '' } }, { ...full, user: { ...full.user, full_name: undefined } }, { ...full, user: { ...full.user, email: 5 } }, { ...full, user: 'u1' }]) {
+      assert.equal(isValidSession(bad), false, JSON.stringify(bad));
+    }
+  });
+
+  await test('loadDetailed says why there is no session: missing, read_error, parse_error, invalid_shape (and ok)', async () => {
+    const port = new FakeStore(); const events: string[] = [];
+    const store = createSessionStore(port, { validate: isValidSession, onEvent: (e, d) => { if (e === 'load_session') events.push(String(d?.result)); } });
+    assert.deepEqual(await store.loadDetailed(), { status: 'missing' });
+    port.value = JSON.stringify(full);
+    assert.deepEqual(await store.loadDetailed(), { status: 'ok', session: full });
     port.value = '{not json';
+    assert.deepEqual(await store.loadDetailed(), { status: 'parse_error' });
+    port.value = JSON.stringify({ user: { id: 'u1' }, access_token: 'a' });
+    assert.deepEqual(await store.loadDetailed(), { status: 'invalid_shape' });
+    port.value = JSON.stringify(full); port.failReads = true;
+    assert.deepEqual(await store.loadDetailed(), { status: 'read_error' });
+    assert.deepEqual(events, ['missing', 'ok', 'parse_error', 'invalid_shape', 'read_error']);
+  });
+
+  await test('loading NEVER deletes or rewrites what is stored, whatever it finds (so a headless task cannot end a session)', async () => {
+    for (const stored of ['{not json', JSON.stringify({ user: {} }), JSON.stringify(full), null]) {
+      const port = new FakeStore(); port.value = stored;
+      const store = createSessionStore(port, { validate: isValidSession });
+      await store.load(); await store.loadDetailed();
+      port.failReads = true; await store.load();
+      port.failReads = false;
+      assert.equal(port.value, stored, 'storage is untouched');
+      assert.equal(port.removed, 0);
+      assert.equal(port.writes, 0);
+    }
+  });
+
+  await test('load returns null for every non-ok result (callers that only need a session, e.g. background tasks)', async () => {
+    const port = new FakeStore();
+    const store = createSessionStore(port, { validate: isValidSession });
     assert.equal(await store.load(), null);
+    port.value = '{not json'; assert.equal(await store.load(), null);
+    port.value = JSON.stringify(full); assert.deepEqual(await store.load(), full);
+  });
+
+  await test('only clear() removes the stored session', async () => {
+    const port = new FakeStore(); port.value = JSON.stringify(full);
+    const store = createSessionStore(port, { validate: isValidSession });
+    await store.clear();
     assert.equal(port.value, null);
+    assert.equal(port.removed, 1);
   });
 
   await test('with the shared refresh: after a refresh whose save failed, the next refresh uses the NEW token and never re-sends the spent one', async () => {

@@ -3,9 +3,11 @@ import { AccessibilityInfo, Alert, Animated, AppState, Easing, Keyboard, Keyboar
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import Svg, { Circle, Defs, LinearGradient, Path, Stop } from 'react-native-svg';
 import { useCallback, useEffect, useMemo, useRef, useState, type ComponentRef } from 'react';
-import { clearSession, flushPendingSession, loadSession, login, logout, refreshSessionShared as refreshSession, register, requestPasswordReset, saveSession, type Session } from './auth';
+import { clearSession, flushPendingSession, loadSession, loadSessionDetailed, login, logout, refreshSessionShared as refreshSession, register, requestPasswordReset, saveSession, type Session } from './auth';
 import { restoreSession } from './src/services/sessionRestore';
 import { refreshFailureKind } from './src/services/sessionRefresh';
+import { NOTICE_SESSION_ENDED, launchNotice, launchNoticeText, setSignedInMarker, wasSignedIn } from './src/services/sessionNotices';
+import type { LoadStatus } from './src/services/sessionPersistence';
 import { SignInCheckNotice } from './src/ui/SignInCheckNotice';
 import { getGuestDataSummary, importGuestData, isGuestModeChosen, setGuestModeChosen } from './src/services/guestModeService';
 import { addSmsStagedListener, configureSupportedSenderPatterns, getNativeCheckIn, getNativeReviewNotifier } from './sms';
@@ -257,7 +259,7 @@ function AppInner() {
   // The server definitively rejected the refresh token: this is "sign in again", never a silent switch to guest mode. The persisted
   // guest choice is cleared too, otherwise an earlier "continue without an account" would turn this into guest mode on its own.
   const endSessionToSignIn = () => {
-    setAuthNotice('Your session has ended. Sign in again; your data on this device is preserved.');
+    setAuthNotice(NOTICE_SESSION_ENDED);
     void setGuestModeChosen(false).catch(() => undefined);
     setGuestMode(false); setAuthScreen('signin'); setShowAuth(true);
   };
@@ -284,8 +286,12 @@ function AppInner() {
   // Only an explicit server rejection of the refresh token ends the session; local data is never touched.
   useEffect(() => {
     // The first screen comes from local data at once; the refresh runs behind it, so a slow or sleeping server never delays launch.
-    // A keystore that is not ready yet throws; that is not "no session". Look twice before treating it as signed out.
-    loadSession().catch(() => new Promise<Session | null>((resolve) => setTimeout(() => loadSession().then(resolve, () => resolve(null)), 600))).then((stored) => {
+    // A keystore that is not ready yet can fail to read; that is not "no session". Look twice before treating it as signed out, and
+    // remember WHY there is no session so the sign-in screen can say so (see sessionNotices.ts). Nothing stored is ever deleted here.
+    const readOnce = async () => { const first = await loadSessionDetailed(); return first.status === 'read_error' ? new Promise<Awaited<ReturnType<typeof loadSessionDetailed>>>((resolve) => setTimeout(() => loadSessionDetailed().then(resolve), 600)) : first; };
+    readOnce().then((loaded) => {
+      launchSessionStatus.current = loaded.status;
+      const stored = loaded.status === 'ok' ? loaded.session : null;
       if (stored) setSession(stored);
       setAuthReady(true);
       if (!stored) return;
@@ -298,6 +304,34 @@ function AppInner() {
       });
     }).catch(() => setAuthReady(true));
   }, []);
+
+  // Why the app opened signed out (once the database is ready): the saved sign-in could not be read, or none was found although
+  // this device was signed in before (a reinstall or restore). A first run shows nothing. "Session ended" (401) is set elsewhere.
+  const launchSessionStatus = useRef<LoadStatus | null>(null);
+  const launchNoticeDone = useRef(false);
+  useEffect(() => {
+    if (!authReady || !dbReady || launchNoticeDone.current) return;
+    launchNoticeDone.current = true;
+    const status = launchSessionStatus.current;
+    if (!status || status === 'ok') return;
+    void (async () => {
+      const db = getServiceDb();
+      const notice = launchNotice(status, await wasSignedIn(db).catch(() => false));
+      if (!notice) return;
+      if (notice === 'no_session') await setSignedInMarker(db, false).catch(() => undefined); // shown once
+      if (!guestMode) setAuthNotice(launchNoticeText(notice));
+    })();
+  }, [authReady, dbReady, guestMode]);
+
+  // Keep the "this device was signed in" marker in step with the session: set while signed in, cleared when the app ends it.
+  const previousSession = useRef<Session | null>(null);
+  useEffect(() => {
+    if (!dbReady) return;
+    const had = previousSession.current; previousSession.current = session;
+    let db; try { db = getServiceDb(); } catch { return; }
+    if (session) void setSignedInMarker(db, true).catch(() => undefined);
+    else if (had) void setSignedInMarker(db, false).catch(() => undefined);
+  }, [session?.user.id, dbReady]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Initialize SQLite storage and load local categories
   useEffect(() => {

@@ -5,7 +5,7 @@ import { purgeStagedSmsForUser } from './src/services/smsStagingService.ts';
 import type { AuthUser, Session } from './src/db/types.ts';
 import { resolveApiUrl } from './src/services/apiConfig.ts';
 import { createSharedRefresh } from './src/services/sessionRefresh.ts';
-import { createSessionStore } from './src/services/sessionPersistence.ts';
+import { createSessionStore, isValidSession } from './src/services/sessionPersistence.ts';
 import { AUTH_PATHS, AuthRequestError, apiRequest, expectSession, registerBody, type RequestErrorKind } from './src/services/apiClient.ts';
 
 export type { AuthUser, Session };
@@ -43,10 +43,13 @@ const sessionStore = createSessionStore<Session>({
   read: () => SecureStore.getItemAsync(SESSION_KEY),
   write: (value) => SecureStore.setItemAsync(SESSION_KEY, value),
   remove: () => SecureStore.deleteItemAsync(SESSION_KEY),
-});
+}, { validate: (value): value is Session => isValidSession(value) });
 
 export const saveSession = (session: Session): Promise<void> => sessionStore.save(session);
+/** The stored session, or null for any reason it cannot be had. Never deletes anything (safe for background tasks). */
 export const loadSession = (): Promise<Session | null> => sessionStore.load();
+/** Like loadSession, but says why there is none (missing, read_error, parse_error, invalid_shape) so the app can explain. */
+export const loadSessionDetailed = () => sessionStore.loadDetailed();
 export const clearSession = (): Promise<void> => sessionStore.clear();
 /** Tries a deferred session write again now (call when the app returns to the foreground). */
 export const flushPendingSession = (): Promise<boolean> => sessionStore.flushPending();
