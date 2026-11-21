@@ -1,8 +1,9 @@
 import { useEffect, useState, type ReactNode } from 'react';
-import { Modal, Pressable, ScrollView, Text, View } from 'react-native';
+import { Modal, Pressable, ScrollView, Share, Text, View } from 'react-native';
+import Constants from 'expo-constants';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { palette } from '../../theme';
-import { Bell, Check, Clock, MessageSquare, WalletCards, X } from '../../icons';
+import { Bell, Check, Clock, FileText, MessageSquare, WalletCards, X } from '../../icons';
 import { openAppNotificationSettings } from '../../sms';
 import { currencySymbol, Sheet, type Colors } from '../ui/common';
 import { CURRENCIES } from '../ui/currency';
@@ -14,6 +15,7 @@ import { getServiceDb } from '../services/transactionService';
 import { getReviewPref } from '../services/reviewNotifications';
 import { getCheckInPrefs, type CheckInPrefs } from '../services/dailyCheckIn';
 import { formatDisplayTime } from '../services/dateUtils';
+import { diagnostics } from '../services/diagnostics';
 import {
   applyCheckInChange, applyReviewPref, notificationsBlocked, reviewPrefFromState, reviewStateFromPref, shouldRequestNotificationPermission, switchShownOn,
   type ReviewReminderState,
@@ -131,6 +133,13 @@ export function PrivacyPage({ visible, onClose, colors, deleteSection, smsSectio
   return <FullPage visible={visible} onClose={onClose} colors={colors} title="Privacy & data" closeLabel="Close privacy and data">
     <Reveal index={0}><Group title="Your data on this device" colors={colors}>{deleteSection}</Group></Reveal>
     <Reveal index={1}><Group title="How messages are read" colors={colors}><View style={{ paddingHorizontal: 14 }}>{smsSection}</View></Group></Reveal>
+    <Reveal index={2}>
+      <Group title="Diagnostics" colors={colors}>
+        {/* No clipboard library is installed, so this opens Android's share sheet, which has a Copy button. */}
+        <ActionRow icon={<FileText size={18} color={palette.emerald} />} title="Copy diagnostics" subtitle="A log of recent sign-in and sync events to send when reporting a problem. Contains no tokens, passwords, e-mail addresses, account ids or amounts."
+          action="Copy" onPress={() => { void Share.share({ message: diagnostics.format({ app: Constants.expoConfig?.version }) }).catch(() => undefined); }} last colors={colors} />
+      </Group>
+    </Reveal>
   </FullPage>;
 }
 

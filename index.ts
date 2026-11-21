@@ -1,3 +1,4 @@
+import './src/services/diagnosticsStorage'; // first: starts the diagnostics log for the app and the background tasks
 import { registerRootComponent } from 'expo';
 import { AppRegistry } from 'react-native';
 

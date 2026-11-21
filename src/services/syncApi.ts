@@ -29,6 +29,11 @@ export function setSyncRequestTimeoutMs(ms: number | null): void {
   requestTimeoutMs = ms;
 }
 
+/** Read-only hook for diagnostics: told the HTTP status of every sync request, or "network" / "timeout" when there was none. */
+let httpObserver: ((outcome: number | 'network' | 'timeout') => void) | null = null;
+export function setSyncHttpObserver(fn: ((outcome: number | 'network' | 'timeout') => void) | null): void { httpObserver = fn; }
+const observe = (outcome: number | 'network' | 'timeout'): void => { try { httpObserver?.(outcome); } catch { /* diagnostics never affect syncing */ } };
+
 let configuredBaseUrl: string | null = null;
 
 /** Called once by auth.ts with the app-wide resolved API URL ('' = not configured) so sync never uses a divergent default. */
@@ -71,6 +76,7 @@ async function syncRequest<T>(
       });
     } catch (netErr) {
       const timedOut = controller?.signal.aborted === true;
+      observe(timedOut ? 'timeout' : 'network');
       throw new SyncApiError(
         timedOut ? 'Synchronization server did not respond in time.' : 'Unable to connect to synchronization server.',
         'connection',
@@ -86,6 +92,7 @@ async function syncRequest<T>(
     if (timer) clearTimeout(timer);
   }
 
+  observe(response.status);
   if (!response.ok) {
     const detail =
       typeof responseBody === 'object' && responseBody !== null && 'detail' in responseBody

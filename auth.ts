@@ -6,6 +6,7 @@ import type { AuthUser, Session } from './src/db/types.ts';
 import { resolveApiUrl } from './src/services/apiConfig.ts';
 import { createSharedRefresh } from './src/services/sessionRefresh.ts';
 import { createSessionStore, isValidSession } from './src/services/sessionPersistence.ts';
+import { diag } from './src/services/diagnostics.ts';
 import { AUTH_PATHS, AuthRequestError, apiRequest, expectSession, registerBody, type RequestErrorKind } from './src/services/apiClient.ts';
 
 export type { AuthUser, Session };
@@ -43,14 +44,19 @@ const sessionStore = createSessionStore<Session>({
   read: () => SecureStore.getItemAsync(SESSION_KEY),
   write: (value) => SecureStore.setItemAsync(SESSION_KEY, value),
   remove: () => SecureStore.deleteItemAsync(SESSION_KEY),
-}, { validate: (value): value is Session => isValidSession(value) });
+}, {
+  validate: (value): value is Session => isValidSession(value),
+  // Event names and a result word only; never the session (diagnostics.ts refuses anything else).
+  onEvent: (event, detail) => diag(event, event === 'load_session' ? { result: detail?.result } : { retry: detail?.retry }),
+});
 
 export const saveSession = (session: Session): Promise<void> => sessionStore.save(session);
 /** The stored session, or null for any reason it cannot be had. Never deletes anything (safe for background tasks). */
 export const loadSession = (): Promise<Session | null> => sessionStore.load();
 /** Like loadSession, but says why there is none (missing, read_error, parse_error, invalid_shape) so the app can explain. */
 export const loadSessionDetailed = () => sessionStore.loadDetailed();
-export const clearSession = (): Promise<void> => sessionStore.clear();
+/** `site` names the call site (e.g. 'logout', 'launch_expired') so diagnostics can say WHY a session ended. */
+export const clearSession = (site: string): Promise<void> => { diag('session_cleared', { site }); return sessionStore.clear(); };
 /** Tries a deferred session write again now (call when the app returns to the foreground). */
 export const flushPendingSession = (): Promise<boolean> => sessionStore.flushPending();
 
@@ -71,7 +77,15 @@ export async function login(email: string, password: string): Promise<Session> {
 }
 
 export async function refreshSession(session: Session): Promise<Session> {
-  const next = expectSession<Session>(await request<unknown>(AUTH_PATHS.refresh, { method: 'POST', body: JSON.stringify({ refresh_token: session.refresh_token }) }));
+  let next: Session;
+  try {
+    next = expectSession<Session>(await request<unknown>(AUTH_PATHS.refresh, { method: 'POST', body: JSON.stringify({ refresh_token: session.refresh_token }) }));
+    diag('refresh_http', { status: 200 });
+  } catch (err) {
+    // The HTTP status when the server answered, otherwise what kind of failure it was (timeout / connection / config).
+    diag('refresh_http', err instanceof AuthRequestError ? { status: err.status, kind: err.kind } : { kind: 'unknown' });
+    throw err;
+  }
   // The server has already rotated the token: these are the only valid tokens now. A failed write must not lose them.
   await sessionStore.persistIssued(next);
   return next;
@@ -115,7 +129,7 @@ export async function logout(session: Session): Promise<void> {
       body: JSON.stringify({ refresh_token: session.refresh_token }),
     });
   } finally {
-    await clearSession();
+    await clearSession('logout');
     // Do NOT delete local SQLite records or sync_queue on logout!
     // Unsynchronized SMS and offline transactions are preserved for session.user.id.
   }

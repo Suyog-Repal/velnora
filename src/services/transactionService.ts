@@ -15,6 +15,7 @@ import { applyAlias, rememberAlias } from './merchantAliasService.ts';
 import { autoSettleFromTransaction } from './expectedPaymentService.ts';
 import { listCategories } from './categoryService.ts';
 import { syncEngine, triggerSync, type SyncSummary } from './syncEngine.ts';
+import { installSyncHttpTally, recordSyncCycle } from './syncDiagnostics.ts';
 
 let repositoriesInitialized = false;
 let txRepo: TransactionRepository | null = null;
@@ -413,7 +414,9 @@ export function onSyncResult(listener: (summary: SyncSummary) => void): () => vo
 // Every real cycle of the engine (app-triggered, network reconnect, follow-up, retry timer) reports here, so the UI and the
 // dependent uploads (receipts, attachments) react to automatic syncs too, not only to the ones the app starts itself.
 // Earlier only syncPendingTransactions() notified, so a backlog synced in the background left the screen showing it pending.
+installSyncHttpTally();
 syncEngine.onCycleComplete(async (summary, s) => {
+  try { void recordSyncCycle(getServiceDb(), summary, (s as Session).user?.id).catch(() => undefined); } catch { /* diagnostics only: counts, never data; must never affect the listeners below */ }
   for (const l of syncListeners) { try { l(summary); } catch { /* a UI listener must never break syncing */ } }
   if (postSyncHook) await postSyncHook(s as Session).catch(() => undefined);
 });

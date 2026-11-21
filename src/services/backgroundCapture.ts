@@ -1,4 +1,5 @@
 import { loadSession } from '../../auth';
+import { diag } from './diagnostics';
 import { getNativeCheckIn, getNativeReviewNotifier } from '../../sms';
 import { drainNativeReviewActions } from './reviewActionDrain.native';
 import { DEFAULT_SMS_RULE } from '../../transactionParser';
@@ -19,6 +20,7 @@ export async function runBackgroundCapture(): Promise<void> {
   await initTransactionService();
   setReviewNotifierPort(getNativeReviewNotifier());
   const session = await loadSession();
+  diag('headless_task', { task: 'capture_drain', session_present: !!session });
   if (!session && !(await isGuestModeChosen())) return; // nobody to own these yet: they wait, staged
   const rules = [DEFAULT_SMS_RULE];
   await drainNativeStagedSms(session, rules);
@@ -38,6 +40,7 @@ export async function runReviewActionDrain(): Promise<void> {
   await initTransactionService();
   setReviewNotifierPort(getNativeReviewNotifier());
   const session = await loadSession();
+  diag('headless_task', { task: 'review_action', session_present: !!session });
   if (!session && !(await isGuestModeChosen())) return; // nobody to own them yet: they stay queued
   await drainNativeReviewActions(session);
   await runReviewPass(getServiceDb(), session?.user.id ?? null);
@@ -53,6 +56,7 @@ export async function runDailyCheckInTask(): Promise<void> {
   await initTransactionService();
   setCheckInPort(getNativeCheckIn());
   const session = await loadSession();
+  diag('headless_task', { task: 'daily_checkin', session_present: !!session });
   if (!session && !(await isGuestModeChosen())) return; // no ledger owner yet: nothing meaningful to count
   await runDailyCheckIn(getServiceDb(), session?.user.id ?? null);
 }

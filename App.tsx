@@ -9,6 +9,8 @@ import { refreshFailureKind } from './src/services/sessionRefresh';
 import { NOTICE_SESSION_ENDED, launchNotice, launchNoticeText, setSignedInMarker, wasSignedIn } from './src/services/sessionNotices';
 import type { LoadStatus } from './src/services/sessionPersistence';
 import { SignInCheckNotice } from './src/ui/SignInCheckNotice';
+import NetInfo from '@react-native-community/netinfo';
+import { diag, diagnostics } from './src/services/diagnostics';
 import { getGuestDataSummary, importGuestData, isGuestModeChosen, setGuestModeChosen } from './src/services/guestModeService';
 import { addSmsStagedListener, configureSupportedSenderPatterns, getNativeCheckIn, getNativeReviewNotifier } from './sms';
 import { confirmCheckInToday, setCheckInPort, syncCheckInSchedule } from './src/services/dailyCheckIn';
@@ -93,6 +95,9 @@ function toUiTransaction(entity: TransactionEntity): Transaction {
 
 function money(value: number) { return formatAmount(value); }
 
+
+/** Tags a refresh with what started it, for the diagnostics log (the shared refresh may coalesce several into one request). */
+const refreshFrom = (source: 'launch' | 'sync401' | 'offlineRetry') => (s: Session): Promise<Session> => { diag('refresh_start', { source }); return refreshSession(s); };
 
 export default function App() {
   // The SMS permission explanation waits until the splash has finished so the two never overlap.
@@ -259,7 +264,7 @@ function AppInner() {
   // The server definitively rejected the refresh token: this is "sign in again", never a silent switch to guest mode. The persisted
   // guest choice is cleared too, otherwise an earlier "continue without an account" would turn this into guest mode on its own.
   const endSessionToSignIn = () => {
-    setAuthNotice(NOTICE_SESSION_ENDED);
+    setAuthNotice(NOTICE_SESSION_ENDED); diag('notice_shown', { notice: 'session_ended' });
     void setGuestModeChosen(false).catch(() => undefined);
     setGuestMode(false); setAuthScreen('signin'); setShowAuth(true);
   };
@@ -268,10 +273,10 @@ function AppInner() {
   useEffect(() => {
     const refresher = createSessionRefresher<Session>({
       loadStored: loadSession,
-      refresh: refreshSession,
+      refresh: refreshFrom('sync401'),
       onRefreshed: (next) => setSession((current) => (current && current.user.id === next.user.id ? next : current)),
       onRejected: (rejected) => {
-        void clearSession();
+        void clearSession('sync401_rejected');
         setSession((current) => (current?.user.id === rejected.user.id ? null : current));
         endSessionToSignIn();
       },
@@ -295,8 +300,8 @@ function AppInner() {
       if (stored) setSession(stored);
       setAuthReady(true);
       if (!stored) return;
-      void restoreSession(stored, refreshSession).then(async (result) => {
-        if (result.status === 'expired') { await clearSession(); endSessionToSignIn(); }
+      void restoreSession(stored, refreshFrom('launch')).then(async (result) => {
+        if (result.status === 'expired') { await clearSession('launch_expired'); endSessionToSignIn(); }
         if (result.status === 'unverified') setVerifyProblem(true);
         // Only apply this to the session it was started for (the person may have signed out meanwhile).
         setSession((current) => (current?.refresh_token === stored.refresh_token ? result.session : current));
@@ -319,7 +324,7 @@ function AppInner() {
       const notice = launchNotice(status, await wasSignedIn(db).catch(() => false));
       if (!notice) return;
       if (notice === 'no_session') await setSignedInMarker(db, false).catch(() => undefined); // shown once
-      if (!guestMode) setAuthNotice(launchNoticeText(notice));
+      if (!guestMode) { setAuthNotice(launchNoticeText(notice)); diag('notice_shown', { notice }); }
     })();
   }, [authReady, dbReady, guestMode]);
 
@@ -423,12 +428,12 @@ function AppInner() {
   // Only a 401 ends the session. 400 / 403 / 422 keep it and show "Can't verify your sign-in"; a network failure just waits.
   const checkSignIn = useCallback(async (current: Session): Promise<'ok' | 'unverified' | 'ended' | 'unreachable'> => {
     try {
-      const next = await refreshSession(current);
+      const next = await refreshFrom('offlineRetry')(current);
       setSession((s) => (s && s.user.id === next.user.id ? next : s)); setSessionStale(false); setVerifyProblem(false);
       return 'ok';
     } catch (err) {
       const kind = refreshFailureKind(err);
-      if (kind === 'rejected') { await clearSession(); setSession(null); setSessionStale(false); setVerifyProblem(false); endSessionToSignIn(); return 'ended'; }
+      if (kind === 'rejected') { await clearSession('check_sign_in_rejected'); setSession(null); setSessionStale(false); setVerifyProblem(false); endSessionToSignIn(); return 'ended'; }
       if (kind === 'unverifiable') { setVerifyProblem(true); return 'unverified'; }
       return 'unreachable';
     }
@@ -441,6 +446,14 @@ function AppInner() {
     const sub = AppState.addEventListener('change', (state) => { if (state === 'active') retry(); });
     return () => { cancelled = true; sub.remove(); };
   }, [session, sessionStale, verifyProblem, checkSignIn]);
+  useEffect(() => { if (verifyProblem) diag('notice_shown', { notice: 'cant_verify' }); }, [verifyProblem]);
+  // App state and network type are stamped on every diagnostics event, and their changes are events too.
+  useEffect(() => {
+    diagnostics.setContext({ app: AppState.currentState ?? undefined });
+    const app = AppState.addEventListener('change', (state) => { diagnostics.setContext({ app: state }); diag('app_state', { state }); });
+    const net = NetInfo.addEventListener((state) => { diagnostics.setContext({ net: state.type }); diag('network', { type: state.type, connected: !!state.isConnected }); });
+    return () => { app.remove(); net(); };
+  }, []);
   const retrySignInCheck = async () => {
     if (!session || verifyBusy) return;
     setVerifyBusy(true);
@@ -451,8 +464,8 @@ function AppInner() {
   };
   // The person chose to sign in again: the stored tokens are cleared (local data stays), like after a 401 but with its own wording.
   const signInAgainFromNotice = async () => {
-    await clearSession().catch(() => undefined);
-    setAuthNotice("Sign in again to keep syncing. Your data on this device is preserved.");
+    await clearSession('sign_in_again_notice').catch(() => undefined);
+    setAuthNotice("Sign in again to keep syncing. Your data on this device is preserved."); diag('notice_shown', { notice: 'sign_in_again' });
     void setGuestModeChosen(false).catch(() => undefined);
     setGuestMode(false); setSession(null); setSessionStale(false); setVerifyProblem(false); setAuthScreen('signin'); setShowAuth(true);
   };
