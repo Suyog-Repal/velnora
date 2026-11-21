@@ -1,6 +1,7 @@
 import { PermissionsAndroid, Platform } from 'react-native';
 import { requireOptionalNativeModule, type EventSubscription } from 'expo-modules-core';
 import type { SmsStagingStore } from './src/services/smsStagingTypes';
+import type { ReviewActionStore } from './src/services/reviewActionDrain';
 import type { ReviewNotifierPort } from './src/services/reviewNotifications';
 
 type VelnoraSmsNativeModule = {
@@ -11,7 +12,10 @@ type VelnoraSmsNativeModule = {
   openNotificationAccessSettings?: () => boolean;
   areNotificationsEnabled?: () => boolean;
   openAppNotificationSettings?: () => boolean;
-  postReviewNotification?: (transactionId: string, title: string, body: string) => boolean;
+  postReviewNotification?: (transactionId: string, title: string, body: string, categories: string[]) => boolean;
+  claimReviewActions?: ReviewActionStore['claim'];
+  completeReviewAction?: ReviewActionStore['complete'];
+  releaseReviewAction?: ReviewActionStore['release'];
   postReviewSummary?: (count: number) => boolean;
   cancelReviewNotification?: (transactionId: string) => void;
   cancelReviewSummary?: () => void;
@@ -93,10 +97,21 @@ export function getNativeReviewNotifier(): ReviewNotifierPort | null {
   if (Platform.OS !== 'android' || !native?.postReviewNotification) return null;
   return {
     canNotify: () => native.areNotificationsEnabled?.() ?? false,
-    post: (n) => native.postReviewNotification?.(n.transactionId, n.title, n.body) ?? false,
+    post: (n) => native.postReviewNotification?.(n.transactionId, n.title, n.body, n.categories ?? []) ?? false,
     postSummary: (count) => native.postReviewSummary?.(count) ?? false,
     cancel: (id) => native.cancelReviewNotification?.(id),
     cancelSummary: () => native.cancelReviewSummary?.(),
+  };
+}
+
+/** Durable queue of categories chosen on notification buttons. Null on an older native build or off Android. */
+export function getNativeReviewActionStore(): ReviewActionStore | null {
+  const native = nativeModule;
+  if (Platform.OS !== 'android' || !native?.claimReviewActions || !native.completeReviewAction || !native.releaseReviewAction) return null;
+  return {
+    claim: (limit, nowMs, leaseMs) => native.claimReviewActions!(limit, nowMs, leaseMs),
+    complete: (id) => native.completeReviewAction!(id),
+    release: (id) => native.releaseReviewAction!(id),
   };
 }
 

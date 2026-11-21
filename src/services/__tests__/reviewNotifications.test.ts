@@ -14,6 +14,7 @@ import { getCashFlowSummary, getLedgerHealth } from '../cashFlowService.ts';
 import { createAccount } from '../accountService.ts';
 import { applyStatement, parseStatementCsv, previewStatement } from '../statementImport.ts';
 import { evaluateCompleteness } from '../transactionCompleteness.ts';
+import { GROUP_WINDOW_MS } from '../notificationGrouping.ts';
 import { describeReview, MAX_INDIVIDUAL_NOTIFICATIONS, REVIEW_SETTLE_MS, clearReviewNotifications, runReviewPass, setReviewNotifierPort, setReviewPref, type ReviewNotification, type ReviewNotifierPort } from '../reviewNotifications.ts';
 import { createReviewLinkRouter, parseReviewLink, resolveReviewTarget, type ReviewLink } from '../reviewLinks.ts';
 import type { SmsReceivedPayload } from '../../../transactionParser.ts';
@@ -163,10 +164,23 @@ async function main() {
   await test('10. different payments with the same amount each get their own notification', async () => {
     const { db, notifier } = await fresh();
     const body = 'Rs.450.00 debited from A/c XX1234 to RAHUL KUMAR';
-    await processIncomingSms(SMS(body, base), A);
-    await processIncomingSms(SMS(body, base + 3 * 60_000), A); await pass(db);
+    // Arriving minutes apart (outside the grouping window), so each is announced on its own.
+    await processIncomingSms(SMS(body, base), A); await runReviewPass(db, A.user.id, { now: later() });
+    await processIncomingSms(SMS(body, base + 3 * 60_000), A); await runReviewPass(db, A.user.id, { now: later() + GROUP_WINDOW_MS + 1000 });
     assert.equal((await rows(db)).length, 2);
     assert.equal(new Set(notifier.posts.map((p) => p.transactionId)).size, 2);
+    assert.equal(notifier.summaries.length, 0);
+  });
+  await test('10b. a second payment inside the grouping window replaces the first single notification with one summary', async () => {
+    const { db, notifier } = await fresh();
+    const body = 'Rs.450.00 debited from A/c XX1234 to RAHUL KUMAR';
+    await processIncomingSms(SMS(body, base), A); await runReviewPass(db, A.user.id, { now: later() });
+    assert.equal(notifier.active.size, 1);
+    await processIncomingSms(SMS(body, base + 3 * 60_000), A); await runReviewPass(db, A.user.id, { now: later() + 30_000 });
+    assert.deepEqual(notifier.summaries, [2]);
+    assert.equal(notifier.active.size, 0, 'the single notification (and its buttons) is gone; the summary opens the list');
+    await runReviewPass(db, A.user.id, { now: later() + 40_000 });
+    assert.deepEqual(notifier.summaries, [2], 'no repeat');
   });
   await test('11+12. completing updates the same row, cancels the notification, and does not notify again', async () => {
     const { db, notifier } = await fresh();

@@ -4,6 +4,8 @@ import type { IDatabase, TransactionEntity } from '../db/types.ts';
 import type { Scope } from './categoryService.ts';
 import { isGenericMerchant } from './duplicateMatcher.ts';
 import { findAlias } from './merchantAliasService.ts';
+import { isWithinGroupWindow, shouldGroup } from './notificationGrouping.ts';
+import { getCategorySuggestions } from './categorySuggestions.ts';
 import { evaluateCompleteness, type CompletenessContext, type ReviewField } from './transactionCompleteness.ts';
 
 /**
@@ -18,7 +20,8 @@ import { evaluateCompleteness, type CompletenessContext, type ReviewField } from
  * Notifications never affect the ledger. With permission off nothing is claimed, so the transaction waits in the in-app
  * queue and is still announced if permission is granted later.
  */
-export interface ReviewNotification { transactionId: string; title: string; body: string }
+/** `categories`: up to two one-tap choices; only single-transaction notifications carry them. */
+export interface ReviewNotification { transactionId: string; title: string; body: string; categories?: string[] }
 
 export interface ReviewNotifierPort {
   canNotify(): boolean;
@@ -35,6 +38,8 @@ export const REVIEW_PREF_KEY = 'review_notifications_pref';
 export const REVIEW_SETTLE_MS = 15_000;
 /** More than this at once (a backlog after permission returns, a busy day) becomes one summary, never a burst. */
 export const MAX_INDIVIDUAL_NOTIFICATIONS = 3;
+/** Android shows at most three actions: two categories plus "More". */
+export const MAX_CATEGORY_ACTIONS = 2;
 
 let port: ReviewNotifierPort | null = null;
 export function setReviewNotifierPort(next: ReviewNotifierPort | null): void { port = next; }
@@ -48,7 +53,9 @@ export async function setReviewPref(db: IDatabase, pref: ReviewNotificationPref)
   await new MetadataRepository(db).set(REVIEW_PREF_KEY, pref);
 }
 
-export function reviewPrefLabel(pref: ReviewNotificationPref): string {
+/** `canNotify` false: the person chose to be reminded but Android is not letting Velnora post, so say what to do. */
+export function reviewPrefLabel(pref: ReviewNotificationPref, canNotify = true): string {
+  if (pref !== 'off' && !canNotify) return 'Allow Velnora notifications to receive these';
   return pref === 'all' ? 'On · when a payment needs you' : pref === 'duplicates' ? 'Only possible duplicates' : 'Off · review inside the app';
 }
 
@@ -84,7 +91,7 @@ export async function reviewContext(db: IDatabase, scope: Scope, merchant: strin
   return { confirmedAccounts: accounts?.n ?? 0, categoryConfirmed: !!alias?.category };
 }
 
-type ClaimRow = { transaction_id: string; state: 'posted' | 'summarized'; reason: string; status: string | null; deleted_at: string | null; present: number | null; user_id: string | null };
+type ClaimRow = { transaction_id: string; state: 'posted' | 'summarized'; notified_at: string; reason: string; status: string | null; deleted_at: string | null; present: number | null; user_id: string | null };
 
 /** Removes what should no longer be showing, then announces what has become due. Safe to call at any time, any number of times. */
 export async function runReviewPass(db: IDatabase, scope: Scope, options: { now?: number } = {}): Promise<void> {
@@ -95,14 +102,23 @@ export async function runReviewPass(db: IDatabase, scope: Scope, options: { now?
 
   await withWriteLock(async () => {
     const claims = await db.getAllAsync<ClaimRow>(
-      `SELECT r.transaction_id, r.state, r.reason, t.verification_status AS status, t.deleted_at, t.user_id, CASE WHEN t.id IS NULL THEN NULL ELSE 1 END AS present
+      `SELECT r.transaction_id, r.state, r.notified_at, r.reason, t.verification_status AS status, t.deleted_at, t.user_id, CASE WHEN t.id IS NULL THEN NULL ELSE 1 END AS present
        FROM review_notifications r LEFT JOIN transactions t ON t.id = r.transaction_id`,
     );
     let summarized = 0;
+    // Announced within the grouping window and still showing: a new arrival joins these instead of stacking.
+    const recentPosted: string[] = [];
+    let recentSummarized = 0;
     for (const claim of claims) {
       const gone = claim.present === null || claim.deleted_at !== null || claim.status !== 'needs_review';
       const unwanted = pref === 'off' || (pref === 'duplicates' && !claim.reason.split(',').includes('duplicate'));
-      if (!gone && !unwanted) { if (claim.state === 'summarized' && (claim.user_id ?? null) === scope) summarized += 1; continue; }
+      if (!gone && !unwanted) {
+        if ((claim.user_id ?? null) === scope) {
+          if (claim.state === 'summarized') summarized += 1;
+          if (isWithinGroupWindow(claim.notified_at, now)) { if (claim.state === 'posted') recentPosted.push(claim.transaction_id); else recentSummarized += 1; }
+        }
+        continue;
+      }
       if (claim.state === 'posted') notifier.cancel(claim.transaction_id);
       await db.runAsync('DELETE FROM review_notifications WHERE transaction_id = ?', claim.transaction_id);
     }
@@ -130,20 +146,33 @@ export async function runReviewPass(db: IDatabase, scope: Scope, options: { now?
     const claim = (id: string, state: 'posted' | 'summarized', missing: ReviewField[]) => db.runAsync(
       'INSERT OR IGNORE INTO review_notifications (transaction_id, state, reason, notified_at) VALUES (?, ?, ?, ?)', id, state, missing.join(','), new Date(now).toISOString(),
     );
-    if (due.length + summarized > MAX_INDIVIDUAL_NOTIFICATIONS) {
+    if (shouldGroup({ due: due.length, summarized, recentlyAnnounced: recentPosted.length + recentSummarized, maxIndividual: MAX_INDIVIDUAL_NOTIFICATIONS })) {
       for (const { tx, missing } of due) await claim(tx.id, 'summarized', missing);
-      if (!notifier.postSummary(due.length + summarized)) {
+      if (!notifier.postSummary(due.length + summarized + recentPosted.length)) {
         for (const { tx } of due) await db.runAsync('DELETE FROM review_notifications WHERE transaction_id = ?', tx.id);
+        return;
+      }
+      // The recent single notifications are now part of the summary: replace them, do not leave both showing.
+      for (const id of recentPosted) {
+        notifier.cancel(id);
+        await db.runAsync("UPDATE review_notifications SET state = 'summarized' WHERE transaction_id = ?", id);
       }
       return;
     }
     for (const { tx, missing } of due) {
       const claimed = await claim(tx.id, 'posted', missing);
       if (claimed.changes === 0) continue;
-      const shown = notifier.post({ transactionId: tx.id, ...describeReview(tx, missing) });
+      const categories = await suggestionsFor(db, scope, tx, missing);
+      const shown = notifier.post({ transactionId: tx.id, ...describeReview(tx, missing), categories });
       if (!shown) await db.runAsync('DELETE FROM review_notifications WHERE transaction_id = ?', tx.id);
     }
   });
+}
+
+/** One-tap categories make sense only when the category is what is missing and no duplicate must be settled first. */
+async function suggestionsFor(db: IDatabase, scope: Scope, tx: TransactionEntity, missing: ReviewField[]): Promise<string[]> {
+  if (!missing.includes('category') || missing.includes('duplicate')) return [];
+  try { return await getCategorySuggestions(db, scope, tx, { limit: MAX_CATEGORY_ACTIONS }); } catch { return []; }
 }
 
 /** Sign-out: this account's notifications must not stay on the device. */

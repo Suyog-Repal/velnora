@@ -53,10 +53,19 @@ class VelnoraSmsModule : Module() {
       return@Function true
     }
 
-    Function("postReviewNotification") { transactionId: String, title: String, body: String ->
+    Function("postReviewNotification") { transactionId: String, title: String, body: String, categories: List<String> ->
       val context = appContext.reactContext ?: return@Function false
-      return@Function VelnoraBankAlerts.postReview(context, transactionId, title, body)
+      return@Function VelnoraBankAlerts.postReview(context, transactionId, title, body, categories)
     }
+
+    /** Category choices tapped on notifications, drained by JS into the ledger (see VelnoraReviewActionStore). */
+    AsyncFunction("claimReviewActions") { limit: Int, nowMs: Double, leaseMs: Double ->
+      reviewActions().claim(limit, nowMs.toLong(), leaseMs.toLong())
+    }
+
+    AsyncFunction("completeReviewAction") { id: Double -> reviewActions().complete(id.toLong()) }
+
+    AsyncFunction("releaseReviewAction") { id: Double -> reviewActions().release(id.toLong()) }
 
     Function("postReviewSummary") { count: Int ->
       val context = appContext.reactContext ?: return@Function false
@@ -108,6 +117,11 @@ class VelnoraSmsModule : Module() {
   private fun store(): VelnoraSmsStagingStore {
     val context = appContext.reactContext ?: throw IllegalStateException("React context unavailable")
     return VelnoraSmsStagingStore.get(context)
+  }
+
+  private fun reviewActions(): VelnoraReviewActionStore {
+    val context = appContext.reactContext ?: throw IllegalStateException("React context unavailable")
+    return VelnoraReviewActionStore.get(context)
   }
 
   /** Content-free signal: JS then drains the durable staging store. */

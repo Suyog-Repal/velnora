@@ -8,6 +8,8 @@ const POST_NOTIFICATIONS = 'android.permission.POST_NOTIFICATIONS';
 // Keeps the CPU awake for the few seconds the background capture task runs. A normal permission: no prompt.
 const WAKE_LOCK = 'android.permission.WAKE_LOCK';
 const CAPTURE_SERVICE_NAME = 'com.velnora.sms.VelnoraCaptureService';
+const REVIEW_ACTION_RECEIVER_NAME = 'com.velnora.sms.VelnoraReviewActionReceiver';
+const REVIEW_ACTION_SERVICE_NAME = 'com.velnora.sms.VelnoraReviewActionService';
 const LISTENER_NAME = 'com.velnora.sms.VelnoraNotificationListener';
 
 function normalizePatterns(patterns) {
@@ -77,6 +79,14 @@ function withVelnoraSms(config, { supportedSenderPatterns = [] } = {}) {
 
     if (!mainApplication.service.some((service) => service.$['android:name'] === CAPTURE_SERVICE_NAME)) {
       mainApplication.service.push({ $: { 'android:name': CAPTURE_SERVICE_NAME, 'android:exported': 'false' } });
+    }
+
+    // Notification category buttons: only Velnora's own PendingIntents reach these, hence not exported.
+    if (!mainApplication.receiver.some((item) => item.$['android:name'] === REVIEW_ACTION_RECEIVER_NAME)) {
+      mainApplication.receiver.push({ $: { 'android:name': REVIEW_ACTION_RECEIVER_NAME, 'android:exported': 'false' } });
+    }
+    if (!mainApplication.service.some((service) => service.$['android:name'] === REVIEW_ACTION_SERVICE_NAME)) {
+      mainApplication.service.push({ $: { 'android:name': REVIEW_ACTION_SERVICE_NAME, 'android:exported': 'false' } });
     }
 
     mainApplication['meta-data'] ??= [];

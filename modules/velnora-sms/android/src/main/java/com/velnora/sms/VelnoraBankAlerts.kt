@@ -22,6 +22,7 @@ object VelnoraBankAlerts {
   private const val REVIEW_CHANNEL_ID = "velnora_transaction_review"
   private const val REVIEW_NOTIFICATION_ID = 7302
   private const val REVIEW_SUMMARY_ID = 7303
+  private const val MAX_CATEGORY_ACTIONS = 2
 
   private val CURRENCY = Regex("""(?:\bINR|\bRs\.?|₹)\s*[\d,]+|[\d,]+(?:\.\d{1,2})?\s*(?:INR|Rs\.?|₹)|\b(?:debited|credited)\s*(?:by|with|for|of)\s*[\d,]+""", RegexOption.IGNORE_CASE)
   private val MOVEMENT = Regex("""debit|credit|paid|received|withdrawn|spent|deposit|transferred|\bsent\b|purchase|refund|revers|successful""", RegexOption.IGNORE_CASE)
@@ -58,11 +59,11 @@ object VelnoraBankAlerts {
   }
 
   /** Tag is the transaction id: reposting replaces, so one transaction can never show two notifications. */
-  fun postReview(context: Context, transactionId: String, title: String, body: String): Boolean =
-    show(context, tag(transactionId), REVIEW_NOTIFICATION_ID, title, body, "velnora://review/$transactionId")
+  fun postReview(context: Context, transactionId: String, title: String, body: String, categories: List<String> = emptyList()): Boolean =
+    show(context, tag(transactionId), REVIEW_NOTIFICATION_ID, title, body, "velnora://review/$transactionId", transactionId, categories)
 
   fun postReviewSummary(context: Context, count: Int): Boolean =
-    show(context, null, REVIEW_SUMMARY_ID, "Transactions need your attention", "$count transactions need review.", "velnora://review")
+    show(context, null, REVIEW_SUMMARY_ID, "Transactions need your attention", "$count transactions need review.", "velnora://review", null, emptyList())
 
   fun cancelReview(context: Context, transactionId: String) {
     manager(context).cancel(tag(transactionId), REVIEW_NOTIFICATION_ID)
@@ -70,6 +71,16 @@ object VelnoraBankAlerts {
 
   fun cancelReviewSummary(context: Context) {
     manager(context).cancel(REVIEW_SUMMARY_ID)
+  }
+
+  /** Explicit, non-exported receiver. The data URI makes each (transaction, category) a distinct PendingIntent. */
+  private fun categoryIntent(context: Context, transactionId: String, category: String): PendingIntent {
+    val intent = Intent(VelnoraReviewActionReceiver.ACTION_CHOOSE_CATEGORY)
+      .setClass(context, VelnoraReviewActionReceiver::class.java)
+      .setData(Uri.Builder().scheme("velnora-action").authority(transactionId).appendPath(category).build())
+      .putExtra(VelnoraReviewActionReceiver.EXTRA_TRANSACTION_ID, transactionId)
+      .putExtra(VelnoraReviewActionReceiver.EXTRA_CATEGORY, category)
+    return PendingIntent.getBroadcast(context, 0, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
   }
 
   private fun tag(transactionId: String) = "review:$transactionId"
@@ -80,19 +91,28 @@ object VelnoraBankAlerts {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) Notification.Builder(context, REVIEW_CHANNEL_ID) else @Suppress("DEPRECATION") Notification.Builder(context)
 
   /** The full text appears only on an unlocked phone; the lock screen gets a version with no amount or name. */
-  private fun show(context: Context, tag: String?, id: Int, title: String, body: String, link: String): Boolean {
+  private fun show(
+    context: Context, tag: String?, id: Int, title: String, body: String, link: String,
+    transactionId: String?, categories: List<String>,
+  ): Boolean {
     return try {
       val manager = manager(context)
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && !manager.areNotificationsEnabled()) return false
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-        manager.createNotificationChannel(NotificationChannel(REVIEW_CHANNEL_ID, "Transactions to review", NotificationManager.IMPORTANCE_DEFAULT))
+        // Same id as before: renaming it would orphan the sound/visibility settings the person already chose for it.
+        manager.createNotificationChannel(
+          NotificationChannel(REVIEW_CHANNEL_ID, "Transactions to review", NotificationManager.IMPORTANCE_DEFAULT).apply {
+            description = "Asks you to categorise or confirm a payment Velnora detected. Shows only the amount and who it was for."
+            lockscreenVisibility = Notification.VISIBILITY_PRIVATE
+          },
+        )
       }
       val component = context.packageManager.getLaunchIntentForPackage(context.packageName)?.component ?: return false
       // Explicit component: only Velnora can receive this, and the link is the data RN's Linking delivers.
       val open = Intent(Intent.ACTION_VIEW, Uri.parse(link)).setComponent(component).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
       val tap = PendingIntent.getActivity(context, link.hashCode(), open, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
       val hidden = builder(context).setSmallIcon(context.applicationInfo.icon).setContentTitle("Transaction needs review").build()
-      val notification = builder(context)
+      val notificationBuilder = builder(context)
         .setSmallIcon(context.applicationInfo.icon)
         .setContentTitle(title)
         .setContentText(body)
@@ -101,8 +121,14 @@ object VelnoraBankAlerts {
         .setPublicVersion(hidden)
         .setAutoCancel(true)
         .setContentIntent(tap)
-        .build()
-      manager.notify(tag, id, notification)
+      // Single-transaction notifications only. Android allows 3 actions: up to two categories, then "More".
+      if (transactionId != null && categories.isNotEmpty()) {
+        for (category in categories.take(MAX_CATEGORY_ACTIONS)) {
+          notificationBuilder.addAction(0, category, categoryIntent(context, transactionId, category))
+        }
+        notificationBuilder.addAction(0, "More", tap)
+      }
+      manager.notify(tag, id, notificationBuilder.build())
       true
     } catch (_: Throwable) {
       false

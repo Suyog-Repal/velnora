@@ -124,6 +124,8 @@ export function ProfileView({ session, colors, mode, accent, transactions, onlin
   const cycleReviewPref = () => {
     const next: ReviewNotificationPref = reviewPref === 'all' ? 'duplicates' : reviewPref === 'duplicates' ? 'off' : 'all';
     setReviewPrefState(next);
+    // Turning reminders on while Android blocks notifications: ask now (Android 13+ dialog) or send to Settings if it was refused for good.
+    if (next !== 'off' && capture.appNotificationsAvailable && !capture.appNotifications) void capture.toggleAppNotifications();
     void setReviewPref(getServiceDb(), next).then(() => runReviewPass(getServiceDb(), session?.user.id ?? null)).catch(() => undefined);
   };
   // Granted → open Android's permission page to manage it. Not granted → ask; if that does not work, explain and offer Settings.
@@ -183,7 +185,7 @@ export function ProfileView({ session, colors, mode, accent, transactions, onlin
         <Row icon={<MessageSquare size={18} color={palette.emerald} />} title="Bank SMS detection" value={smsPermissionLabel(sms)} colors={colors} onPress={sms.available ? onSmsPress : undefined} />
         <Row icon={<WalletCards size={18} color={palette.emerald} />} title="Payment-app alerts" value={notificationAccessLabel({ available: capture.accessAvailable, granted: capture.access })} colors={colors} onPress={capture.accessAvailable ? () => { capture.openAccessSettings(); } : undefined} />
         <Row icon={<Bell size={18} color={palette.emerald} />} title="Velnora notifications" value={appNotificationsLabel({ available: capture.appNotificationsAvailable, granted: capture.appNotifications })} colors={colors} onPress={capture.appNotificationsAvailable ? () => { void capture.toggleAppNotifications(); } : undefined} />
-        <Row icon={<Check size={18} color={palette.emerald} />} title="Review reminders" value={reviewPrefLabel(reviewPref)} colors={colors} onPress={cycleReviewPref} />
+        <Row icon={<Check size={18} color={palette.emerald} />} title="Review reminders" value={reviewPrefLabel(reviewPref, !capture.appNotificationsAvailable || capture.appNotifications)} colors={colors} onPress={cycleReviewPref} />
         <Row icon={<Text style={{ color: palette.accentText, fontWeight: '600', fontSize: 16 }}>{currencySymbol()}</Text>} title="Currency" value={currencyLabel} colors={colors} onPress={onOpenCurrency} last />
       </Group>
     </Reveal>

@@ -7,6 +7,7 @@ import { clearSession, loadSession, login, logout, refreshSessionShared as refre
 import { restoreSession } from './src/services/sessionRestore';
 import { getGuestDataSummary, importGuestData, isGuestModeChosen, setGuestModeChosen } from './src/services/guestModeService';
 import { addSmsStagedListener, configureSupportedSenderPatterns, getNativeReviewNotifier } from './sms';
+import { drainNativeReviewActions } from './src/services/reviewActionDrain.native';
 import { REVIEW_SETTLE_MS, cancelReviewNotification, clearReviewNotifications, runReviewPass, setReviewNotifierPort } from './src/services/reviewNotifications';
 import { createReviewLinkRouter, resolveReviewTarget, type ReviewLink } from './src/services/reviewLinks';
 import { clearSmsOwner, drainNativeStagedSms, recordSmsOwner } from './src/services/smsStagingService';
@@ -422,9 +423,11 @@ function AppInner() {
     let settleTimer: ReturnType<typeof setTimeout> | null = null;
     const drain = async (returnedToApp = false) => {
       try {
+        // Category buttons tapped on notifications are applied first (they may have been queued while the app was closed).
+        const actions = await drainNativeReviewActions(session).catch(() => null);
         const summary = await drainNativeStagedSms(session, smsRules);
         // A background task may have saved payments while the app was away, so coming back always refreshes.
-        if (active && summary && (summary.saved > 0 || summary.duplicates > 0) || (active && returnedToApp)) await reloadData();
+        if (active && summary && (summary.saved > 0 || summary.duplicates > 0) || (active && actions && actions.applied > 0) || (active && returnedToApp)) await reloadData();
         if (active && summary && summary.processed > 0) {
           if (settleTimer) clearTimeout(settleTimer);
           settleTimer = setTimeout(() => { void reloadData().catch(() => undefined); }, REVIEW_SETTLE_MS + 500); // lets the second source arrive first

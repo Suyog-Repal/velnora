@@ -13,6 +13,7 @@ import type { ParsedSmsTransaction } from '../../transactionParser.ts';
 import { canEditTransaction, toUpdateInput, type DetailsPatch } from './transactionDetails.ts';
 import { applyAlias, rememberAlias } from './merchantAliasService.ts';
 import { autoSettleFromTransaction } from './expectedPaymentService.ts';
+import { listCategories } from './categoryService.ts';
 import { syncEngine, triggerSync, type SyncSummary } from './syncEngine.ts';
 
 let repositoriesInitialized = false;
@@ -253,6 +254,32 @@ export async function updateTransaction(
   }
 
   return updated;
+}
+
+export type QuickCategoryResult = 'applied' | 'gone' | 'other_scope' | 'already_handled' | 'invalid_category';
+
+/**
+ * A category chosen on a notification button, applied without the app on screen. Idempotent and conservative:
+ * - a transaction that is gone is dropped; one that belongs to another scope is left for that scope;
+ * - one that no longer needs review was already handled in the app, and the person's choice there wins;
+ * - the category must exist for this scope and direction, exactly as the pickers would offer it.
+ * Saved locally first, then queued for sync like any edit (the sync engine never uploads guest rows).
+ */
+export async function applyNotificationCategory(id: string, category: string, session: Session | null): Promise<QuickCategoryResult> {
+  const { transactionRepository } = await initTransactionService();
+  const scope = session?.user.id ?? null;
+  const tx = await transactionRepository.getById(id);
+  if (!tx || tx.deleted_at) return 'gone';
+  if ((tx.user_id ?? null) !== scope) return 'other_scope';
+  if (tx.verification_status !== 'needs_review') return 'already_handled';
+  const chosen = (await listCategories(getServiceDb(), scope)).find((c) => c.type === tx.direction && c.name.toLowerCase() === category.trim().toLowerCase());
+  if (!chosen) return 'invalid_category';
+  await transactionRepository.update(id, { category: chosen.name, category_id: chosen.id });
+  await refreshReviewState(id, scope, true);
+  cancelReviewNotification(id);
+  kickReviewPass(scope);
+  if (session) void syncPendingTransactions(session);
+  return 'applied';
 }
 
 export async function deleteTransaction(
