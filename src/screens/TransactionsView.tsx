@@ -1,4 +1,4 @@
-import { memo, useMemo, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Pressable, ScrollView, Text, View } from 'react-native';
 import { useProgressiveCount } from '../ui/perf';
 import { SkeletonRows } from '../ui/motion';
@@ -6,8 +6,10 @@ import { palette, radius, tint } from '../../theme';
 import { typo } from '../../typography';
 import { ArrowDownLeft, ArrowUpRight, CalendarDays, MapPin, ReceiptIcon, Search, WifiOff, X } from '../../icons';
 import { Button, CategoryIcon, Chip, EmptyBlock, SearchField, SectionLabel, Sheet, formatPaise, type Colors } from '../ui/common';
-import { DateRangeFields } from '../ui/CalendarDatePicker';
-import { formatRange, inDateRange, validateRange } from '../services/dateUtils';
+import { RangeCalendar } from '../ui/RangeCalendar';
+import { inDateRange, localYmd } from '../services/dateUtils';
+import { EMPTY_SELECTION, foldBuckets, formatSelection, loadDayBuckets, monthsBack, oldestDay, selectDate, summarizeSelection, type BucketRow, type DateSelection } from '../services/calendarMarks';
+import { getServiceDb } from '../services/transactionService';
 import { sourceLabel } from '../services/ledgerRules';
 import type { CategoryView } from '../services/categoryService';
 import type { TransactionEntity } from '../db/types';
@@ -74,8 +76,10 @@ function TransactionCardBase({ tx, color, icon, colors, onPress, onOpen, grouped
 }
 export const TransactionCard = memo(TransactionCardBase);
 
-export function TransactionsView({ transactions, categories, colors, loading, online, onOpen, onAdd, initialCategory, initialType = 'all' }: {
-  transactions: TransactionEntity[]; categories: CategoryView[]; colors: Colors; loading: boolean; online: boolean;
+export function TransactionsView({ transactions, scope = null, categories, colors, loading, online, onOpen, onAdd, initialCategory, initialType = 'all' }: {
+  transactions: TransactionEntity[];
+  /** Signed-in user id, or null for guest data; scopes the calendar's day marks. */
+  scope?: string | null; categories: CategoryView[]; colors: Colors; loading: boolean; online: boolean;
   onOpen: (tx: TransactionEntity) => void; onAdd: () => void; initialCategory?: string | null;
   /** Home income / expense cards open the list already filtered to that type. */
   initialType?: 'all' | 'income' | 'expense';
@@ -86,8 +90,27 @@ export function TransactionsView({ transactions, categories, colors, loading, on
   // Applied date range (inclusive, local calendar dates) and the draft being edited in the sheet.
   const [range, setRange] = useState<{ from: string; to: string } | null>(null);
   const [showDates, setShowDates] = useState(false);
-  const [draft, setDraft] = useState<{ from: string | null; to: string | null }>({ from: null, to: null });
-  const draftCheck = validateRange(draft.from, draft.to);
+  const [draft, setDraft] = useState<DateSelection>(EMPTY_SELECTION);
+  // Calendar data: one grouped query, cached (tz-independent UTC buckets) and re-run only when the scope or the
+  // transactions change. It loads when the sheet opens, so the list screen itself pays nothing.
+  const [bucketRows, setBucketRows] = useState<BucketRow[] | null>(null);
+  const loadedFor = useRef<{ scope: string | null; transactions: TransactionEntity[] } | null>(null);
+  useEffect(() => {
+    if (!showDates) return;
+    if (loadedFor.current?.scope === scope && loadedFor.current.transactions === transactions) return;
+    let live = true;
+    let db; try { db = getServiceDb(); } catch { setBucketRows((r) => r ?? []); return; }
+    loadDayBuckets(db, scope)
+      .then((r) => { if (live) { loadedFor.current = { scope, transactions }; setBucketRows(r); } })
+      .catch(() => { if (live) setBucketRows((r) => r ?? []); }); // the calendar still works, just without dots
+    return () => { live = false; };
+  }, [showDates, scope, transactions]);
+  // Folded to local days each time the sheet opens, so a changed device timezone or a new day is picked up.
+  const today = useMemo(() => localYmd(), [showDates]); // eslint-disable-line react-hooks/exhaustive-deps
+  const marks = useMemo(() => foldBuckets(bucketRows ?? []), [bucketRows, showDates]); // eslint-disable-line react-hooks/exhaustive-deps
+  const months = useMemo(() => monthsBack(today, oldestDay(marks), range?.from), [today, marks, range]);
+  const summary = useMemo(() => summarizeSelection(marks, draft), [marks, draft]);
+  const pickDate = useCallback((ymd: string) => setDraft((d) => selectDate(d, ymd, today)), [today]);
   const colorOf = useMemo(() => new Map(categories.map((c) => [c.name.toLowerCase(), c.color])), [categories]);
   const iconOf = useMemo(() => new Map(categories.map((c) => [c.name.toLowerCase(), c.icon])), [categories]);
   const shown = useMemo(() => filterTransactions(transactions, { type, category, query, from: range?.from, to: range?.to }), [transactions, type, category, query, range]);
@@ -116,10 +139,10 @@ export function TransactionsView({ transactions, categories, colors, loading, on
         <Text style={{ ...typo.chip, color: on ? palette.accentText : colors.muted }}>{label}</Text></Pressable>; })}
     </View>
     <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 10 }}>
-      <Pressable onPress={() => { setDraft({ from: range?.from ?? null, to: range?.to ?? null }); setShowDates(true); }} accessibilityRole="button" accessibilityLabel={range ? `Date filter: ${formatRange(range.from, range.to)}` : 'Filter by date range'}
+      <Pressable onPress={() => { setDraft({ from: range?.from ?? null, to: range?.to ?? null }); setShowDates(true); }} accessibilityRole="button" accessibilityLabel={range ? `Date filter: ${formatSelection(range)}` : 'Filter by date range'}
         style={{ flexShrink: 1, flexDirection: 'row', alignItems: 'center', borderWidth: 1, borderColor: range ? palette.emerald : colors.border, backgroundColor: range ? tint(palette.emerald, 0.12) : colors.card, borderRadius: 20, paddingHorizontal: 14, minHeight: 40 }}>
         <CalendarDays size={16} color={range ? palette.accentText : colors.muted} />
-        <Text numberOfLines={1} style={{ marginLeft: 8, color: range ? colors.text : colors.muted, ...typo.chip, flexShrink: 1 }}>{range ? formatRange(range.from, range.to) : 'All dates'}</Text>
+        <Text numberOfLines={1} style={{ marginLeft: 8, color: range ? colors.text : colors.muted, ...typo.chip, flexShrink: 1 }}>{range ? formatSelection(range) : 'All dates'}</Text>
       </Pressable>
       {range ? <Pressable onPress={() => setRange(null)} hitSlop={10} accessibilityRole="button" accessibilityLabel="Clear date filter" style={{ marginLeft: 8, width: 40, height: 40, borderRadius: 20, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.card, alignItems: 'center', justifyContent: 'center' }}><X size={16} color={colors.muted} /></Pressable> : null}
     </View>
@@ -133,7 +156,7 @@ export function TransactionsView({ transactions, categories, colors, loading, on
     </View> : null}
     {loading && transactions.length === 0 ? <SkeletonRows count={7} cardColor={colors.card} borderColor={colors.border} />
       : transactions.length === 0 ? <View><EmptyBlock title="No transactions yet" text="Add your first income or expense. Everything is saved on this device first." colors={colors} /><Pressable onPress={onAdd} accessibilityRole="button" style={{ minHeight: 44, justifyContent: 'center' }}><Text style={{ color: palette.accentText, fontWeight: '700', textAlign: 'center' }}>Add transaction</Text></Pressable></View>
-      : shown.length === 0 ? <View><EmptyBlock title={query.trim() ? 'No results' : 'Nothing matches'} text={query.trim() ? `No transactions match "${query.trim()}" with the current filters.` : range ? `No transactions between ${formatRange(range.from, range.to)} with the current filters. Try a wider date range or clear the filters.` : 'Try a different search or clear the filters.'} colors={colors} /><Pressable onPress={clearAll} accessibilityRole="button" style={{ minHeight: 44, justifyContent: 'center' }}><Text style={{ color: palette.accentText, fontWeight: '700', textAlign: 'center' }}>Clear filters</Text></Pressable></View>
+      : shown.length === 0 ? <View><EmptyBlock title={query.trim() ? 'No results' : 'Nothing matches'} text={query.trim() ? `No transactions match "${query.trim()}" with the current filters.` : range ? `No transactions for ${formatSelection(range)} with the current filters. Try a wider date range or clear the filters.` : 'Try a different search or clear the filters.'} colors={colors} /><Pressable onPress={clearAll} accessibilityRole="button" style={{ minHeight: 44, justifyContent: 'center' }}><Text style={{ color: palette.accentText, fontWeight: '700', textAlign: 'center' }}>Clear filters</Text></Pressable></View>
       : (() => { let budget = limit; return groups.map((g) => {
         if (budget <= 0) return null;
         const items = g.items.slice(0, budget); budget -= items.length;
@@ -142,11 +165,19 @@ export function TransactionsView({ transactions, categories, colors, loading, on
           {items.map((t, i) => <TransactionCard key={t.id} grouped last={i === g.items.length - 1} tx={t} icon={iconOf.get(t.category.toLowerCase())} colors={colors} color={colorOf.get(t.category.toLowerCase()) ?? palette.navy} onOpen={onOpen} />)}
         </View></View>; }); })()}
     <Sheet visible={showDates} onClose={() => setShowDates(false)} title="Filter by date" colors={colors} footer={<>
-      <Button title="Apply" disabled={!draftCheck.ok} onPress={() => { if (draft.from && draft.to && draftCheck.ok) { setRange({ from: draft.from, to: draft.to }); setShowDates(false); } }} />
-      <Button title="Clear filter" kind="ghost" onPress={() => { setRange(null); setDraft({ from: null, to: null }); setShowDates(false); }} />
+      <Button title="Apply" disabled={!draft.from || !draft.to} onPress={() => { if (draft.from && draft.to) { setRange({ from: draft.from, to: draft.to }); setShowDates(false); } }} />
+      <Button title="Clear filter" kind="ghost" onPress={() => { setRange(null); setDraft(EMPTY_SELECTION); setShowDates(false); }} />
     </>}>
-      <Text style={{ color: colors.muted, marginBottom: 12, fontSize: 13 }}>Show transactions dated from the start date to the end date, both included. Works offline on data saved on this device.</Text>
-      <DateRangeFields from={draft.from} to={draft.to} colors={colors} onChange={(from, to) => setDraft({ from, to })} />
+      {showDates && bucketRows === null ? <Text style={{ color: colors.muted, ...typo.caption, paddingVertical: 24, textAlign: 'center' }}>Loading calendar…</Text>
+        : showDates ? <RangeCalendar months={months} marks={marks} selection={draft} today={today} colors={colors} onPick={pickDate} /> : null}
+      <View style={{ marginTop: 10, minHeight: 44 }} accessibilityLiveRegion="polite">
+        {draft.from && draft.to ? <>
+          <Text style={{ ...typo.bodyStrong, color: colors.text }}>{formatSelection(draft, today)}</Text>
+          <Text numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.8} style={{ ...typo.caption, color: colors.muted }}>
+            {summary.count} transaction{summary.count === 1 ? '' : 's'} · Spent <Text style={{ color: palette.expenseText, fontWeight: '700' }}>{formatPaise(summary.spentPaise)}</Text> · Received <Text style={{ color: palette.accentText, fontWeight: '700' }}>{formatPaise(summary.receivedPaise)}</Text>
+          </Text>
+        </> : <Text style={{ ...typo.caption, color: colors.muted }}>Tap a date for one day, then another date for a range. Works offline on data saved on this device.</Text>}
+      </View>
     </Sheet>
   </View>;
 }
