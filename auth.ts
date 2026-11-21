@@ -5,6 +5,7 @@ import { purgeStagedSmsForUser } from './src/services/smsStagingService.ts';
 import type { AuthUser, Session } from './src/db/types.ts';
 import { resolveApiUrl } from './src/services/apiConfig.ts';
 import { createSharedRefresh } from './src/services/sessionRefresh.ts';
+import { createSessionStore } from './src/services/sessionPersistence.ts';
 import { AUTH_PATHS, AuthRequestError, apiRequest, expectSession, registerBody, type RequestErrorKind } from './src/services/apiClient.ts';
 
 export type { AuthUser, Session };
@@ -36,24 +37,19 @@ export const API_CONFIG_PROBLEM = apiResolution.problem;
 if (apiResolution.problem) console.warn(`[Velnora] ${apiResolution.problem}`);
 configureApiBaseUrl(API_URL); // sync requests that pass no explicit URL now use this same value
 
-export async function saveSession(session: Session): Promise<void> {
-  await SecureStore.setItemAsync(SESSION_KEY, JSON.stringify(session));
-}
+// Reads and writes of the session go through one store: a refreshed session that secure storage refuses to write is kept in
+// memory and retried (see sessionPersistence.ts), never dropped.
+const sessionStore = createSessionStore<Session>({
+  read: () => SecureStore.getItemAsync(SESSION_KEY),
+  write: (value) => SecureStore.setItemAsync(SESSION_KEY, value),
+  remove: () => SecureStore.deleteItemAsync(SESSION_KEY),
+});
 
-export async function loadSession(): Promise<Session | null> {
-  const value = await SecureStore.getItemAsync(SESSION_KEY);
-  if (!value) return null;
-  try {
-    return JSON.parse(value) as Session;
-  } catch {
-    await clearSession();
-    return null;
-  }
-}
-
-export async function clearSession(): Promise<void> {
-  await SecureStore.deleteItemAsync(SESSION_KEY);
-}
+export const saveSession = (session: Session): Promise<void> => sessionStore.save(session);
+export const loadSession = (): Promise<Session | null> => sessionStore.load();
+export const clearSession = (): Promise<void> => sessionStore.clear();
+/** Tries a deferred session write again now (call when the app returns to the foreground). */
+export const flushPendingSession = (): Promise<boolean> => sessionStore.flushPending();
 
 // One log line at start-up says where this build will send requests (the host is not a secret; no credentials are involved).
 console.log(`[Velnora API] base URL: ${API_URL || '(not configured)'} (source: ${apiResolution.source})`);
@@ -73,7 +69,8 @@ export async function login(email: string, password: string): Promise<Session> {
 
 export async function refreshSession(session: Session): Promise<Session> {
   const next = expectSession<Session>(await request<unknown>(AUTH_PATHS.refresh, { method: 'POST', body: JSON.stringify({ refresh_token: session.refresh_token }) }));
-  await saveSession(next);
+  // The server has already rotated the token: these are the only valid tokens now. A failed write must not lose them.
+  await sessionStore.persistIssued(next);
   return next;
 }
 

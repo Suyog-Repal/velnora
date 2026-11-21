@@ -141,6 +141,26 @@ def issue_tokens(user: User, db: Optional[Session] = None, commit: bool = True) 
     return access_token, refresh_token
 
 
+class SessionRejected(HTTPException):
+    """
+    The same 401 as before, with a `reason` ("expired", "invalid", "user_missing") that only the refresh log reads.
+    The reason is never sent to the client: the response body and status are unchanged.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired session")
+        self.reason = reason
+
+
+def token_age_seconds(token: str, now: Optional[datetime] = None) -> Optional[int]:
+    """Seconds since the token was issued, from its unverified `iat` claim. For diagnostics only; None if unreadable."""
+    try:
+        issued = jwt.decode(token, options={"verify_signature": False}).get("iat")
+        return max(0, int((now or datetime.now(timezone.utc)).timestamp()) - int(issued))
+    except Exception:  # noqa: BLE001 - diagnostics must never break a request
+        return None
+
+
 def decode_token(token: str, expected_type: str, db: Optional[Session] = None) -> User:
     """
     Decode and validate JWT token against PostgreSQL users table.
@@ -151,8 +171,10 @@ def decode_token(token: str, expected_type: str, db: Optional[Session] = None) -
         if payload.get("type") != expected_type:
             raise ValueError("Token type mismatch")
         user_id = UUID(payload["sub"])
+    except jwt.ExpiredSignatureError:
+        raise SessionRejected("expired") from None
     except (jwt.InvalidTokenError, KeyError, ValueError):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired session") from None
+        raise SessionRejected("invalid") from None
 
     if db is not None:
         user = db.get(User, user_id)
@@ -162,7 +184,7 @@ def decode_token(token: str, expected_type: str, db: Optional[Session] = None) -
             user = session.get(User, user_id)
 
     if not user or user.account_status != "active":
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired session")
+        raise SessionRejected("user_missing")
 
     return user
 

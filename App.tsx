@@ -3,7 +3,7 @@ import { AccessibilityInfo, Alert, Animated, AppState, Easing, Keyboard, Keyboar
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import Svg, { Circle, Defs, LinearGradient, Path, Stop } from 'react-native-svg';
 import { useCallback, useEffect, useMemo, useRef, useState, type ComponentRef } from 'react';
-import { clearSession, loadSession, login, logout, refreshSessionShared as refreshSession, register, requestPasswordReset, saveSession, type Session } from './auth';
+import { clearSession, flushPendingSession, loadSession, login, logout, refreshSessionShared as refreshSession, register, requestPasswordReset, saveSession, type Session } from './auth';
 import { restoreSession } from './src/services/sessionRestore';
 import { getGuestDataSummary, importGuestData, isGuestModeChosen, setGuestModeChosen } from './src/services/guestModeService';
 import { addSmsStagedListener, configureSupportedSenderPatterns, getNativeCheckIn, getNativeReviewNotifier } from './sms';
@@ -398,6 +398,12 @@ function AppInner() {
     const sub = AppState.addEventListener('change', (state) => { if (state === 'active') void retry(); });
     return () => { cancelled = true; sub.remove(); };
   }, [session, sessionStale]);
+
+  // A refreshed session that secure storage refused to write is kept in memory and retried (auth.ts); also try when the app returns.
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => { if (state === 'active') void flushPendingSession(); });
+    return () => sub.remove();
+  }, []);
 
   // The sync engine watches the network itself (NetInfo): when connectivity returns it runs a cycle without the person doing anything.
   // It asks for the CURRENT session each time, so a refreshed token is used and a signed-out app syncs nothing.

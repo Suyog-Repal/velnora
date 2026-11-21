@@ -35,6 +35,7 @@ from .auth import (
     LogoutRequest,
     REFRESH_REUSE_GRACE,
     RefreshRequest,
+    SessionRejected,
     RegisterRequest,
     UserRecord,
     UserResponse,
@@ -43,6 +44,7 @@ from .auth import (
     hash_token,
     issue_tokens,
     store,
+    token_age_seconds,
     user_response,
 )
 
@@ -221,11 +223,47 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)) -> AuthResponse:
     return AuthResponse(user=user_response(user), access_token=access_token, refresh_token=refresh_token)
 
 
+def _seconds_since(moment: Optional[datetime], now: datetime) -> Optional[int]:
+    if moment is None:
+        return None
+    moment = moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+    return max(0, int((now - moment).total_seconds()))
+
+
+def _refusal(row: Optional[RefreshTokenModel], now: datetime) -> tuple[str, str]:
+    """(outcome, reason) for a refresh token that could be neither rotated nor grace-used."""
+    if row is None:
+        return "revoked", "no_row"  # signed out, its one grace use already spent, or never issued by this server
+    expires = row.expires_at if row.expires_at.tzinfo else row.expires_at.replace(tzinfo=timezone.utc)
+    if expires <= now:
+        return "expired", "row_expired"
+    if row.revoked_at is not None:
+        return "revoked", "rotated_stale"  # rotated more than the grace window ago
+    return "revoked", "lost_race"
+
+
+def _log_refresh(outcome: str, reason: Optional[str] = None, age: Optional[int] = None, revoked_ago: Optional[int] = None) -> None:
+    """
+    One line per refresh attempt: outcome (ok, within_grace, revoked, expired, user_missing, invalid), a reason, how old the
+    token is and, for a rotated token, how long ago it was rotated. Never the token, its hash, the user id or the e-mail.
+    """
+    try:
+        level = logging.INFO if outcome in ("ok", "within_grace") else logging.WARNING
+        logger.log(level, "auth refresh outcome=%s reason=%s token_age_s=%s revoked_ago_s=%s", outcome, reason or "-", age, revoked_ago)
+    except Exception:  # noqa: BLE001 - logging must never fail a request
+        pass
+
+
 @app.post("/api/v1/auth/refresh", response_model=AuthResponse)
 def refresh(payload: RefreshRequest, db: Session = Depends(get_db)) -> AuthResponse:
-    user = decode_token(payload.refresh_token, "refresh", db=db)
-    token_h = hash_token(payload.refresh_token)
     now = datetime.now(timezone.utc)
+    age = token_age_seconds(payload.refresh_token, now)
+    try:
+        user = decode_token(payload.refresh_token, "refresh", db=db)
+    except SessionRejected as exc:
+        _log_refresh(exc.reason, age=age)  # expired (the JWT lifetime ended), user_missing, or invalid (not one of our tokens)
+        raise
+    token_h = hash_token(payload.refresh_token)
     mine = (RefreshTokenModel.token_hash == token_h, RefreshTokenModel.user_id == user.id, RefreshTokenModel.expires_at > now)
 
     # Rotation is one transaction: claim the old token and insert the new one, then commit once. A failure anywhere in
@@ -243,8 +281,11 @@ def refresh(payload: RefreshRequest, db: Session = Depends(get_db)) -> AuthRespo
             # concurrent or later, finds nothing and is rejected.
             graced = db.execute(delete(RefreshTokenModel).where(*mine, RefreshTokenModel.revoked_at >= now - REFRESH_REUSE_GRACE))
             if graced.rowcount != 1:
+                row = db.scalar(select(RefreshTokenModel).where(RefreshTokenModel.token_hash == token_h, RefreshTokenModel.user_id == user.id))
                 db.rollback()
+                _log_refresh(*_refusal(row, now), age=age, revoked_ago=_seconds_since(row.revoked_at, now) if row is not None else None)
                 raise HTTPException(status_code=401, detail="Invalid or revoked session")
+        outcome = "ok" if rotated.rowcount == 1 else "within_grace"
         access_token, refresh_token = issue_tokens(user, db=db, commit=False)
         db.commit()
     except HTTPException:
@@ -252,6 +293,7 @@ def refresh(payload: RefreshRequest, db: Session = Depends(get_db)) -> AuthRespo
     except Exception:
         db.rollback()
         raise
+    _log_refresh(outcome, age=age)
     return AuthResponse(user=user_response(user), access_token=access_token, refresh_token=refresh_token)
 
 

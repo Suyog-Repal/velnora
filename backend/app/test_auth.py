@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 from uuid import UUID, uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
@@ -236,3 +237,97 @@ def test_refresh_rejects_unknown_and_expired_tokens() -> None:
     assert client.post("/api/v1/auth/refresh", json={"refresh_token": "x" * 40}).status_code == 401
     # An access token is not a refresh token.
     assert client.post("/api/v1/auth/refresh", json={"refresh_token": payload["access_token"]}).status_code == 401
+
+
+# --- Refresh outcome logging -------------------------------------------------------------------------------------------
+
+def refresh_log(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.name == "velnora" and r.getMessage().startswith("auth refresh")]
+
+
+def test_refresh_logs_ok_within_grace_and_revoked_outcomes(caplog) -> None:
+    import logging
+
+    caplog.set_level(logging.INFO, logger="velnora")
+    payload, _ = register_user()
+    token = payload["refresh_token"]
+    rotated = refresh(token)
+    assert refresh(token).status_code == 200  # within grace
+    assert refresh(token).status_code == 401  # its single grace use is spent
+    lines = refresh_log(caplog)
+    assert lines[0].startswith("auth refresh outcome=ok reason=- token_age_s=")
+    assert lines[1].startswith("auth refresh outcome=within_grace")
+    assert lines[2].startswith("auth refresh outcome=revoked reason=no_row")
+
+
+def test_refresh_logs_a_stale_rotation_as_revoked_with_how_long_ago(caplog) -> None:
+    import logging
+
+    caplog.set_level(logging.INFO, logger="velnora")
+    payload, _ = register_user()
+    token = payload["refresh_token"]
+    assert refresh(token).status_code == 200
+    age_revocation(token, 120)
+    assert refresh(token).status_code == 401
+    last = refresh_log(caplog)[-1]
+    assert "outcome=revoked reason=rotated_stale" in last and "revoked_ago_s=12" in last  # 120 s, give or take the clock
+
+
+def test_refresh_logs_user_missing_and_row_expired(caplog) -> None:
+    import logging
+
+    from .auth import create_token
+
+    caplog.set_level(logging.INFO, logger="velnora")
+    ghost = create_token(uuid4(), "refresh", timedelta(days=1))  # a valid token for a user that does not exist
+    assert refresh(ghost).status_code == 401
+    assert "outcome=user_missing" in refresh_log(caplog)[-1]
+
+    payload, _ = register_user()
+    with get_session_factory()() as session:
+        row = session.scalar(select(RefreshToken).where(RefreshToken.token_hash == hash_token(payload["refresh_token"])))
+        row.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+        session.commit()
+    assert refresh(payload["refresh_token"]).status_code == 401
+    assert "outcome=expired reason=row_expired" in refresh_log(caplog)[-1]
+
+
+def test_refresh_log_never_contains_tokens_hashes_ids_or_emails(caplog) -> None:
+    import logging
+
+    caplog.set_level(logging.DEBUG)
+    payload, _ = register_user()
+    token = payload["refresh_token"]
+    secrets = [token, payload["access_token"], hash_token(token), payload["user"]["id"], payload["user"]["email"]]
+    refresh(token)
+    refresh(token)
+    refresh(token)
+    text = "\n".join(r.getMessage() for r in caplog.records if r.name == "velnora")
+    assert "auth refresh outcome=" in text
+    for secret in secrets:
+        assert secret not in text
+
+
+@pytest.mark.no_db
+def test_refresh_logs_an_expired_token_without_touching_the_database(caplog) -> None:
+    import logging
+
+    from .auth import create_token
+
+    caplog.set_level(logging.INFO, logger="velnora")
+    expired = create_token(uuid4(), "refresh", timedelta(seconds=-30))
+    response = client.post("/api/v1/auth/refresh", json={"refresh_token": expired})
+    assert response.status_code == 401
+    assert response.json() == {"detail": "Invalid or expired session"}  # the response is unchanged: the reason is log-only
+    line = refresh_log(caplog)[-1]
+    assert "outcome=expired reason=- token_age_s=" in line
+    assert expired not in line
+
+
+@pytest.mark.no_db
+def test_refresh_logs_an_invalid_token_as_invalid(caplog) -> None:
+    import logging
+
+    caplog.set_level(logging.INFO, logger="velnora")
+    assert client.post("/api/v1/auth/refresh", json={"refresh_token": "not-a-jwt-but-long-enough-xx"}).status_code == 401
+    assert "outcome=invalid" in refresh_log(caplog)[-1]
