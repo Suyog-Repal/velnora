@@ -11,6 +11,10 @@ const CAPTURE_SERVICE_NAME = 'com.velnora.sms.VelnoraCaptureService';
 const REVIEW_ACTION_RECEIVER_NAME = 'com.velnora.sms.VelnoraReviewActionReceiver';
 const REVIEW_ACTION_SERVICE_NAME = 'com.velnora.sms.VelnoraReviewActionService';
 const LISTENER_NAME = 'com.velnora.sms.VelnoraNotificationListener';
+// Re-arms the daily check-in alarm after a reboot. A normal permission: no prompt.
+const RECEIVE_BOOT_COMPLETED = 'android.permission.RECEIVE_BOOT_COMPLETED';
+const CHECKIN_RECEIVER_NAME = 'com.velnora.sms.VelnoraCheckInReceiver';
+const CHECKIN_SERVICE_NAME = 'com.velnora.sms.VelnoraCheckInService';
 
 function normalizePatterns(patterns) {
   if (!Array.isArray(patterns)) {
@@ -32,7 +36,7 @@ function withVelnoraSms(config, { supportedSenderPatterns = [] } = {}) {
     const mainApplication = AndroidConfig.Manifest.getMainApplicationOrThrow(manifest);
 
     manifest.manifest['uses-permission'] ??= [];
-    for (const name of [RECEIVE_SMS, POST_NOTIFICATIONS, WAKE_LOCK]) {
+    for (const name of [RECEIVE_SMS, POST_NOTIFICATIONS, WAKE_LOCK, RECEIVE_BOOT_COMPLETED]) {
       if (!manifest.manifest['uses-permission'].some((permission) => permission.$['android:name'] === name)) {
         manifest.manifest['uses-permission'].push({ $: { 'android:name': name } });
       }
@@ -87,6 +91,25 @@ function withVelnoraSms(config, { supportedSenderPatterns = [] } = {}) {
     }
     if (!mainApplication.service.some((service) => service.$['android:name'] === REVIEW_ACTION_SERVICE_NAME)) {
       mainApplication.service.push({ $: { 'android:name': REVIEW_ACTION_SERVICE_NAME, 'android:exported': 'false' } });
+    }
+
+    // Daily check-in. The alarm and the notification button are Velnora's own PendingIntents; the system broadcasts that
+    // re-arm the schedule (boot, app update, clock and timezone changes) are the only outside actions it listens for.
+    if (!mainApplication.receiver.some((item) => item.$['android:name'] === CHECKIN_RECEIVER_NAME)) {
+      mainApplication.receiver.push({
+        $: { 'android:name': CHECKIN_RECEIVER_NAME, 'android:exported': 'false' },
+        'intent-filter': [{
+          action: [
+            { $: { 'android:name': 'android.intent.action.BOOT_COMPLETED' } },
+            { $: { 'android:name': 'android.intent.action.MY_PACKAGE_REPLACED' } },
+            { $: { 'android:name': 'android.intent.action.TIMEZONE_CHANGED' } },
+            { $: { 'android:name': 'android.intent.action.TIME_SET' } },
+          ],
+        }],
+      });
+    }
+    if (!mainApplication.service.some((service) => service.$['android:name'] === CHECKIN_SERVICE_NAME)) {
+      mainApplication.service.push({ $: { 'android:name': CHECKIN_SERVICE_NAME, 'android:exported': 'false' } });
     }
 
     mainApplication['meta-data'] ??= [];

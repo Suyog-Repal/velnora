@@ -6,7 +6,8 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ComponentRef } 
 import { clearSession, loadSession, login, logout, refreshSessionShared as refreshSession, register, requestPasswordReset, saveSession, type Session } from './auth';
 import { restoreSession } from './src/services/sessionRestore';
 import { getGuestDataSummary, importGuestData, isGuestModeChosen, setGuestModeChosen } from './src/services/guestModeService';
-import { addSmsStagedListener, configureSupportedSenderPatterns, getNativeReviewNotifier } from './sms';
+import { addSmsStagedListener, configureSupportedSenderPatterns, getNativeCheckIn, getNativeReviewNotifier } from './sms';
+import { confirmCheckInToday, setCheckInPort, syncCheckInSchedule } from './src/services/dailyCheckIn';
 import { drainNativeReviewActions } from './src/services/reviewActionDrain.native';
 import { REVIEW_SETTLE_MS, cancelReviewNotification, clearReviewNotifications, runReviewPass, setReviewNotifierPort } from './src/services/reviewNotifications';
 import { createReviewLinkRouter, resolveReviewTarget, type ReviewLink } from './src/services/reviewLinks';
@@ -51,6 +52,7 @@ import { EMPTY_CASH_FLOW, EMPTY_LEDGER_HEALTH, getCashFlowSummary, getLedgerHeal
 import { Splash } from './src/ui/Splash';
 import { VelnoraLogo } from './src/ui/VelnoraLogo';
 import { PermissionSetup } from './src/components/PermissionSetup';
+import { QuickAddSheet } from './src/screens/QuickAddSheet';
 import { AccountsSheet, CompleteTransactionSheet, ReviewSheet, StatementImportSheet } from './src/screens/LedgerSheets';
 import { DateField } from './src/ui/CalendarDatePicker';
 import { TimeField } from './src/ui/TimePicker';
@@ -128,6 +130,7 @@ function AppInner() {
   const [ledgerHealth, setLedgerHealth] = useState<LedgerHealth>(EMPTY_LEDGER_HEALTH);
   const [showReview, setShowReview] = useState(false);
   const [reviewTxId, setReviewTxId] = useState<string | null>(null);
+  const [showQuickAdd, setShowQuickAdd] = useState(false);
   const [showAccounts, setShowAccounts] = useState(false);
   const [showImport, setShowImport] = useState<'csv' | 'pdf' | null>(null);
   const sessionRefresher = useRef<((stale: Session) => Promise<Session | null>) | null>(null);
@@ -336,9 +339,12 @@ function AppInner() {
   reloadRef.current = reloadData;
 
   // Tapping a review notification. Links are held until the database and session are ready (cold start).
-  useEffect(() => { setReviewNotifierPort(getNativeReviewNotifier()); }, []);
+  useEffect(() => { setReviewNotifierPort(getNativeReviewNotifier()); setCheckInPort(getNativeCheckIn()); }, []);
+  // Hand the saved check-in setting to the native alarm at every start (also repairs it after a data clear or update).
+  useEffect(() => { if (dbReady) void syncCheckInSchedule(getServiceDb()).catch(() => undefined); }, [dbReady]);
   const handleReviewLink = useRef<(link: ReviewLink) => void>(() => undefined);
   handleReviewLink.current = (link) => {
+    if (link.kind === 'quick-add') { setShowQuickAdd(true); return; }
     if (link.kind === 'queue') { setShowReview(true); return; }
     void resolveReviewTarget(getServiceDb(), scope, link.id).then((target) => {
       if (target.status === 'missing') { cancelReviewNotification(link.id); showToast('This transaction is no longer available.', 'info', 'review-missing'); return; }
@@ -619,6 +625,13 @@ function AppInner() {
     <Pressable disabled={importBusy} style={styles.primaryButton} onPress={() => void confirmImport()}><Text style={styles.primaryButtonText}>{importBusy ? 'Importing...' : 'Import and sync'}</Text></Pressable>
     <Pressable disabled={importBusy} onPress={() => setImportPrompt(null)}><Text style={[styles.link, { textAlign: 'center', marginTop: 16 }]}>Not now</Text></Pressable>
   </View></View></Modal>
+  <QuickAddSheet visible={showQuickAdd} session={session} scope={scope} colors={colors} onClose={() => setShowQuickAdd(false)} onSaved={(created) => {
+    setShowQuickAdd(false); confirmCheckInToday();
+    const uiRecord = toUiTransaction(created);
+    setTransactions((current) => [uiRecord, ...current.filter((item) => item.id !== uiRecord.id)]);
+    setDataTick((n) => n + 1); // reports, charts and the cash-flow summary re-read the saved ledger
+    notices.localSave('expense', !!session);
+  }} />
   <ReviewSheet visible={showReview} session={session} colors={colors} onClose={() => setShowReview(false)} onComplete={setReviewTxId} />
   <CompleteTransactionSheet transactionId={reviewTxId} session={session} categories={catViews} colors={colors} onClose={() => setReviewTxId(null)} onChanged={() => void reloadData()} onEdit={(t) => { setOpenTxMode('edit'); setOpenTxState(t); }} />
   <AccountsSheet visible={showAccounts} scope={scope} colors={colors} onClose={() => setShowAccounts(false)} onChanged={() => void reloadData()} />

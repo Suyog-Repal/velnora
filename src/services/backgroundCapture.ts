@@ -1,8 +1,9 @@
 import { loadSession } from '../../auth';
-import { getNativeReviewNotifier } from '../../sms';
+import { getNativeCheckIn, getNativeReviewNotifier } from '../../sms';
 import { drainNativeReviewActions } from './reviewActionDrain.native';
 import { DEFAULT_SMS_RULE } from '../../transactionParser';
 import { isGuestModeChosen } from './guestModeService';
+import { runDailyCheckIn, setCheckInPort } from './dailyCheckIn';
 import { REVIEW_SETTLE_MS, runReviewPass, setReviewNotifierPort } from './reviewNotifications';
 import { drainNativeStagedSms } from './smsStagingService';
 import { getServiceDb, initTransactionService } from './transactionService';
@@ -40,4 +41,18 @@ export async function runReviewActionDrain(): Promise<void> {
   if (!session && !(await isGuestModeChosen())) return; // nobody to own them yet: they stay queued
   await drainNativeReviewActions(session);
   await runReviewPass(getServiceDb(), session?.user.id ?? null);
+}
+
+export const DAILY_CHECKIN_TASK_NAME = 'VelnoraDailyCheckIn';
+
+/**
+ * Runs headless when the daily alarm fires. Counts today's captured transactions in the local ledger and posts the
+ * check-in (unless it is off or already confirmed today). Local data only; no UI, no network.
+ */
+export async function runDailyCheckInTask(): Promise<void> {
+  await initTransactionService();
+  setCheckInPort(getNativeCheckIn());
+  const session = await loadSession();
+  if (!session && !(await isGuestModeChosen())) return; // no ledger owner yet: nothing meaningful to count
+  await runDailyCheckIn(getServiceDb(), session?.user.id ?? null);
 }

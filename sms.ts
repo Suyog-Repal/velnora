@@ -3,6 +3,7 @@ import { requireOptionalNativeModule, type EventSubscription } from 'expo-module
 import type { SmsStagingStore } from './src/services/smsStagingTypes';
 import type { ReviewActionStore } from './src/services/reviewActionDrain';
 import type { ReviewNotifierPort } from './src/services/reviewNotifications';
+import type { CheckInPort } from './src/services/dailyCheckIn';
 
 type VelnoraSmsNativeModule = {
   addListener: (eventName: 'onSmsStaged', listener: () => void) => EventSubscription;
@@ -19,6 +20,10 @@ type VelnoraSmsNativeModule = {
   postReviewSummary?: (count: number) => boolean;
   cancelReviewNotification?: (transactionId: string) => void;
   cancelReviewSummary?: () => void;
+  configureDailyCheckIn?: (enabled: boolean, time: string) => void;
+  getCheckInConfirmedDay?: () => string | null;
+  markCheckInConfirmed?: (day: string) => void;
+  postDailyCheckIn?: (title: string, body: string) => boolean;
 } & SmsStagingStore;
 
 const nativeModule = requireOptionalNativeModule<VelnoraSmsNativeModule>('VelnoraSms');
@@ -101,6 +106,19 @@ export function getNativeReviewNotifier(): ReviewNotifierPort | null {
     postSummary: (count) => native.postReviewSummary?.(count) ?? false,
     cancel: (id) => native.cancelReviewNotification?.(id),
     cancelSummary: () => native.cancelReviewSummary?.(),
+  };
+}
+
+/** Daily check-in alarm and notification. Null on an older native build or off Android: the check-in then does not run. */
+export function getNativeCheckIn(): CheckInPort | null {
+  const native = nativeModule;
+  if (Platform.OS !== 'android' || !native?.postDailyCheckIn || !native.configureDailyCheckIn) return null;
+  return {
+    canNotify: () => native.areNotificationsEnabled?.() ?? false,
+    post: (title, body) => native.postDailyCheckIn?.(title, body) ?? false,
+    confirmedDay: () => native.getCheckInConfirmedDay?.() ?? null,
+    markConfirmed: (day) => native.markCheckInConfirmed?.(day),
+    configure: (enabled, time) => native.configureDailyCheckIn?.(enabled, time),
   };
 }
 

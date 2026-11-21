@@ -9,6 +9,8 @@ import { useCapturePermissions } from '../ui/useCapturePermissions';
 import { countsAsExpense } from '../services/ledgerRules';
 import { getServiceDb } from '../services/transactionService';
 import { getReviewPref, reviewPrefLabel, runReviewPass, setReviewPref, type ReviewNotificationPref } from '../services/reviewNotifications';
+import { checkInLabel, getCheckInPrefs, setCheckInPrefs, syncCheckInSchedule, type CheckInPrefs } from '../services/dailyCheckIn';
+import { TimePickerModal } from '../ui/TimePicker';
 import { appNotificationsLabel, notificationAccessLabel, smsPermissionLabel } from '../services/smsPermissionPolicy';
 import type { Session, TransactionEntity } from '../db/types';
 
@@ -128,6 +130,15 @@ export function ProfileView({ session, colors, mode, accent, transactions, onlin
     if (next !== 'off' && capture.appNotificationsAvailable && !capture.appNotifications) void capture.toggleAppNotifications();
     void setReviewPref(getServiceDb(), next).then(() => runReviewPass(getServiceDb(), session?.user.id ?? null)).catch(() => undefined);
   };
+  const [checkIn, setCheckInState] = useState<CheckInPrefs>({ enabled: true, time: '21:00' });
+  const [pickCheckInTime, setPickCheckInTime] = useState(false);
+  useEffect(() => { void getCheckInPrefs(getServiceDb()).then(setCheckInState).catch(() => undefined); }, []);
+  const updateCheckIn = (change: Partial<CheckInPrefs>) => {
+    setCheckInState((current) => ({ ...current, ...change }));
+    // Ask for notification permission the moment the check-in is switched on (Android 13+ dialog, or Settings if refused for good).
+    if (change.enabled && capture.appNotificationsAvailable && !capture.appNotifications) void capture.toggleAppNotifications();
+    void setCheckInPrefs(getServiceDb(), change).then(() => syncCheckInSchedule(getServiceDb())).catch(() => undefined);
+  };
   // Granted → open Android's permission page to manage it. Not granted → ask; if that does not work, explain and offer Settings.
   const onSmsPress = () => {
     if (!sms.available) return;
@@ -186,6 +197,8 @@ export function ProfileView({ session, colors, mode, accent, transactions, onlin
         <Row icon={<WalletCards size={18} color={palette.emerald} />} title="Payment-app alerts" value={notificationAccessLabel({ available: capture.accessAvailable, granted: capture.access })} colors={colors} onPress={capture.accessAvailable ? () => { capture.openAccessSettings(); } : undefined} />
         <Row icon={<Bell size={18} color={palette.emerald} />} title="Velnora notifications" value={appNotificationsLabel({ available: capture.appNotificationsAvailable, granted: capture.appNotifications })} colors={colors} onPress={capture.appNotificationsAvailable ? () => { void capture.toggleAppNotifications(); } : undefined} />
         <Row icon={<Check size={18} color={palette.emerald} />} title="Review reminders" value={reviewPrefLabel(reviewPref, !capture.appNotificationsAvailable || capture.appNotifications)} colors={colors} onPress={cycleReviewPref} />
+        <Row icon={<Bell size={18} color={palette.emerald} />} title="Daily check-in" value={checkInLabel(checkIn, !capture.appNotificationsAvailable || capture.appNotifications)} colors={colors} onPress={() => updateCheckIn({ enabled: !checkIn.enabled })} />
+        {checkIn.enabled ? <Row icon={<Bell size={18} color={palette.emerald} />} title="Check-in time" value={checkInLabel({ enabled: true, time: checkIn.time })} colors={colors} onPress={() => setPickCheckInTime(true)} /> : null}
         <Row icon={<Text style={{ color: palette.accentText, fontWeight: '600', fontSize: 16 }}>{currencySymbol()}</Text>} title="Currency" value={currencyLabel} colors={colors} onPress={onOpenCurrency} last />
       </Group>
     </Reveal>
@@ -200,6 +213,8 @@ export function ProfileView({ session, colors, mode, accent, transactions, onlin
         </Tap>
       </View>
     </Reveal> : null}
+
+    <TimePickerModal visible={pickCheckInTime} value={checkIn.time} colors={colors} title="Daily check-in time" onCancel={() => setPickCheckInTime(false)} onConfirm={(hm) => { setPickCheckInTime(false); updateCheckIn({ time: hm }); }} />
 
     <Text style={{ color: colors.muted, textAlign: 'center', marginTop: 24, fontSize: 12 }}>Velnora · Personal Finance & Expense Tracker</Text>
   </View>;

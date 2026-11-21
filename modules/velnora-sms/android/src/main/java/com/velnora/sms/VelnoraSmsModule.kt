@@ -82,6 +82,27 @@ class VelnoraSmsModule : Module() {
       return@Function null
     }
 
+    /** Daily check-in: the schedule and "confirmed today" live natively so they work with the app closed. */
+    Function("configureDailyCheckIn") { enabled: Boolean, time: String ->
+      appContext.reactContext?.let { VelnoraCheckIn.configure(it, enabled, time) }
+      return@Function null
+    }
+
+    Function("getCheckInConfirmedDay") {
+      val context = appContext.reactContext ?: return@Function null
+      return@Function VelnoraCheckIn.confirmedDay(context)
+    }
+
+    Function("markCheckInConfirmed") { day: String ->
+      appContext.reactContext?.let { VelnoraCheckIn.markConfirmed(it, day) }
+      return@Function null
+    }
+
+    Function("postDailyCheckIn") { title: String, body: String ->
+      val context = appContext.reactContext ?: return@Function false
+      return@Function VelnoraCheckIn.post(context, title, body)
+    }
+
     AsyncFunction("setOwnerHint") { userId: String -> store().setOwnerHint(userId) }
 
     AsyncFunction("clearOwnerHint") { store().clearOwnerHint() }

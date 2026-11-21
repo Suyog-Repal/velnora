@@ -5,11 +5,14 @@ import type { Scope } from './categoryService.ts';
  * Where a review notification leads. The link carries only a transaction id. Opening one reads the local ledger and
  * never creates anything.
  */
-export type ReviewLink = { kind: 'queue' } | { kind: 'transaction'; id: string };
+export type ReviewLink = { kind: 'queue' } | { kind: 'transaction'; id: string } | { kind: 'quick-add' };
 
 const PREFIX = 'velnora://review';
+/** The daily check-in's "Add expense" button. Carries nothing; it only opens the quick-add screen. */
+const QUICK_ADD = 'velnora://quick-add';
 
 export function parseReviewLink(url: string | null | undefined): ReviewLink | null {
+  if (url === QUICK_ADD || url === `${QUICK_ADD}/`) return { kind: 'quick-add' };
   if (!url || !url.startsWith(PREFIX)) return null;
   const rest = url.slice(PREFIX.length);
   if (rest === '' || rest === '/') return { kind: 'queue' };
