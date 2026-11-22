@@ -76,13 +76,13 @@ export function profileStats(transactions: TransactionEntity[], now = new Date()
   return { count, spentPaise, pending, failed };
 }
 
-export function ProfileView({ session, colors, transactions, online, onOpenSettings, onOpenPrivacy, onOpenCategories, onOpenAliases, onOpenReview, onOpenAccounts, onOpenImport, onOpenImportPdf, reviewCount, onSignIn, onCreate, onLogout }: {
-  session: Session | null; colors: Colors;
+export function ProfileView({ session, displayName, onEditName, colors, transactions, online, onOpenSettings, onOpenPrivacy, onOpenCategories, onOpenAliases, onOpenReview, onOpenAccounts, onOpenImport, onOpenImportPdf, reviewCount, onSignIn, onCreate, onLogout }: {
+  session: Session | null; displayName: string | null; onEditName: () => void; colors: Colors;
   transactions: TransactionEntity[]; online: boolean; onOpenSettings: () => void; onOpenPrivacy: () => void; onOpenCategories: () => void; onOpenAliases: () => void; onOpenReview: () => void; onOpenAccounts: () => void; onOpenImport: () => void; onOpenImportPdf: () => void; reviewCount: number; onSignIn: () => void; onCreate: () => void; onLogout: () => void;
 }) {
   const stats = profileStats(transactions);
-  const name = session?.user.full_name ?? 'Guest';
-  const status = !session ? 'Guest · on this device' : !online ? 'Offline' : stats.pending > 0 ? `${stats.pending} waiting to sync${stats.failed > 0 ? ` (${stats.failed} rejected by server)` : ''}` : 'All synced';
+  const name = displayName ?? 'Add your name';
+  const status = !session ? 'Stored on this device only' : !online ? 'Offline' : stats.pending > 0 ? `${stats.pending} waiting to sync${stats.failed > 0 ? ` (${stats.failed} rejected by server)` : ''}` : 'All synced';
   const avatarPulse = useRef(new Animated.Value(0)).current;
   useEffect(() => { Animated.timing(avatarPulse, { toValue: 1, duration: 700, delay: 120, easing: Easing.out(Easing.back(1.6)), useNativeDriver: true }).start(); }, [avatarPulse]);
   let i = 0;
@@ -96,10 +96,10 @@ export function ProfileView({ session, colors, transactions, online, onOpenSetti
         <View style={{ position: 'absolute', right: -40, top: -50, width: 180, height: 180, borderRadius: 90, backgroundColor: palette.emerald, opacity: 0.22 }} />
         <View style={{ flexDirection: 'row', alignItems: 'center' }}>
           <Animated.View style={{ width: 68, height: 68, borderRadius: 34, backgroundColor: palette.emerald, alignItems: 'center', justifyContent: 'center', borderWidth: 3, borderColor: 'rgba(255,255,255,0.35)', transform: [{ scale: avatarPulse.interpolate({ inputRange: [0, 1], outputRange: [0.6, 1] }) }], opacity: avatarPulse }}>
-            {session ? <Text style={{ color: '#FFFFFF', fontSize: 28, fontWeight: '700' }}>{name.charAt(0).toUpperCase()}</Text> : <UserRound size={30} color="#FFFFFF" />}
+            {displayName ? <Text style={{ color: '#FFFFFF', fontSize: 28, fontWeight: '700' }}>{Array.from(displayName)[0].toUpperCase()}</Text> : <UserRound size={30} color="#FFFFFF" />}
           </Animated.View>
           <View style={{ flex: 1, marginLeft: 14 }}>
-            <Text style={{ color: '#FFFFFF', fontSize: 22, fontWeight: '700' }} numberOfLines={1}>{name}</Text>
+            <Pressable onPress={onEditName} accessibilityRole="button" accessibilityLabel={`Name: ${name}. Edit`} hitSlop={6} style={{ flexDirection: 'row', alignItems: 'center', minHeight: 44 }}><Text style={{ color: palette.onNavySoft, fontSize: 13, marginLeft: 8 }}>Edit</Text></Pressable>
             <Text style={{ color: palette.onNavySoft, fontSize: 13, marginTop: 2 }} numberOfLines={1}>{session?.user.email ?? 'Not signed in'}</Text>
           </View>
         </View>

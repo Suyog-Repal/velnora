@@ -4,10 +4,9 @@
  * accessibility. Motion uses React Native's Animated via the shared motion module and respects reduce-motion.
  */
 import { useEffect, useMemo, useRef } from 'react';
-import { Animated, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
+import { Animated, Image, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
-import Svg, { Path } from 'react-native-svg';
 import { MOTION, useReduceMotion } from '../ui/motion';
 
 /** Palette, spacing and radii for this screen only. Change the look here. */
@@ -62,10 +61,10 @@ export const WELCOME_TOKENS = {
 
 type Props = { dark: boolean; onGetStarted: () => void; onSignIn: () => void; onGuest: () => void };
 
-function LogoMark({ color }: { color: string }) {
-  return <Svg width={32} height={28} viewBox="0 0 32 28" accessible accessibilityRole="image" accessibilityLabel="Velnora logo">
-    <Path d="M5 23.5 L16 6 L27 23.5" stroke={color} strokeWidth={6.5} strokeLinecap="round" strokeLinejoin="round" fill="none" />
-  </Svg>;
+/** The real Velnora mark (shadowless, opaque copy of the app icon's chevron), shown at ~38px wide. */
+export function LogoMark({ width = 38 }: { width?: number }) {
+  return <Image source={require('../../assets/velnora-mark.png')} accessible accessibilityRole="image" accessibilityLabel="Velnora logo"
+    style={{ width, height: Math.round(width * 209 / 232) }} resizeMode="contain" fadeDuration={0} />;
 }
 
 export function WelcomeScreen({ dark, onGetStarted, onSignIn, onGuest }: Props) {
@@ -121,7 +120,7 @@ export function WelcomeScreen({ dark, onGetStarted, onSignIn, onGuest }: Props) 
     <StatusBar style={dark ? 'light' : 'dark'} />
     <ScrollView contentContainerStyle={s.content} showsVerticalScrollIndicator={false} bounces={false}>
       <View style={s.brandRow}>
-        <LogoMark color={dark ? c.brand : t.accent} />
+        <LogoMark />
         <Text style={s.wordmark} maxFontSizeMultiplier={1.2}>VELNORA</Text>
       </View>
 

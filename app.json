@@ -6,6 +6,7 @@
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "automatic",
+    "backgroundColor": "#F6F7F9",
     "ios": {
       "supportsTablet": true
     },
@@ -49,7 +50,20 @@
       ],
       "expo-secure-store",
       "expo-sharing",
-      "expo-status-bar"
+      "expo-status-bar",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/splash-mark.png",
+          "imageWidth": 200,
+          "resizeMode": "contain",
+          "backgroundColor": "#F6F7F9",
+          "dark": {
+            "image": "./assets/splash-mark.png",
+            "backgroundColor": "#0E1014"
+          }
+        }
+      ]
     ],
     "web": {
       "favicon": "./assets/favicon.png"

@@ -57,6 +57,9 @@ import type { QuickAccessId } from './src/services/quickAccess';
 import { EMPTY_CASH_FLOW, EMPTY_LEDGER_HEALTH, getCashFlowSummary, getLedgerHealth, type CashFlowSummary, type LedgerHealth } from './src/services/cashFlowService';
 import { Splash } from './src/ui/Splash';
 import { WelcomeScreen } from './src/screens/WelcomeScreen';
+import { WelcomeName } from './src/screens/WelcomeName';
+import { NameSheet } from './src/components/NameSheet';
+import { firstName, getDisplayName, initialOf, markNamePrompted, resolveDisplayName, setDisplayName, shouldPromptForName } from './src/services/profileService';
 import { VelnoraLogo } from './src/ui/VelnoraLogo';
 import { PermissionSetup } from './src/components/PermissionSetup';
 import { QuickAddSheet } from './src/screens/QuickAddSheet';
@@ -103,14 +106,16 @@ const refreshFrom = (source: 'launch' | 'sync401' | 'offlineRetry') => (s: Sessi
 export default function App() {
   // The SMS permission explanation waits until the splash has finished so the two never overlap.
   const [splashDone, setSplashDone] = useState(false);
+  // True once the local database and the stored-session read are done (never waits for the network).
+  const [appReady, setAppReady] = useState(false);
   // SafeAreaProvider: required by useSafeAreaInsets (tab bar / FAB sit above the system navigation bar, edge-to-edge).
-  return <SafeAreaProvider><View style={{ flex: 1 }}><AppInner /><Splash onFinish={() => setSplashDone(true)} /><PermissionSetup enabled={splashDone} /></View></SafeAreaProvider>;
+  return <SafeAreaProvider><View style={{ flex: 1 }}><AppInner onReady={() => setAppReady(true)} settled={splashDone} /><Splash ready={appReady} onFinish={() => setSplashDone(true)} /><PermissionSetup enabled={splashDone} /></View></SafeAreaProvider>;
 }
 
-function AppInner() {
+function AppInner({ onReady, settled }: { onReady: () => void; settled: boolean }) {
   const [session, setSession] = useState<Session | null>(null);
   const [authReady, setAuthReady] = useState(false);
-  const [authScreen, setAuthScreen] = useState<'welcome' | 'signup' | 'signin' | 'forgot'>('welcome');
+  const [authScreen, setAuthScreen] = useState<'welcome' | 'signup' | 'signin' | 'forgot' | 'guestName'>('welcome');
   const [authBusy, setAuthBusy] = useState(false);
   const [authError, setAuthError] = useState('');
   const [authNotice, setAuthNotice] = useState('');
@@ -146,8 +151,18 @@ function AppInner() {
   const sessionRefresher = useRef<((stale: Session) => Promise<Session | null>) | null>(null);
   const [smsStatusTick, setSmsStatusTick] = useState(0);
   const [guestMode, setGuestMode] = useState(false);
+  // Name set on this device (local SQLite, never sent to the server). The one-time prompt is for existing guests without a name.
+  const [localName, setLocalName] = useState<string | null>(null);
+  const [namePromptDue, setNamePromptDue] = useState(false);
+  const [editingName, setEditingName] = useState(false);
+  const shownName = resolveDisplayName(localName, session?.user.full_name);
   const [showAuth, setShowAuth] = useState(false);
   const [dbReady, setDbReady] = useState(false);
+  useEffect(() => { if (authReady && dbReady) onReady(); }, [authReady, dbReady]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Sync, SMS parsing and network calls wait until the first frame is on screen (the splash has finished); launch never waits for them.
+  const settledResolve = useRef<() => void>(() => undefined);
+  const settledGate = useRef(new Promise<void>((resolve) => { settledResolve.current = resolve; })).current;
+  useEffect(() => { if (settled) settledResolve.current(); }, [settled]);
   const [sessionStale, setSessionStale] = useState(false);
   // The server refused to check the sign-in (400 / 403 / 422) without calling it invalid: the session is kept and this notice is shown.
   const [verifyProblem, setVerifyProblem] = useState(false);
@@ -301,7 +316,7 @@ function AppInner() {
       if (stored) setSession(stored);
       setAuthReady(true);
       if (!stored) return;
-      void restoreSession(stored, refreshFrom('launch')).then(async (result) => {
+      void settledGate.then(() => restoreSession(stored, refreshFrom('launch'))).then(async (result) => {
         if (result.status === 'expired') { await clearSession('launch_expired'); endSessionToSignIn(); }
         if (result.status === 'unverified') setVerifyProblem(true);
         // Only apply this to the session it was started for (the person may have signed out meanwhile).
@@ -344,7 +359,13 @@ function AppInner() {
     let isMounted = true;
     initTransactionService().then(async () => {
       const chosen = await isGuestModeChosen();
-      if (isMounted) { setGuestMode(chosen); setDbReady(true); }
+      let storedName: string | null = null;
+      try {
+        const db = getServiceDb();
+        storedName = await getDisplayName(db);
+        if (isMounted && chosen && !storedName && await shouldPromptForName(db)) setNamePromptDue(true);
+      } catch { /* no name yet: nothing breaks, the name is optional */ }
+      if (isMounted) { setLocalName(storedName); setGuestMode(chosen); setDbReady(true); }
       const storedCats = await getCategories();
       if (isMounted && storedCats.length > 0) {
         setCategoriesList([...new Set(storedCats.map((c) => c.name))]);
@@ -388,7 +409,7 @@ function AppInner() {
   // Tapping a review notification. Links are held until the database and session are ready (cold start).
   useEffect(() => { setReviewNotifierPort(getNativeReviewNotifier()); setCheckInPort(getNativeCheckIn()); }, []);
   // Hand the saved check-in setting to the native alarm at every start (also repairs it after a data clear or update).
-  useEffect(() => { if (dbReady) void syncCheckInSchedule(getServiceDb()).catch(() => undefined); }, [dbReady]);
+  useEffect(() => { if (dbReady && settled) void syncCheckInSchedule(getServiceDb()).catch(() => undefined); }, [dbReady, settled]);
   const handleReviewLink = useRef<(link: ReviewLink) => void>(() => undefined);
   handleReviewLink.current = (link) => {
     if (link.kind === 'quick-add') { setShowQuickAdd(true); return; }
@@ -482,27 +503,27 @@ function AppInner() {
   const latestSession = useRef<Session | null>(null);
   latestSession.current = session;
   useEffect(() => {
-    if (!session?.user.id) return;
+    if (!settled || !session?.user.id) return;
     void startSyncEngine(async () => latestSession.current).catch(() => undefined);
     return () => stopSyncEngine();
-  }, [session?.user.id]);
+  }, [session?.user.id, settled]);
 
   useEffect(() => {
-    if (!session) return;
+    if (!session || !settled) return;
     const run = () => { void syncPendingTransactions(session).then(() => reloadData()).catch(() => undefined); };
     run();
     const subscription = AppState.addEventListener('change', (state) => {
       if (state === 'active') run();
     });
     return () => subscription.remove();
-  }, [session]);
+  }, [session, settled]);
 
   // Durable SMS pipeline: the native receiver stages every bank SMS (even when the app is closed); here we drain the
   // events for the current scope — the signed-in account's own events, or guest-scope events in guest mode — and refresh
   // the dashboard immediately. Signed-in transactions are queued for sync by the service; guest ones stay on the device.
   useEffect(() => {
     configureSupportedSenderPatterns(smsRules.map((rule) => rule.senderPattern));
-    if (!dbReady || (!session && !inGuest)) return;
+    if (!dbReady || !settled || (!session && !inGuest)) return;
     let active = true;
     let settleTimer: ReturnType<typeof setTimeout> | null = null;
     const drain = async (returnedToApp = false) => {
@@ -531,7 +552,7 @@ function AppInner() {
     const staged = addSmsStagedListener(() => { void drain(); });
     const appState = AppState.addEventListener('change', (state) => { if (state === 'active') void drain(true); });
     return () => { active = false; if (settleTimer) clearTimeout(settleTimer); staged?.remove(); appState.remove(); };
-  }, [session, inGuest, dbReady]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [session, inGuest, dbReady, settled]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const submitAuth = async (screen: 'signup' | 'signin') => {
     const normalizedEmail = email.trim().toLowerCase();
@@ -631,10 +652,22 @@ function AppInner() {
     }
   };
 
-  const continueAsGuest = async () => {
+  // The name is saved BEFORE guest mode starts, so Home never shows without it. A failed save throws and the name screen says so.
+  const continueAsGuest = async (name: string) => {
+    const db = getServiceDb();
+    if (!(await setDisplayName(db, name))) throw new Error('Invalid name');
+    await markNamePrompted(db).catch(() => undefined);
+    setLocalName(await getDisplayName(db));
     try { await setGuestModeChosen(true); } catch { /* guest mode still works for this run */ }
     setGuestMode(true); setShowAuth(false);
   };
+  const saveName = async (name: string) => {
+    const db = getServiceDb();
+    if (!(await setDisplayName(db, name))) throw new Error('Invalid name');
+    await markNamePrompted(db).catch(() => undefined);
+    setLocalName(await getDisplayName(db)); setNamePromptDue(false); setEditingName(false);
+  };
+  const dismissNamePrompt = () => { setNamePromptDue(false); void markNamePrompted(getServiceDb()).catch(() => undefined); };
   const confirmImport = async () => {
     if (!session) return;
     setImportBusy(true);
@@ -671,12 +704,12 @@ function AppInner() {
   if (!authReady || !dbReady) return <AuthLoading colors={colors} />;
   if (!session && !inGuest) return <AuthScreens onGuest={continueAsGuest} screen={authScreen} setScreen={setAuthScreen} fullName={fullName} setFullName={setFullName} email={email} setEmail={setEmail} password={password} setPassword={setPassword} confirmPassword={confirmPassword} setConfirmPassword={setConfirmPassword} showPassword={showPassword} setShowPassword={setShowPassword} termsAccepted={termsAccepted} setTermsAccepted={setTermsAccepted} busy={authBusy} error={authError} notice={authNotice} onSubmit={submitAuth} onForgot={submitForgot} colors={colors} />;
 
-  return <SafeAreaView edges={['top', 'left', 'right']} style={[styles.safe, { backgroundColor: colors.canvas }]}><StatusBar style={dark ? 'light' : 'dark'} /><View style={styles.shell}>
+  return <SafeAreaView edges={['top', 'left', 'right']} style={[styles.safe, { backgroundColor: colors.canvas }]}><StatusBar style={dark ? 'light' : 'dark'} /><NameSheet visible={namePromptDue && inGuest && settled && !editingName} colors={colors} onSave={saveName} onClose={dismissNamePrompt} /><NameSheet visible={editingName} colors={colors} initial={shownName} title="Your name" skipLabel="Cancel" onSave={saveName} onClose={() => setEditingName(false)} /><View style={styles.shell}>
     <ScrollView ref={scrollRef} onScroll={(e) => { const n = e.nativeEvent; scrollY.current[tab] = n.contentOffset.y; if (n.contentSize.height - (n.contentOffset.y + n.layoutMeasurement.height) < 1200) notifyNearEnd(); }} scrollEventThrottle={64} keyboardDismissMode="on-drag"
       contentContainerStyle={[styles.content, narrow && { padding: 16 }, { paddingBottom: keyboard ? keyboard + 24 : layout.navHeight + insets.bottom + 54 + 40 }]} keyboardShouldPersistTaps="handled"><View ref={contentRef} collapsable={false}>
-      {tab === 'home' ? <HomeHeader greeting={`${greeting}${session ? `, ${session.user.full_name.split(' ')[0]}` : ''}`} initial={session ? session.user.full_name.charAt(0).toUpperCase() : 'G'} reviewCount={ledgerHealth.needsReviewCount} colors={colors} dark={dark} onProfile={() => navTo('profile')} onSearch={() => navTo('transactions')} onNotifications={() => setShowReview(true)} />
-      : <View style={styles.header}><View><Text style={[styles.overline, { color: palette.accentText }]}>VELNORA</Text><Text style={[styles.title, { color: colors.text }]}>{tab.charAt(0).toUpperCase() + tab.slice(1)}</Text></View><Pressable style={[styles.iconButton, { backgroundColor: colors.card, borderColor: colors.border }]} onPress={() => changeTab('profile')}><Text style={[styles.avatarText, { color: colors.text }]}>{session ? session.user.full_name.charAt(0).toUpperCase() : 'G'}</Text></Pressable></View>}
-      {!session && <Text style={[styles.caption, { color: colors.muted, marginBottom: 12 }]}>Guest mode · data stays on this device and is not synced.</Text>}
+      {tab === 'home' ? <HomeHeader greeting={`${greeting}${firstName(shownName) ? `, ${firstName(shownName)}` : ''}`} initial={initialOf(shownName)} reviewCount={ledgerHealth.needsReviewCount} colors={colors} dark={dark} onProfile={() => navTo('profile')} onSearch={() => navTo('transactions')} onNotifications={() => setShowReview(true)} />
+      : <View style={styles.header}><View><Text style={[styles.overline, { color: palette.accentText }]}>VELNORA</Text><Text style={[styles.title, { color: colors.text }]}>{tab.charAt(0).toUpperCase() + tab.slice(1)}</Text></View><Pressable style={[styles.iconButton, { backgroundColor: colors.card, borderColor: colors.border }]} onPress={() => changeTab('profile')}><Text style={[styles.avatarText, { color: colors.text }]}>{initialOf(shownName)}</Text></Pressable></View>}
+      {!session && <Text style={[styles.caption, { color: colors.muted, marginBottom: 12 }]}>Stored on this device only</Text>}
       {importNotice ? <Text style={styles.noticeText}>{importNotice}</Text> : null}
       {session && verifyProblem ? <SignInCheckNotice colors={colors} busy={verifyBusy} onRetry={() => void retrySignInCheck()} onSignInAgain={() => void signInAgainFromNotice()} /> : null}
       {tab === 'home' ? <SyncStatus offline={!!session && sessionStale && !verifyProblem} colors={colors} />
@@ -688,7 +721,7 @@ function AppInner() {
       {visited.has('analytics') && <KeepAlive active={tab === 'analytics'}><AnalyticsView key={analyticsPreset} scope={scope} colors={colors} refreshKey={dataTick} initialSection={analyticsPreset} onDrill={(c) => { setDrillCategory(c); changeTab('transactions'); }} /></KeepAlive>}
       {visited.has('budgets') && <KeepAlive active={tab === 'budgets'}><BudgetsView scope={scope} categories={catViews} colors={colors} refreshKey={dataTick} /></KeepAlive>}
             {visited.has('people') && <KeepAlive active={tab === 'people'}><PeopleView key={peoplePreset} initialTab={peoplePreset} transactions={transactions} categories={catViews} session={session} colors={colors} refreshKey={dataTick} onOpenTx={setOpenTx} onChanged={() => void reloadData()} onAddTransaction={() => openForm('expense')} /></KeepAlive>}
-      {visited.has('profile') && <KeepAlive active={tab === 'profile'}><ProfileView session={session} colors={colors} transactions={transactions} online={online} onOpenSettings={() => setShowSettings(true)} onOpenPrivacy={() => setShowPrivacy(true)}
+      {visited.has('profile') && <KeepAlive active={tab === 'profile'}><ProfileView session={session} displayName={shownName} onEditName={() => setEditingName(true)} colors={colors} transactions={transactions} online={online} onOpenSettings={() => setShowSettings(true)} onOpenPrivacy={() => setShowPrivacy(true)}
         onOpenCategories={() => setShowCats(true)} onOpenAliases={() => setShowAliases(true)} reviewCount={ledgerHealth.needsReviewCount} onOpenReview={() => setShowReview(true)} onOpenAccounts={() => setShowAccounts(true)} onOpenImport={() => setShowImport('csv')} onOpenImportPdf={() => setShowImport('pdf')} onSignIn={() => openAuth('signin')} onCreate={() => openAuth('signup')}
         onLogout={async () => { if (!session) return; await clearReviewNotifications(getServiceDb(), session.user.id).catch(() => undefined); await logout(session); setSession(null); setSessionStale(false); setTransactions([]); setAuthScreen('welcome'); setShowAuth(true); }} /></KeepAlive>}
       </Animated.View>
@@ -869,9 +902,9 @@ function BottomNav({ tab, setTab, colors, dark, reduceMotion }: { tab: Tab; setT
   </View>;
 }
 
-function AuthLoading({ colors }: { colors: Colors }) { return <SafeAreaView style={[styles.safe, { backgroundColor: colors.canvas }]}><View style={styles.loading}><Text style={[styles.brand, { color: palette.accentText }]}>VELNORA</Text></View></SafeAreaView>; }
-type AuthProps = { onGuest: () => void; screen: 'welcome' | 'signup' | 'signin' | 'forgot'; setScreen: (screen: 'welcome' | 'signup' | 'signin' | 'forgot') => void; fullName: string; setFullName: (value: string) => void; email: string; setEmail: (value: string) => void; password: string; setPassword: (value: string) => void; confirmPassword: string; setConfirmPassword: (value: string) => void; showPassword: boolean; setShowPassword: (value: boolean) => void; termsAccepted: boolean; setTermsAccepted: (value: boolean) => void; busy: boolean; error: string; notice: string; onSubmit: (screen: 'signup' | 'signin') => Promise<void>; onForgot: () => Promise<void>; colors: Colors };
-function AuthScreens(props: AuthProps) { const signup = props.screen === 'signup'; const forgot = props.screen === 'forgot'; if (props.screen === 'welcome') return <WelcomeScreen dark={props.colors.canvas === palette.darkCanvas} onGetStarted={() => props.setScreen('signup')} onSignIn={() => props.setScreen('signin')} onGuest={props.onGuest} />; return <SafeAreaView style={[styles.safe, { backgroundColor: props.colors.canvas }]}><StatusBar style={props.colors.canvas === palette.darkCanvas ? 'light' : 'dark'} /><KeyboardAvoidingView style={styles.safe} behavior="padding"><ScrollView contentContainerStyle={[styles.formScreen, { paddingBottom: 160 }]} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag"><Pressable onPress={() => props.setScreen(forgot ? 'signin' : 'welcome')}><Text style={styles.link}>‹ Back</Text></Pressable><View style={{ marginTop: 28 }}><VelnoraLogo size={64} /></View><Text style={[styles.brand, { marginTop: 10 }]}>VELNORA</Text><Text style={[styles.authTitle, { color: props.colors.text }]}>{signup ? 'Create your account' : forgot ? 'Reset your password' : 'Welcome back'}</Text><Text style={[styles.subtitle, { color: props.colors.muted }]}>{signup ? 'Start building a clearer view of your finances.' : 'Sign in to continue managing your money.'}</Text>{signup && <AuthField label="FULL NAME" value={props.fullName} onChangeText={props.setFullName} placeholder="Your name" colors={props.colors} icon={<UserRound color={props.colors.muted} size={17} />} />}{<AuthField label="EMAIL" value={props.email} onChangeText={props.setEmail} placeholder="you@example.com" colors={props.colors} icon={<KeyRound color={props.colors.muted} size={17} />} />}{!forgot && <PasswordField label="PASSWORD" value={props.password} onChangeText={props.setPassword} visible={props.showPassword} toggle={() => props.setShowPassword(!props.showPassword)} colors={props.colors} />}{signup && <PasswordField label="CONFIRM PASSWORD" value={props.confirmPassword} onChangeText={props.setConfirmPassword} visible={props.showPassword} toggle={() => props.setShowPassword(!props.showPassword)} colors={props.colors} />}{signup && <Pressable style={styles.termsRow} onPress={() => props.setTermsAccepted(!props.termsAccepted)}><View style={[styles.checkbox, props.termsAccepted && styles.checkboxActive]}>{props.termsAccepted && <Text>✓</Text>}</View><Text style={[styles.caption, { color: props.colors.muted }]}>I accept the terms and privacy policy.</Text></Pressable>}{props.error ? <Text style={styles.errorText}>{props.error}</Text> : null}{props.notice ? <Text style={styles.noticeText}>{props.notice}</Text> : null}<Pressable disabled={props.busy} style={styles.primaryButton} onPress={() => forgot ? props.onForgot() : props.onSubmit(signup ? 'signup' : 'signin')}><Text style={styles.primaryButtonText}>{props.busy ? 'Please wait...' : signup ? 'Create account' : forgot ? 'Check reset options' : 'Sign in'}</Text></Pressable>{!signup && !forgot && <Pressable onPress={() => props.setScreen('forgot')}><Text style={[styles.link, { textAlign: 'center', marginTop: 18 }]}>Forgot password?</Text></Pressable>}{!forgot && <Pressable onPress={() => props.setScreen(signup ? 'signin' : 'signup')}><Text style={[styles.caption, { color: props.colors.muted, textAlign: 'center', marginTop: 22 }]}>{signup ? 'Already have an account? ' : 'New to Velnora? '}<Text style={styles.link}>{signup ? 'Sign in' : 'Create account'}</Text></Text></Pressable>}</ScrollView></KeyboardAvoidingView></SafeAreaView>; }
+function AuthLoading({ colors }: { colors: Colors }) { return <View style={{ flex: 1, backgroundColor: colors.canvas }} />; } // plain canvas under the splash: no second logo screen
+type AuthProps = { onGuest: (name: string) => Promise<void>; screen: 'welcome' | 'signup' | 'signin' | 'forgot' | 'guestName'; setScreen: (screen: 'welcome' | 'signup' | 'signin' | 'forgot' | 'guestName') => void; fullName: string; setFullName: (value: string) => void; email: string; setEmail: (value: string) => void; password: string; setPassword: (value: string) => void; confirmPassword: string; setConfirmPassword: (value: string) => void; showPassword: boolean; setShowPassword: (value: boolean) => void; termsAccepted: boolean; setTermsAccepted: (value: boolean) => void; busy: boolean; error: string; notice: string; onSubmit: (screen: 'signup' | 'signin') => Promise<void>; onForgot: () => Promise<void>; colors: Colors };
+function AuthScreens(props: AuthProps) { const signup = props.screen === 'signup'; const forgot = props.screen === 'forgot'; if (props.screen === 'welcome') return <WelcomeScreen dark={props.colors.canvas === palette.darkCanvas} onGetStarted={() => props.setScreen('signup')} onSignIn={() => props.setScreen('signin')} onGuest={() => props.setScreen('guestName')} />; if (props.screen === 'guestName') return <WelcomeName dark={props.colors.canvas === palette.darkCanvas} onContinue={props.onGuest} onBack={() => props.setScreen('welcome')} />; return <SafeAreaView style={[styles.safe, { backgroundColor: props.colors.canvas }]}><StatusBar style={props.colors.canvas === palette.darkCanvas ? 'light' : 'dark'} /><KeyboardAvoidingView style={styles.safe} behavior="padding"><ScrollView contentContainerStyle={[styles.formScreen, { paddingBottom: 160 }]} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag"><Pressable onPress={() => props.setScreen(forgot ? 'signin' : 'welcome')}><Text style={styles.link}>‹ Back</Text></Pressable><View style={{ marginTop: 28 }}><VelnoraLogo size={64} /></View><Text style={[styles.brand, { marginTop: 10 }]}>VELNORA</Text><Text style={[styles.authTitle, { color: props.colors.text }]}>{signup ? 'Create your account' : forgot ? 'Reset your password' : 'Welcome back'}</Text><Text style={[styles.subtitle, { color: props.colors.muted }]}>{signup ? 'Start building a clearer view of your finances.' : 'Sign in to continue managing your money.'}</Text>{signup && <AuthField label="FULL NAME" value={props.fullName} onChangeText={props.setFullName} placeholder="Your name" colors={props.colors} icon={<UserRound color={props.colors.muted} size={17} />} />}{<AuthField label="EMAIL" value={props.email} onChangeText={props.setEmail} placeholder="you@example.com" colors={props.colors} icon={<KeyRound color={props.colors.muted} size={17} />} />}{!forgot && <PasswordField label="PASSWORD" value={props.password} onChangeText={props.setPassword} visible={props.showPassword} toggle={() => props.setShowPassword(!props.showPassword)} colors={props.colors} />}{signup && <PasswordField label="CONFIRM PASSWORD" value={props.confirmPassword} onChangeText={props.setConfirmPassword} visible={props.showPassword} toggle={() => props.setShowPassword(!props.showPassword)} colors={props.colors} />}{signup && <Pressable style={styles.termsRow} onPress={() => props.setTermsAccepted(!props.termsAccepted)}><View style={[styles.checkbox, props.termsAccepted && styles.checkboxActive]}>{props.termsAccepted && <Text>✓</Text>}</View><Text style={[styles.caption, { color: props.colors.muted }]}>I accept the terms and privacy policy.</Text></Pressable>}{props.error ? <Text style={styles.errorText}>{props.error}</Text> : null}{props.notice ? <Text style={styles.noticeText}>{props.notice}</Text> : null}<Pressable disabled={props.busy} style={styles.primaryButton} onPress={() => forgot ? props.onForgot() : props.onSubmit(signup ? 'signup' : 'signin')}><Text style={styles.primaryButtonText}>{props.busy ? 'Please wait...' : signup ? 'Create account' : forgot ? 'Check reset options' : 'Sign in'}</Text></Pressable>{!signup && !forgot && <Pressable onPress={() => props.setScreen('forgot')}><Text style={[styles.link, { textAlign: 'center', marginTop: 18 }]}>Forgot password?</Text></Pressable>}{!forgot && <Pressable onPress={() => props.setScreen(signup ? 'signin' : 'signup')}><Text style={[styles.caption, { color: props.colors.muted, textAlign: 'center', marginTop: 22 }]}>{signup ? 'Already have an account? ' : 'New to Velnora? '}<Text style={styles.link}>{signup ? 'Sign in' : 'Create account'}</Text></Text></Pressable>}</ScrollView></KeyboardAvoidingView></SafeAreaView>; }
 function AuthField({ label, value, onChangeText, placeholder, icon, colors }: { label: string; value: string; onChangeText: (value: string) => void; placeholder: string; icon: React.ReactNode; colors: Colors }) { return <View style={styles.authField}><Text style={[styles.label, { color: colors.muted }]}>{label}</Text><View style={[styles.authInputWrap, { backgroundColor: colors.card, borderColor: colors.border }]}>{icon}<TextInput value={value} onChangeText={onChangeText} placeholder={placeholder} placeholderTextColor={colors.muted} style={[styles.inputBare, { color: colors.text }]} autoCapitalize="none" /></View></View>; }
 function PasswordField({ label, value, onChangeText, visible, toggle, colors }: { label: string; value: string; onChangeText: (value: string) => void; visible: boolean; toggle: () => void; colors: Colors }) { return <View style={styles.authField}><Text style={[styles.label, { color: colors.muted }]}>{label}</Text><View style={[styles.authInputWrap, { backgroundColor: colors.card, borderColor: colors.border }]}><LockKeyhole color={colors.muted} size={17} /><TextInput value={value} onChangeText={onChangeText} placeholder="8+ characters" placeholderTextColor={colors.muted} secureTextEntry={!visible} style={[styles.inputBare, { color: colors.text }]} /><Pressable onPress={toggle}>{visible ? <EyeOff color={colors.muted} size={18} /> : <Eye color={colors.muted} size={18} />}</Pressable></View></View>; }
 
