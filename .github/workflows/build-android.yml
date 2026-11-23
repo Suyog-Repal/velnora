@@ -226,12 +226,17 @@ jobs:
           cp "$apk_source" "$apk_release"
           sha256sum "$apk_release" > "${apk_release}.sha256"
 
+          # Fixed-name copy so the website can always link to
+          # https://github.com/Suyog-Repal/velnora/releases/latest/download/velnora.apk
+          apk_latest="velnora.apk"
+          cp "$apk_source" "$apk_latest"
+
           if gh release view "$tag" >/dev/null 2>&1; then
             echo "Release $tag already exists. Updating release assets..."
-            gh release upload "$tag" "$apk_release" "${apk_release}.sha256" --clobber
+            gh release upload "$tag" "$apk_release" "${apk_release}.sha256" "$apk_latest" --clobber
           else
             echo "Creating GitHub Release $tag..."
-            gh release create "$tag" "$apk_release" "${apk_release}.sha256" \
+            gh release create "$tag" "$apk_release" "${apk_release}.sha256" "$apk_latest" \
               --title "Release $tag" \
               --generate-notes
           fi
