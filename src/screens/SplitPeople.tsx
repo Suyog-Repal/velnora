@@ -10,7 +10,7 @@ import { SettleSheet, type SettleTarget } from './SettleSheet';
 import { getServiceDb } from '../services/transactionService';
 import { SELF, SplitError } from '../services/splitMath';
 import {
-  addGroupMember, archiveGroup, createContact, createGroup, deleteContact, deleteGroup, deleteSplitExpense, listSplitExpenses, recordSettlement, removeGroupMember, unarchiveGroup,
+  addGroupMember, archiveGroup, createContact, createGroup, deleteContact, deleteGroup, deleteSplitExpense, listSplitExpenses, recordSettlement, removeGroupMember, renameGroup, unarchiveGroup,
   updateContact, updateSplitExpense, type Contact, type SplitExpense, type SplitGroup,
 } from '../services/splitService';
 import { balanceWord, buildFriendDetail, buildGroupDetail, loadOverview, type GroupRow, type Ledger, type Overview } from '../services/splitOverview';
@@ -28,6 +28,12 @@ export function useSplitData(scope: string | null, refreshKey: number) {
   const reload = useCallback(async () => { setData(await loadOverview(getServiceDb(), scope)); }, [scope]);
   useEffect(() => { void reload().catch(() => undefined); }, [reload, refreshKey]);
   return { data, reload };
+}
+
+/** What the settle-up sheet needs about a person: balance, what the reminder is for, and their phone / UPI ID (kept on the device). */
+function settleTarget(data: SplitData, id: string, balancePaise: number, opts: { groupId?: string | null; context?: string } = {}): SettleTarget {
+  const c = data.allContacts.find((x) => x.id === id);
+  return { id, label: data.overview.labels.get(id) ?? c?.name ?? 'Removed person', name: c?.name, balancePaise, groupId: opts.groupId, context: opts.context, phone: c?.phone ?? null, upiId: c?.upi_id ?? null };
 }
 
 // ------------------------------------------------------------------------------------------------------- small pieces
@@ -195,7 +201,7 @@ function FriendSheet({ friendId, data, expected, scope, colors, onClose, onChang
     <BalanceCard netPaise={friend.balancePaise} owedPaise={Math.max(0, friend.balancePaise)} owePaise={Math.max(0, -friend.balancePaise)} colors={colors} />
     {friend.contact.phone || friend.contact.upi_id ? <Text style={{ color: colors.muted, marginTop: 8, fontSize: 12 }}>{[friend.contact.phone, friend.contact.upi_id].filter(Boolean).join(' · ')}  (stays on this device)</Text> : null}
     <View style={{ marginTop: 12 }}><Button title={friend.balancePaise === 0 ? 'Record a payment' : friend.balancePaise > 0 ? 'Settle up' : 'Pay back'} kind={friend.balancePaise === 0 ? 'ghost' : 'primary'}
-      onPress={() => onSettle({ id: friend.contact.id, label: friend.label, balancePaise: friend.balancePaise })} /></View>
+      onPress={() => onSettle(settleTarget(data, friend.contact.id, friend.balancePaise, { context: detail.scopes.length === 1 && detail.scopes[0].groupName ? detail.scopes[0].groupName : undefined }))} /></View>
 
     {detail.scopes.length > 1 || (detail.scopes[0] && detail.scopes[0].groupId) ? <>
       <Section colors={colors}>WHERE IT ADDS UP</Section>
@@ -263,8 +269,10 @@ function GroupSheet({ groupId, data, scope, colors, onClose, onChanged, onSettle
   const [showAll, setShowAll] = useState(false);
   const [manage, setManage] = useState(false);
   const [showPlan, setShowPlan] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  const [newName, setNewName] = useState('');
   const group = data.allGroups.find((g) => g.id === groupId) ?? null;
-  useEffect(() => { setShowAll(false); setManage(false); setShowPlan(false); }, [groupId]);
+  useEffect(() => { setShowAll(false); setManage(false); setShowPlan(false); setRenaming(false); }, [groupId]);
   useEffect(() => {
     if (!groupId) return;
     let live = true;
@@ -292,7 +300,17 @@ function GroupSheet({ groupId, data, scope, colors, onClose, onChanged, onSettle
   };
 
   return <Sheet visible onClose={onClose} title={group.name} colors={colors} footer={archived ? undefined : <Button title="Add expense" onPress={() => onAddExpense(group)} />}>
-    <Text style={{ color: colors.muted, marginBottom: 10 }}>{group.memberIds.length + 1} members{archived ? ' · archived' : ''}</Text>
+    <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+      <Text style={{ color: colors.muted }}>{group.memberIds.length + 1} members{archived ? ' · archived' : ''}</Text>
+      {!archived && !renaming ? <Pressable onPress={() => { setNewName(group.name); setRenaming(true); }} hitSlop={8} accessibilityRole="button" accessibilityLabel="Rename group"><Text style={{ color: palette.accentText, fontWeight: '700' }}>Rename</Text></Pressable> : null}
+    </View>
+    {renaming ? <View style={{ marginBottom: 12 }}>
+      <Input colors={colors} value={newName} onChangeText={setNewName} autoCapitalize="words" maxLength={80} accessibilityLabel="Group name" />
+      <View style={{ flexDirection: 'row', gap: 10, marginTop: 8 }}>
+        <View style={{ flex: 1 }}><Button title="Cancel" kind="ghost" onPress={() => setRenaming(false)} /></View>
+        <View style={{ flex: 1 }}><Button title="Save name" onPress={() => { void renameGroup(getServiceDb(), scope, group.id, newName).then(() => { setRenaming(false); onChanged(); }).catch(fail('Could not rename')); }} /></View>
+      </View>
+    </View> : null}
     <BalanceCard netPaise={detail.netPaise} owedPaise={detail.owedToMePaise} owePaise={detail.iOwePaise} colors={colors} />
 
     <Section colors={colors}>MEMBERS</Section>
@@ -302,7 +320,7 @@ function GroupSheet({ groupId, data, scope, colors, onClose, onChanged, onSettle
       </View>
       {detail.members.map((m, i) => <View key={m.id} style={{ flexDirection: 'row', alignItems: 'center' }}>
         <View style={{ flex: 1 }}><Row label={m.label} caption={manage ? 'tap Remove to take out of the group' : balanceWord(m.balancePaise) === 'settled' ? 'settled up' : 'tap to settle up'} balancePaise={m.balancePaise} colors={colors} last={i === detail.members.length - 1}
-          onPress={manage || archived ? undefined : () => onSettle({ id: m.id, label: m.label, balancePaise: m.balancePaise, groupId: group.id })} /></View>
+          onPress={manage || archived ? undefined : () => onSettle(settleTarget(data, m.id, m.balancePaise, { groupId: group.id, context: group.name }))} /></View>
         {manage ? <Pressable onPress={() => { void removeGroupMember(getServiceDb(), scope, group.id, m.id).then(onChanged).catch(fail('Cannot remove yet')); }} hitSlop={8} accessibilityRole="button" accessibilityLabel={`Remove ${m.label}`}><Text style={{ color: palette.expenseText, fontWeight: '700', paddingLeft: 8 }}>Remove</Text></Pressable> : null}
       </View>)}
     </Card>

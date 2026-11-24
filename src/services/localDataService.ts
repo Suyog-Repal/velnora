@@ -1,5 +1,6 @@
 import { getDatabase } from '../db/database.ts';
 import { withWriteLock } from '../db/writeLock.ts';
+import { deletePaymentDetails } from './paymentDetails.ts';
 import type { IDatabase } from '../db/types.ts';
 
 export interface LocalDataSummary {
@@ -59,6 +60,11 @@ export async function deleteUserLocalData(
         id,
       );
       await db.runAsync('DELETE FROM account_profiles WHERE user_id = ?', id);
+      // Split data (friends with phone numbers and UPI ids, groups, expenses, settlements) and payment details are financial data too.
+      await db.runAsync('DELETE FROM split_shares WHERE expense_id IN (SELECT id FROM split_expenses WHERE user_id = ?)', id);
+      await db.runAsync('DELETE FROM group_members WHERE group_id IN (SELECT id FROM split_groups WHERE user_id = ?)', id);
+      for (const table of ['split_expenses', 'split_groups', 'settlements', 'contacts']) await db.runAsync(`DELETE FROM ${table} WHERE user_id = ?`, id);
+      await deletePaymentDetails(db, id);
       const deleted = await db.runAsync('DELETE FROM transactions WHERE user_id = ?', id);
       await db.runAsync(
         'DELETE FROM app_metadata WHERE key IN (?, ?)',

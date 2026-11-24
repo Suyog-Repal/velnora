@@ -50,7 +50,8 @@ function cleanPhone(phone?: string | null): string | null {
   if (!/^\+?\d{7,15}$/.test(p)) throw new SplitError('Enter a valid phone number, digits only (with country code if you can).');
   return p;
 }
-function cleanUpi(upi?: string | null): string | null {
+/** Trims and validates a UPI ID (name@bank). Returns null for empty; throws SplitError when malformed. */
+export function cleanUpi(upi?: string | null): string | null {
   const u = (upi ?? '').trim();
   if (!u) return null;
   if (!/^[A-Za-z0-9._-]{2,256}@[A-Za-z][A-Za-z0-9.-]{1,63}$/.test(u)) throw new SplitError('Enter a valid UPI ID, like name@bank.');

@@ -5,6 +5,7 @@ import { Check, FileText, LogOut, ReceiptIcon, Settings, ShieldCheck, Sliders, T
 import { formatPaise, Sheet, type Colors } from '../ui/common';
 import { readableOn } from '../ui/common';
 import { Group, NavRow, Tap } from '../ui/rows';
+import { PaymentDetailsSheet } from './PaymentDetails';
 import { countsAsExpense } from '../services/ledgerRules';
 import type { Session, TransactionEntity } from '../db/types';
 
@@ -87,6 +88,7 @@ export function ProfileView({ session, displayName, onEditName, colors, transact
   useEffect(() => { Animated.timing(avatarPulse, { toValue: 1, duration: 700, delay: 120, easing: Easing.out(Easing.back(1.6)), useNativeDriver: true }).start(); }, [avatarPulse]);
   let i = 0;
   const [importChoice, setImportChoice] = useState(false);
+  const [showPay, setShowPay] = useState(false);
   // Close the choice first, then open the chosen import flow (both are modal sheets).
   const chooseImport = (open: () => void) => { setImportChoice(false); open(); };
 
@@ -129,6 +131,7 @@ export function ProfileView({ session, displayName, onEditName, colors, transact
         <NavRow icon={<Sliders size={18} color={palette.emerald} />} title="Merchant names" subtitle="Corrections Velnora remembers" colors={colors} onPress={onOpenAliases} />
         <NavRow icon={<Check size={18} color={palette.emerald} />} title="Review transactions" subtitle="Payments that need a category or details" badge={reviewCount} colors={colors} onPress={onOpenReview} />
         <NavRow icon={<WalletCards size={18} color={palette.emerald} />} title="Accounts" subtitle="Found from your bank messages" colors={colors} onPress={onOpenAccounts} />
+        <NavRow icon={<ReceiptIcon size={18} color={palette.emerald} />} title="Payment details" subtitle="Your UPI ID and QR for payment requests" colors={colors} onPress={() => setShowPay(true)} />
         <NavRow icon={<FileText size={18} color={palette.emerald} />} title="Import" subtitle="From a CSV file or a PDF statement" colors={colors} onPress={() => setImportChoice(true)} last />
       </Group>
     </Reveal>
@@ -149,6 +152,7 @@ export function ProfileView({ session, displayName, onEditName, colors, transact
       </View>
     </Reveal> : null}
 
+    <PaymentDetailsSheet visible={showPay} onClose={() => setShowPay(false)} scope={session?.user.id ?? null} colors={colors} />
     <Sheet visible={importChoice} onClose={() => setImportChoice(false)} title="Import transactions" colors={colors}>
       <Group colors={colors}>
         <NavRow icon={<ReceiptIcon size={18} color={palette.emerald} />} title="CSV file" subtitle="Add or match from a CSV file" colors={colors} onPress={() => chooseImport(onOpenImport)} />

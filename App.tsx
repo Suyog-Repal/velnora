@@ -15,6 +15,7 @@ import { getGuestDataSummary, importGuestData, isGuestModeChosen, setGuestModeCh
 import { countGuestSplitData, createSplitExpense } from './src/services/splitService';
 import { emptyDraft, evaluateDraft, parseMoneyToPaise, setGroup } from './src/services/splitDraft';
 import { SplitSection, useSplitDraft } from './src/screens/SplitEditor';
+import { SplitDuesCard } from './src/screens/SplitDues';
 import { hapticSuccess } from './src/ui/haptics';
 import { addSmsStagedListener, configureSupportedSenderPatterns, getNativeCheckIn, getNativeReviewNotifier } from './sms';
 import { confirmCheckInToday, setCheckInPort, syncCheckInSchedule } from './src/services/dailyCheckIn';
@@ -737,7 +738,8 @@ function AppInner({ onReady, settled }: { onReady: () => void; settled: boolean 
         : session && sessionStale && !verifyProblem ? <Text style={[styles.caption, { color: colors.muted, marginBottom: 12 }]}>Offline · working from local data; sync resumes when you reconnect.</Text> : null}
       <Animated.View style={{ opacity: enter.interpolate({ inputRange: [0, 1], outputRange: [0.55, 1] }), transform: [{ translateX: enter.interpolate({ inputRange: [0, 1], outputRange: [slideDir.current * TAB_ENTER.offsetDp, 0] }) }] }}>
       {visited.has('home') && <KeepAlive active={tab === 'home'}><HomeScreen scope={scope} onOpen={setOpenTx} transactions={transactions} cashFlow={cashFlow} health={ledgerHealth} onReview={() => setShowReview(true)} colors={colors} dark={dark} onAddExpense={() => openForm('expense')} onViewAll={() => navTo('transactions')} onAnalytics={() => navTo('analytics')}
-        onTransactions={(type) => { navTo('transactions'); setTxPreset(type); }} onQuickAccess={(id) => quickAccess(id)} /></KeepAlive>}
+        onTransactions={(type) => { navTo('transactions'); setTxPreset(type); }} onQuickAccess={(id) => quickAccess(id)}
+          dataTick={dataTick} onSplitDues={() => { navTo('people'); setPeoplePreset('people'); }} /></KeepAlive>}
       {visited.has('transactions') && <KeepAlive active={tab === 'transactions'}><TransactionsView scope={scope} key={`${drillCategory ?? 'all'}-${txPreset}`} transactions={transactions} categories={catViews} colors={colors} loading={txLoading} online={online} onOpen={setOpenTx} onAdd={() => openForm('expense')} initialCategory={drillCategory} initialType={txPreset} /></KeepAlive>}
       {visited.has('analytics') && <KeepAlive active={tab === 'analytics'}><AnalyticsView key={analyticsPreset} scope={scope} colors={colors} refreshKey={dataTick} initialSection={analyticsPreset} onDrill={(c) => { setDrillCategory(c); changeTab('transactions'); }} /></KeepAlive>}
       {visited.has('budgets') && <KeepAlive active={tab === 'budgets'}><BudgetsView scope={scope} categories={catViews} colors={colors} refreshKey={dataTick} /></KeepAlive>}
@@ -822,7 +824,7 @@ function AppInner({ onReady, settled }: { onReady: () => void; settled: boolean 
   </SafeAreaView>;
 }
 
-function HomeScreen({ scope, onOpen, transactions, cashFlow, health, onReview, colors, dark, onAddExpense, onViewAll, onAnalytics, onTransactions, onQuickAccess }: { scope: string | null; onOpen: (tx: TransactionEntity) => void; transactions: Transaction[]; cashFlow: CashFlowSummary; health: LedgerHealth; onReview: () => void; colors: Colors; dark: boolean; onAddExpense: () => void; onViewAll: () => void; onAnalytics: () => void; onTransactions: (type: 'all' | 'income' | 'expense') => void; onQuickAccess: (id: QuickAccessId) => void }) {
+function HomeScreen({ scope, onOpen, transactions, cashFlow, health, onReview, colors, dark, onAddExpense, onViewAll, onAnalytics, onTransactions, onQuickAccess, dataTick, onSplitDues }: { dataTick: number; onSplitDues: () => void; scope: string | null; onOpen: (tx: TransactionEntity) => void; transactions: Transaction[]; cashFlow: CashFlowSummary; health: LedgerHealth; onReview: () => void; colors: Colors; dark: boolean; onAddExpense: () => void; onViewAll: () => void; onAnalytics: () => void; onTransactions: (type: 'all' | 'income' | 'expense') => void; onQuickAccess: (id: QuickAccessId) => void }) {
   // Stable callbacks: the memoised sections below then skip re-rendering when Home is shown again (fast tab switches).
   const onIncome = useStableCallback(() => onTransactions('income'));
   const onExpenses = useStableCallback(() => onTransactions('expense'));
@@ -838,6 +840,7 @@ function HomeScreen({ scope, onOpen, transactions, cashFlow, health, onReview, c
     <RecordedBalanceCard balancePaise={cashFlow.balancePaise} colors={colors} dark={dark} />
     <MonthlySummary cashFlow={cashFlow} colors={colors} onIncome={onIncome} onExpenses={onExpenses} />
     <QuickAccessSection colors={colors} onAction={onQuickAccessStable} />
+    <SplitDuesCard scope={scope} colors={colors} refreshKey={dataTick} onOpen={onSplitDues} />
     <TodayActivityCard health={health} colors={colors} dark={dark} onReview={onReviewStable} onOpenList={onOpenList} />
     <SectionHeader title="Spending overview" action="Analytics" onPress={onAnalytics} colors={colors} />
     <SpendingOverview scope={scope} refreshKey={transactions} colors={colors} transactions={transactions} renderTransaction={renderTransaction} />

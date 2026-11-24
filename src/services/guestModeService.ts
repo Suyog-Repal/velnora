@@ -2,6 +2,7 @@ import { AttachmentRepository } from '../db/repositories/attachmentRepository.ts
 import { getDatabase } from '../db/database.ts';
 import { withWriteLock } from '../db/writeLock.ts';
 import { claimGuestSplitData } from './splitService.ts';
+import { claimGuestPaymentDetails } from './paymentDetails.ts';
 import type { IDatabase } from '../db/types.ts';
 
 /**
@@ -160,6 +161,7 @@ export async function importGuestData(userId: string, database?: IDatabase): Pro
       }
       // Split data (friends, groups, expenses, shares, settlements) is local-only: it changes owner with its transactions and is never queued.
       await claimGuestSplitData(db, id, skippedTo, now);
+      await claimGuestPaymentDetails(db, id);
       // Photos and scans of the imported transactions now belong to the account too, and are queued for upload.
       await new AttachmentRepository(db).adoptForUser(id);
       await db.execAsync('COMMIT');
