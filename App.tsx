@@ -56,7 +56,7 @@ import { createSessionRefresher } from './src/services/sessionRefresh';
 import { API_URL } from './auth';
 import { Chip, Input, Sheet, TypeToggle, currencySymbol, readableOn, themeColors, useOnline } from './src/ui/common';
 import { KeepAlive, notifyNearEnd, useKeyboardHeight, useStableCallback } from './src/ui/perf';
-import { MOTION, useReduceMotion } from './src/ui/motion';
+import { MOTION, PopView, useReduceMotion } from './src/ui/motion';
 import { HomeHeader, MonthlySummary, QuickAccessSection, RecordedBalanceCard, SyncStatus, TodayActivityCard, fabColors } from './src/screens/HomeDashboard';
 import type { QuickAccessId } from './src/services/quickAccess';
 import { EMPTY_CASH_FLOW, EMPTY_LEDGER_HEALTH, getCashFlowSummary, getLedgerHealth, type CashFlowSummary, type LedgerHealth } from './src/services/cashFlowService';
@@ -191,6 +191,7 @@ function AppInner({ onReady, settled }: { onReady: () => void; settled: boolean 
   const online = useOnline();
   const scope = session?.user.id ?? null;
   const split = useSplitDraft(scope, showForm);
+  const [savePop, setSavePop] = useState(0); // bumps when a valid entry is being saved: the Save button pops
   const greeting = useGreeting();
   // Date/time for a new transaction. Until the person picks one, the transaction is stamped with the moment of saving.
   const [txDate, setTxDate] = useState(localYmd());
@@ -615,7 +616,7 @@ function AppInner({ onReady, settled }: { onReady: () => void; settled: boolean 
     const totalPaise = parseMoneyToPaise(typed);
     const splitEval = split.draft.enabled && direction === 'expense' ? evaluateDraft(split.draft, totalPaise) : null;
     if (splitEval && !splitEval.ok) { split.markAttempted(); setFormError(splitEval.error ?? 'Check the split.'); return; }
-    setFormError('');
+    setFormError(''); setSavePop((n) => n + 1);
     savingRef.current = true; setSaving(true);
     try {
       if (splitEval?.input && !splitEval.paidByMe) {
@@ -773,10 +774,10 @@ function AppInner({ onReady, settled }: { onReady: () => void; settled: boolean 
   <StatementImportSheet visible={showImport !== null} mode={showImport ?? 'csv'} scope={scope} session={session} categories={catViews} refreshSession={(stale) => sessionRefresher.current?.(stale) ?? Promise.resolve(null)} colors={colors} onClose={() => setShowImport(null)} onImported={() => { void reloadData(); if (session) void syncPendingTransactions(session); }} />
   <Sheet visible={showForm} onClose={closeForm} title="Record transaction" colors={colors} footer={<>
     {formError ? <Text style={[styles.errorText, { marginTop: 0, marginBottom: 8 }]} accessibilityLiveRegion="polite">{formError}</Text> : null}
-    <Pressable disabled={saving} onPress={() => void addTransaction()} accessibilityRole="button" accessibilityState={{ disabled: saving, busy: saving }}
+    <PopView popKey={savePop}><Pressable disabled={saving} onPress={() => void addTransaction()} accessibilityRole="button" accessibilityState={{ disabled: saving, busy: saving }}
       style={({ pressed }) => [styles.primaryButton, { marginTop: 0, opacity: saving ? 0.6 : pressed ? 0.85 : 1 }]}>
       <Text style={[styles.primaryButtonText, { color: readableOn(palette.accentText) }]}>{saving ? 'Saving…' : direction === 'income' ? 'Save income' : 'Save expense'}</Text>
-    </Pressable>
+    </Pressable></PopView>
   </>}>
     <Text style={[styles.label, { color: colors.muted, marginTop: 0 }]}>TYPE</Text>
     <TypeToggle value={direction} onChange={chooseDirection} colors={colors} />

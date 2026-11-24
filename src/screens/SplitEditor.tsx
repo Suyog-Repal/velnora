@@ -3,6 +3,8 @@ import { Pressable, ScrollView, Switch, Text, View } from 'react-native';
 import { palette, radius, tint } from '../../theme';
 import { Button, Initial, Input, Segmented, Sheet, formatPaise, type Colors } from '../ui/common';
 import { hapticLight, hapticSuccess } from '../ui/haptics';
+import { PopView } from '../ui/motion';
+import { Reveal } from './ProfileView';
 import { getServiceDb } from '../services/transactionService';
 import { SELF, SplitError, type SplitMode } from '../services/splitMath';
 import { draftFromSplit, emptyDraft, evaluateDraft, setGroup, toggleParticipant, type DraftEvaluation, type SplitDraft } from '../services/splitDraft';
@@ -171,7 +173,7 @@ export function SplitSection({ split, totalPaise, colors }: { split: SplitContro
       <Switch value={draft.enabled} onValueChange={(enabled) => { hapticLight(); setDraft((d) => ({ ...d, enabled })); }} accessibilityLabel="Split with others"
         trackColor={{ true: palette.emerald, false: colors.border }} thumbColor="#FFFFFF" />
     </View>
-    {draft.enabled ? <SplitFields split={split} totalPaise={totalPaise} colors={colors} /> : null}
+    {draft.enabled ? <Reveal index={0}><SplitFields split={split} totalPaise={totalPaise} colors={colors} /></Reveal> : null}
   </View>;
 }
 
@@ -190,6 +192,7 @@ export function SplitSheet({ visible, onClose, scope, title, totalPaise, existin
   const split = useSplitDraft(scope, visible);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [pop, setPop] = useState(0);
   useEffect(() => {
     if (!visible) return;
     setError(''); setBusy(false);
@@ -201,6 +204,7 @@ export function SplitSheet({ visible, onClose, scope, title, totalPaise, existin
   const save = async () => {
     if (busy) return;
     if (!evaluation.ok || !evaluation.input) { split.markAttempted(); setError(evaluation.error ?? 'Check the split.'); return; }
+    setPop((n) => n + 1); // a valid split: the button pops as it saves
     setBusy(true); setError('');
     try { await onSubmit({ ...evaluation.input, groupId: split.draft.groupId }); hapticSuccess(); }
     catch (e) { setError(e instanceof Error ? e.message : 'Could not save the split.'); }
@@ -209,7 +213,7 @@ export function SplitSheet({ visible, onClose, scope, title, totalPaise, existin
 
   return <Sheet visible={visible} onClose={onClose} title={existing && !startFresh ? 'Edit split' : 'Split this'} colors={colors} footer={<>
     {error ? <Text style={{ color: palette.expenseText, marginBottom: 8 }} accessibilityLiveRegion="polite">{error}</Text> : null}
-    <Button title="Save split" onPress={() => void save()} busy={busy} />
+    <PopView popKey={pop}><Button title="Save split" onPress={() => void save()} busy={busy} /></PopView>
     {existing && onRemove && !startFresh ? <View style={{ marginTop: 8 }}><Button title="Remove split" kind="ghost" onPress={onRemove} disabled={busy} /></View> : null}
   </>}>
     <Text style={{ color: colors.text, fontWeight: '700', fontSize: 16 }} numberOfLines={1}>{title}</Text>

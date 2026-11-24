@@ -6,6 +6,7 @@ import { formatPaise, Sheet, type Colors } from '../ui/common';
 import { readableOn } from '../ui/common';
 import { Group, NavRow, Tap } from '../ui/rows';
 import { PaymentDetailsSheet } from './PaymentDetails';
+import { useReduceMotion } from '../ui/motion';
 import { countsAsExpense } from '../services/ledgerRules';
 import type { Session, TransactionEntity } from '../db/types';
 
@@ -14,8 +15,12 @@ export { Group, Tap };
 
 /** Fades + lifts a block in; blocks are staggered by `index` so the page assembles instead of popping in. */
 export function Reveal({ index, children }: { index: number; children: ReactNode }) {
-  const v = useRef(new Animated.Value(0)).current;
-  useEffect(() => { Animated.timing(v, { toValue: 1, duration: 420, delay: 60 + index * 70, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start(); }, [v, index]);
+  const reduce = useReduceMotion();
+  const v = useRef(new Animated.Value(reduce ? 1 : 0)).current;
+  useEffect(() => {
+    if (reduce) { v.setValue(1); return; }
+    Animated.timing(v, { toValue: 1, duration: 420, delay: 60 + index * 70, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start();
+  }, [v, index, reduce]);
   return <Animated.View style={{ opacity: v, transform: [{ translateY: v.interpolate({ inputRange: [0, 1], outputRange: [18, 0] }) }] }}>{children}</Animated.View>;
 }
 

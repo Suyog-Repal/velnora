@@ -4,6 +4,7 @@ import type Svg from 'react-native-svg';
 import { palette, radius } from '../../theme';
 import { Button, Initial, Input, Segmented, Sheet, currencySymbol, formatPaise, type Colors } from '../ui/common';
 import { hapticSuccess } from '../ui/haptics';
+import { PopView } from '../ui/motion';
 import { showToast } from '../ui/Toast';
 import { UpiQr, qrToPngBase64 } from './UpiQr';
 import { getServiceDb } from '../services/transactionService';
@@ -49,6 +50,7 @@ export function SettleSheet({ visible, onClose, scope, target, colors, onDone }:
   const [showQr, setShowQr] = useState(false);
   const [useSaved, setUseSaved] = useState(false);
   const [signature, setSignature] = useState(false);
+  const [pop, setPop] = useState(0);
   const svgRef = useRef<Svg>(null);
 
   useEffect(() => {
@@ -80,6 +82,7 @@ export function SettleSheet({ visible, onClose, scope, target, colors, onDone }:
   const record = async () => {
     if (busy) return;
     if (paise === null || paise <= 0) { needAmount(); return; }
+    setPop((n) => n + 1);
     setBusy(true); setError('');
     try {
       const db = getServiceDb();
@@ -96,6 +99,7 @@ export function SettleSheet({ visible, onClose, scope, target, colors, onDone }:
   const guard = (): string | null => { if (!paise || !message) { needAmount(); return null; } setError(''); return message; };
   const sendWhatsApp = async () => {
     const text = guard(); if (!text) return;
+    setPop((n) => n + 1);
     const outcome = await sendOnWhatsApp(text, target.phone, { open: openLink, share: shareText });
     if (outcome === 'share') showToast("WhatsApp isn't available here, so the share sheet opened instead.", 'info', 'wa-share');
     if (outcome === 'failed') setError('Could not open WhatsApp or the share sheet.');
@@ -124,11 +128,11 @@ export function SettleSheet({ visible, onClose, scope, target, colors, onDone }:
   return <Sheet visible={visible} onClose={onClose} title={title} colors={colors} footer={<>
     {error ? <Text style={{ color: palette.expenseText, marginBottom: 8 }} accessibilityLiveRegion="polite">{error}</Text> : null}
     {remind && target.balancePaise > 0 ? <>
-      <Button title="Send on WhatsApp" onPress={() => void sendWhatsApp()} />
+      <PopView popKey={pop}><Button title="Send on WhatsApp" onPress={() => void sendWhatsApp()} /></PopView>
       <Pressable onPress={() => void record()} disabled={busy} accessibilityRole="button" hitSlop={8} style={{ minHeight: 44, alignItems: 'center', justifyContent: 'center', marginTop: 4 }}>
         <Text style={{ color: palette.accentText, fontWeight: '700' }}>{busy ? 'Saving…' : recordLabel}</Text>
       </Pressable>
-    </> : <Button title={recordLabel} onPress={() => void record()} busy={busy} />}
+    </> : <PopView popKey={pop}><Button title={recordLabel} onPress={() => void record()} busy={busy} /></PopView>}
   </>}>
     <View style={{ alignItems: 'center', marginBottom: 14 }}>
       <Initial label={target.label} color={palette.emerald} size={56} />

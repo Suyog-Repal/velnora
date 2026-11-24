@@ -4,6 +4,7 @@ import * as ImagePicker from 'expo-image-picker';
 import { palette, radius } from '../../theme';
 import { Button, Input, Labeled, Sheet, type Colors } from '../ui/common';
 import { hapticSuccess } from '../ui/haptics';
+import { PopView } from '../ui/motion';
 import { showToast } from '../ui/Toast';
 import { getServiceDb } from '../services/transactionService';
 import { SplitError } from '../services/splitMath';
@@ -17,7 +18,7 @@ import { expoQrFiles } from '../services/paymentExpo';
 export function PaymentDetailsSheet({ visible, onClose, scope, colors }: { visible: boolean; onClose: () => void; scope: string | null; colors: Colors }) {
   const [details, setDetails] = useState<PaymentDetails>({ upiId: null, displayName: null, qrPath: null });
   const [upi, setUpi] = useState(''); const [name, setName] = useState('');
-  const [error, setError] = useState(''); const [note, setNote] = useState(''); const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(''); const [note, setNote] = useState(''); const [busy, setBusy] = useState(false); const [pop, setPop] = useState(0);
 
   useEffect(() => {
     if (!visible) return;
@@ -30,7 +31,7 @@ export function PaymentDetailsSheet({ visible, onClose, scope, colors }: { visib
     try {
       const d = await savePaymentDetails(getServiceDb(), scope, { upiId: upi, displayName: name });
       setDetails(d); setUpi(d.upiId ?? ''); setName(d.displayName ?? '');
-      hapticSuccess(); showToast('Payment details saved on this device.', 'success', 'payment-saved');
+      setPop((n) => n + 1); hapticSuccess(); showToast('Payment details saved on this device.', 'success', 'payment-saved');
     } catch (e) { setError(e instanceof SplitError || e instanceof Error ? e.message : 'Could not save.'); }
     finally { setBusy(false); }
   };
@@ -56,7 +57,7 @@ export function PaymentDetailsSheet({ visible, onClose, scope, colors }: { visib
   const dirty = (upi.trim() || '') !== (details.upiId ?? '') || (name.trim() || '') !== (details.displayName ?? '');
   return <Sheet visible={visible} onClose={onClose} title="Payment details" colors={colors} footer={<>
     {error ? <Text style={{ color: palette.expenseText, marginBottom: 8 }} accessibilityLiveRegion="polite">{error}</Text> : null}
-    <Button title={dirty ? 'Save details' : 'Saved'} onPress={() => void save()} busy={busy} />
+    <PopView popKey={pop}><Button title={dirty ? 'Save details' : 'Saved'} onPress={() => void save()} busy={busy} /></PopView>
   </>}>
     <Text style={{ color: colors.muted, marginBottom: 14 }}>Used only to build the payment requests you send to friends. They stay on this device: nothing here is uploaded or synced.</Text>
     <Labeled label="YOUR UPI ID" colors={colors} hint="Like name@bank. With it, Velnora can add the exact amount to a QR and a payment link.">

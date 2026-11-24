@@ -4,8 +4,8 @@
  * React Native's Animated with the native driver only: no new dependency, smooth on mid-range Android, and nothing here
  * blocks touches (animations are visual only).
  */
-import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { AccessibilityInfo, Animated, Easing, StyleSheet, View, type DimensionValue, type ViewStyle } from 'react-native';
+import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { AccessibilityInfo, Animated, Easing, StyleSheet, View, type DimensionValue, type StyleProp, type TextProps, type TextStyle, type ViewStyle } from 'react-native';
 import { isDarkScheme, radius, space } from '../../theme';
 
 /** Durations (ms) and easing used everywhere, so every transition feels the same. */
@@ -67,6 +67,44 @@ export function useEntrance(visible: boolean, kind: 'scale' | 'lift' = 'scale'):
       ? [{ scale: v.interpolate({ inputRange: [0, 1], outputRange: [0.96, 1] }) }]
       : [{ translateY: v.interpolate({ inputRange: [0, 1], outputRange: [12, 0] }) }],
   }) as unknown as ViewStyle, [v, kind]);
+}
+
+/**
+ * A brief scale pop (1 -> 1.05 -> 1) each time `popKey` changes, never on first render. Confirms a valid Save / Send on the primary
+ * button. Transform only, native driver, so it never moves anything around it. With reduce-motion on it does nothing.
+ */
+export function PopView({ popKey, children, style }: { popKey: number; children: ReactNode; style?: StyleProp<ViewStyle> }) {
+  const reduce = useReduceMotion();
+  const scale = useRef(new Animated.Value(1)).current;
+  const first = useRef(true);
+  useEffect(() => {
+    if (first.current) { first.current = false; return; }
+    if (reduce) return;
+    scale.stopAnimation(); scale.setValue(1);
+    Animated.sequence([
+      Animated.timing(scale, { toValue: 1.05, duration: 90, easing: MOTION.easeOut, useNativeDriver: true }),
+      Animated.spring(scale, { toValue: 1, stiffness: 300, damping: 16, mass: 1, useNativeDriver: true }),
+    ]).start();
+  }, [popKey, reduce, scale]);
+  return <Animated.View style={[style, { transform: [{ scale }] }]}>{children}</Animated.View>;
+}
+
+/**
+ * A number (or any short text) that lifts and fades in when its value changes, so a balance that moved is noticed. It never animates on
+ * first render. Opacity and translate only (native driver): the text itself is not counted up, which would redraw it on every frame.
+ */
+export function ChangeText({ value, style, ...rest }: Omit<TextProps, 'style' | 'children'> & { value: string; style?: StyleProp<TextStyle> }) {
+  const reduce = useReduceMotion();
+  const v = useRef(new Animated.Value(1)).current;
+  const prev = useRef(value);
+  useLayoutEffect(() => {
+    if (prev.current === value) return;
+    prev.current = value;
+    if (reduce) return;
+    v.stopAnimation(); v.setValue(0);
+    Animated.timing(v, { toValue: 1, duration: MOTION.base, easing: MOTION.easeOut, useNativeDriver: true }).start();
+  }, [value, reduce, v]);
+  return <Animated.Text {...rest} style={[style, { opacity: v.interpolate({ inputRange: [0, 1], outputRange: [0.2, 1] }), transform: [{ translateY: v.interpolate({ inputRange: [0, 1], outputRange: [8, 0] }) }] }]}>{value}</Animated.Text>;
 }
 
 // ---- skeletons -------------------------------------------------------------------------------------------------------

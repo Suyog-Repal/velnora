@@ -3,6 +3,7 @@ import { Alert, Pressable, Text, View } from 'react-native';
 import { palette, radius, tint } from '../../theme';
 import { Button, Chip, Initial, Input, Labeled, SearchField, Sheet, formatPaise, type Colors } from '../ui/common';
 import { hapticLight, hapticSuccess } from '../ui/haptics';
+import { ChangeText } from '../ui/motion';
 import { showToast } from '../ui/Toast';
 import { Reveal } from './ProfileView';
 import { AddPerson, SPLIT_LOCAL_NOTE, SplitSheet } from './SplitEditor';
@@ -43,7 +44,7 @@ export function BalanceCard({ netPaise, owedPaise, owePaise, caption, colors }: 
   const headline = netPaise > 0 ? `You're owed ${formatPaise(netPaise)}` : netPaise < 0 ? `You owe ${formatPaise(-netPaise)}` : "You're all settled up";
   return <View accessible accessibilityLabel={headline} style={{ borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.card, padding: 16 }}>
     {caption ? <Text style={{ color: colors.muted, fontSize: 12, fontWeight: '700', letterSpacing: 0.6 }}>{caption}</Text> : null}
-    <Text style={{ color: tone, fontSize: 24, fontWeight: '700', marginTop: caption ? 6 : 0, fontVariant: ['tabular-nums'] }} numberOfLines={1} adjustsFontSizeToFit>{headline}</Text>
+    <ChangeText value={headline} style={{ color: tone, fontSize: 24, fontWeight: '700', marginTop: caption ? 6 : 0, fontVariant: ['tabular-nums'] }} numberOfLines={1} adjustsFontSizeToFit />
     {owedPaise > 0 && owePaise > 0 ? <Text style={{ color: colors.muted, marginTop: 4 }}>{formatPaise(owedPaise)} owed to you · {formatPaise(owePaise)} you owe</Text> : null}
   </View>;
 }
@@ -52,7 +53,7 @@ function BalanceText({ balancePaise, colors }: { balancePaise: number; colors: C
   const w = balanceWord(balancePaise);
   const color = w === 'owes_you' ? palette.accentText : w === 'you_owe' ? palette.expenseText : colors.muted;
   return <View style={{ alignItems: 'flex-end', flexShrink: 0, maxWidth: '45%' }}>
-    {w !== 'settled' ? <Text style={{ color, fontWeight: '700', fontVariant: ['tabular-nums'] }} numberOfLines={1} adjustsFontSizeToFit>{formatPaise(Math.abs(balancePaise))}</Text> : null}
+    {w !== 'settled' ? <ChangeText value={formatPaise(Math.abs(balancePaise))} style={{ color, fontWeight: '700', fontVariant: ['tabular-nums'] }} numberOfLines={1} adjustsFontSizeToFit /> : null}
     <Text style={{ color: w === 'settled' ? colors.muted : color, fontSize: 12 }}>{w === 'owes_you' ? 'owes you' : w === 'you_owe' ? 'you owe' : 'settled up'}</Text>
   </View>;
 }
@@ -198,20 +199,20 @@ function FriendSheet({ friendId, data, expected, scope, colors, onClose, onChang
     { text: 'Delete', style: 'destructive', onPress: () => { void deleteContact(getServiceDb(), scope, friend.contact.id).then(() => { onChanged(); onClose(); }).catch((e) => Alert.alert('Cannot delete yet', messageOf(e, 'Could not delete.'))); } },
   ]);
   return <Sheet visible onClose={onClose} title={friend.label} colors={colors}>
-    <BalanceCard netPaise={friend.balancePaise} owedPaise={Math.max(0, friend.balancePaise)} owePaise={Math.max(0, -friend.balancePaise)} colors={colors} />
+    <Reveal index={0}><BalanceCard netPaise={friend.balancePaise} owedPaise={Math.max(0, friend.balancePaise)} owePaise={Math.max(0, -friend.balancePaise)} colors={colors} /></Reveal>
     {friend.contact.phone || friend.contact.upi_id ? <Text style={{ color: colors.muted, marginTop: 8, fontSize: 12 }}>{[friend.contact.phone, friend.contact.upi_id].filter(Boolean).join(' · ')}  (stays on this device)</Text> : null}
     <View style={{ marginTop: 12 }}><Button title={friend.balancePaise === 0 ? 'Record a payment' : friend.balancePaise > 0 ? 'Settle up' : 'Pay back'} kind={friend.balancePaise === 0 ? 'ghost' : 'primary'}
       onPress={() => onSettle(settleTarget(data, friend.contact.id, friend.balancePaise, { context: detail.scopes.length === 1 && detail.scopes[0].groupName ? detail.scopes[0].groupName : undefined }))} /></View>
 
-    {detail.scopes.length > 1 || (detail.scopes[0] && detail.scopes[0].groupId) ? <>
+    {detail.scopes.length > 1 || (detail.scopes[0] && detail.scopes[0].groupId) ? <Reveal index={1}>
       <Section colors={colors}>WHERE IT ADDS UP</Section>
       <Card colors={colors}>{detail.scopes.map((s, i) => <View key={s.groupId ?? 'none'} style={{ flexDirection: 'row', alignItems: 'center', minHeight: 48, borderBottomWidth: i === detail.scopes.length - 1 ? 0 : 1, borderBottomColor: colors.border }}>
         <Text style={{ color: colors.text, flex: 1 }} numberOfLines={1}>{s.groupName ?? 'Outside groups'}</Text>
         <BalanceText balancePaise={s.balancePaise} colors={colors} />
       </View>)}</Card>
-    </> : null}
+    </Reveal> : null}
 
-    {pending.length ? <>
+    {pending.length ? <Reveal index={2}>
       <Section colors={colors}>EXPECTED PAYMENTS</Section>
       <Card colors={colors}>{pending.map((e, i) => <Pressable key={e.id} onPress={() => { onClose(); onOpenExpected(e); }} accessibilityRole="button" accessibilityLabel={`Expected payment ${formatPaise(outstandingPaise(e))}`}
         style={({ pressed }) => ({ flexDirection: 'row', alignItems: 'center', minHeight: 52, borderBottomWidth: i === pending.length - 1 ? 0 : 1, borderBottomColor: colors.border, opacity: pressed ? 0.7 : 1 })}>
@@ -219,10 +220,12 @@ function FriendSheet({ friendId, data, expected, scope, colors, onClose, onChang
         <Text style={{ color: e.direction === 'receive' ? palette.accentText : palette.expenseText, fontWeight: '700', fontVariant: ['tabular-nums'] }}>{formatPaise(outstandingPaise(e))}</Text>
       </Pressable>)}</Card>
       <Text style={{ color: colors.muted, fontSize: 12, marginTop: 6 }}>Expected payments are tracked separately and do not change the split balance above.</Text>
-    </> : null}
+    </Reveal> : null}
 
-    <Section colors={colors}>SHARED EXPENSES</Section>
-    <ExpenseRows expenses={expenses} labels={data.overview.labels} colors={colors} onOpen={onOpenExpense} />
+    <Reveal index={3}>
+      <Section colors={colors}>SHARED EXPENSES</Section>
+      <ExpenseRows expenses={expenses} labels={data.overview.labels} colors={colors} onOpen={onOpenExpense} />
+    </Reveal>
 
     <View style={{ flexDirection: 'row', gap: 10, marginTop: 18 }}>
       <View style={{ flex: 1 }}><Button title="Edit" kind="ghost" onPress={() => onEdit(friend.contact)} /></View>
@@ -311,9 +314,9 @@ function GroupSheet({ groupId, data, scope, colors, onClose, onChanged, onSettle
         <View style={{ flex: 1 }}><Button title="Save name" onPress={() => { void renameGroup(getServiceDb(), scope, group.id, newName).then(() => { setRenaming(false); onChanged(); }).catch(fail('Could not rename')); }} /></View>
       </View>
     </View> : null}
-    <BalanceCard netPaise={detail.netPaise} owedPaise={detail.owedToMePaise} owePaise={detail.iOwePaise} colors={colors} />
+    <Reveal index={0}><BalanceCard netPaise={detail.netPaise} owedPaise={detail.owedToMePaise} owePaise={detail.iOwePaise} colors={colors} /></Reveal>
 
-    <Section colors={colors}>MEMBERS</Section>
+    <Reveal index={1}><Section colors={colors}>MEMBERS</Section>
     <Card colors={colors}>
       <View style={{ flexDirection: 'row', alignItems: 'center', minHeight: 52, borderBottomWidth: detail.members.length ? 1 : 0, borderBottomColor: colors.border }}>
         <Initial label="You" color={palette.info} size={32} /><Text style={{ color: colors.text, marginLeft: 10, fontWeight: '600' }}>You</Text>
@@ -324,14 +327,14 @@ function GroupSheet({ groupId, data, scope, colors, onClose, onChanged, onSettle
         {manage ? <Pressable onPress={() => { void removeGroupMember(getServiceDb(), scope, group.id, m.id).then(onChanged).catch(fail('Cannot remove yet')); }} hitSlop={8} accessibilityRole="button" accessibilityLabel={`Remove ${m.label}`}><Text style={{ color: palette.expenseText, fontWeight: '700', paddingLeft: 8 }}>Remove</Text></Pressable> : null}
       </View>)}
     </Card>
-    {!archived ? <View style={{ marginTop: 10 }}><Button title={manage ? 'Done' : 'Manage members'} kind="ghost" onPress={() => setManage((v) => !v)} /></View> : null}
+    {!archived ? <View style={{ marginTop: 10 }}><Button title={manage ? 'Done' : 'Manage members'} kind="ghost" onPress={() => setManage((v) => !v)} /></View> : null}</Reveal>
     {manage && !archived ? <View style={{ marginTop: 10 }}>
       {nonMembers.length ? <><Text style={{ color: colors.muted, fontSize: 12, marginBottom: 6 }}>Add a friend to this group</Text>
         <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>{nonMembers.map((f) => <Chip key={f.contact.id} label={`+ ${f.label}`} active={false} colors={colors} onPress={() => { void addGroupMember(getServiceDb(), scope, group.id, f.contact.id).then(onChanged).catch(fail('Could not add')); }} />)}</View></> : null}
       <AddPerson colors={colors} onAdd={async (n, p) => { const c = await createContact(getServiceDb(), scope, { name: n, phone: p }); await addGroupMember(getServiceDb(), scope, group.id, c.id); onChanged(); }} />
     </View> : null}
 
-    {detail.simplify.beforeCount > 0 ? <>
+    {detail.simplify.beforeCount > 0 ? <Reveal index={2}>
       <Section colors={colors}>SIMPLIFY DEBTS</Section>
       <Card colors={colors} style={{ paddingVertical: 14 }}>
         <Text style={{ color: colors.text, fontWeight: '700', fontSize: 16 }} accessibilityLabel={`${detail.simplify.beforeCount} payments can become ${detail.simplify.afterCount}`}>
@@ -346,12 +349,12 @@ function GroupSheet({ groupId, data, scope, colors, onClose, onChanged, onSettle
           </Pressable>
         </View>) : null}
       </Card>
-    </> : null}
+    </Reveal> : null}
 
-    <Section colors={colors}>RECENT EXPENSES</Section>
+    <Reveal index={3}><Section colors={colors}>RECENT EXPENSES</Section>
     {expenses.length === 0 && !archived ? <Invite title="Split your first expense" text="Add an expense to this group and Velnora keeps track of who owes what." action="Add expense" onAction={() => onAddExpense(group)} colors={colors} />
       : <ExpenseRows expenses={expenses} labels={labels} colors={colors} onOpen={onOpenExpense} />}
-    {!showAll && expenses.length >= 6 ? <Pressable onPress={() => setShowAll(true)} accessibilityRole="button"><Text style={{ color: palette.accentText, fontWeight: '700', textAlign: 'center', paddingVertical: 12 }}>Show all expenses</Text></Pressable> : null}
+    {!showAll && expenses.length >= 6 ? <Pressable onPress={() => setShowAll(true)} accessibilityRole="button"><Text style={{ color: palette.accentText, fontWeight: '700', textAlign: 'center', paddingVertical: 12 }}>Show all expenses</Text></Pressable> : null}</Reveal>
 
     <View style={{ flexDirection: 'row', gap: 10, marginTop: 18 }}>
       <View style={{ flex: 1 }}><Button title={archived ? 'Unarchive' : 'Archive'} kind="ghost" onPress={toggleArchive} /></View>
