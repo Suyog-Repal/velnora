@@ -57,7 +57,7 @@ function PersonChip({ label, active, onPress, colors, trailing }: { label: strin
   </Pressable>;
 }
 
-function AddPerson({ onAdd, colors }: { onAdd: (name: string, phone: string) => Promise<unknown>; colors: Colors }) {
+export function AddPerson({ onAdd, colors }: { onAdd: (name: string, phone: string) => Promise<unknown>; colors: Colors }) {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState(''); const [phone, setPhone] = useState(''); const [error, setError] = useState(''); const [busy, setBusy] = useState(false);
   if (!open) return <Pressable onPress={() => setOpen(true)} accessibilityRole="button" accessibilityLabel="Add a new person"
@@ -179,10 +179,12 @@ export function SplitSection({ split, totalPaise, colors }: { split: SplitContro
  * A sheet for splitting an EXISTING transaction ("Split this"), editing its split, or re-entering the exact amounts after the
  * transaction's amount changed. It only builds the validated input; `onSubmit` decides what to save.
  */
-export function SplitSheet({ visible, onClose, scope, title, totalPaise, existing, startFresh, reentryNote, colors, onSubmit, onRemove }: {
+export function SplitSheet({ visible, onClose, scope, title, totalPaise, existing, startFresh, reentryNote, lockPayer = true, colors, onSubmit, onRemove }: {
   visible: boolean; onClose: () => void; scope: string | null; title: string; totalPaise: number; existing: SplitExpense | null;
   /** Open with Exact mode and empty amounts (used when the amount changed and the exact split must be entered again). */
   startFresh?: boolean; reentryNote?: string; colors: Colors;
+  /** True for a split on one of the owner's own payments (they paid). False for an expense a friend paid, where the payer can change. */
+  lockPayer?: boolean;
   onSubmit: (input: Pick<SplitExpenseInput, 'mode' | 'participants' | 'payers' | 'groupId'>) => Promise<void>; onRemove?: () => void;
 }) {
   const split = useSplitDraft(scope, visible);
@@ -191,7 +193,7 @@ export function SplitSheet({ visible, onClose, scope, title, totalPaise, existin
   useEffect(() => {
     if (!visible) return;
     setError(''); setBusy(false);
-    if (existing) { const d = { ...draftFromSplit(existing), payer: SELF }; split.reset(startFresh ? { ...d, mode: 'exact', values: {} } : d); }
+    if (existing) { const d = lockPayer ? { ...draftFromSplit(existing), payer: SELF } : draftFromSplit(existing); split.reset(startFresh ? { ...d, mode: 'exact', values: {} } : d); }
     else split.reset({ ...emptyDraft(), enabled: true });
   }, [visible, existing?.id, startFresh]); // eslint-disable-line react-hooks/exhaustive-deps
   const evaluation = evaluateDraft(split.draft, totalPaise);
@@ -213,6 +215,6 @@ export function SplitSheet({ visible, onClose, scope, title, totalPaise, existin
     <Text style={{ color: colors.text, fontWeight: '700', fontSize: 16 }} numberOfLines={1}>{title}</Text>
     <Text style={{ color: colors.muted, marginTop: 2 }}>Total <Text style={{ color: colors.text, fontWeight: '700' }}>{formatPaise(totalPaise)}</Text></Text>
     {reentryNote ? <Text style={{ color: palette.amber, marginTop: 8 }}>{reentryNote}</Text> : null}
-    <SplitFields split={split} totalPaise={totalPaise} colors={colors} payerLocked />
+    <SplitFields split={split} totalPaise={totalPaise} colors={colors} payerLocked={lockPayer} />
   </Sheet>;
 }

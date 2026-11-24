@@ -31,7 +31,7 @@ export interface Settlement { id: string; user_id: string | null; group_id: stri
 
 const now = () => new Date().toISOString();
 
-async function inTransaction<T>(db: IDatabase, fn: () => Promise<T>): Promise<T> {
+export async function inTransaction<T>(db: IDatabase, fn: () => Promise<T>): Promise<T> {
   return withWriteLock(async () => {
     await db.execAsync('BEGIN TRANSACTION');
     try { const r = await fn(); await db.execAsync('COMMIT'); return r; } catch (err) { await db.execAsync('ROLLBACK'); throw err; }
@@ -222,6 +222,11 @@ export async function removeGroupMember(db: IDatabase, scope: Scope, groupId: st
 export async function archiveGroup(db: IDatabase, scope: Scope, id: string): Promise<void> {
   await assertGroupSettled(db, scope, id);
   await inTransaction(db, async () => { const t = now(); await db.runAsync(`UPDATE split_groups SET archived_at = ?, updated_at = ? WHERE id = ?`, t, t, id); });
+}
+
+export async function unarchiveGroup(db: IDatabase, scope: Scope, id: string): Promise<void> {
+  await requireGroup(db, scope, id);
+  await inTransaction(db, async () => { await db.runAsync(`UPDATE split_groups SET archived_at = NULL, updated_at = ? WHERE id = ?`, now(), id); });
 }
 
 export async function deleteGroup(db: IDatabase, scope: Scope, id: string): Promise<void> {

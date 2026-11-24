@@ -13,7 +13,7 @@ import NetInfo from '@react-native-community/netinfo';
 import { diag, diagnostics } from './src/services/diagnostics';
 import { getGuestDataSummary, importGuestData, isGuestModeChosen, setGuestModeChosen } from './src/services/guestModeService';
 import { countGuestSplitData, createSplitExpense } from './src/services/splitService';
-import { evaluateDraft, parseMoneyToPaise } from './src/services/splitDraft';
+import { emptyDraft, evaluateDraft, parseMoneyToPaise, setGroup } from './src/services/splitDraft';
 import { SplitSection, useSplitDraft } from './src/screens/SplitEditor';
 import { hapticSuccess } from './src/ui/haptics';
 import { addSmsStagedListener, configureSupportedSenderPatterns, getNativeCheckIn, getNativeReviewNotifier } from './sms';
@@ -741,7 +741,8 @@ function AppInner({ onReady, settled }: { onReady: () => void; settled: boolean 
       {visited.has('transactions') && <KeepAlive active={tab === 'transactions'}><TransactionsView scope={scope} key={`${drillCategory ?? 'all'}-${txPreset}`} transactions={transactions} categories={catViews} colors={colors} loading={txLoading} online={online} onOpen={setOpenTx} onAdd={() => openForm('expense')} initialCategory={drillCategory} initialType={txPreset} /></KeepAlive>}
       {visited.has('analytics') && <KeepAlive active={tab === 'analytics'}><AnalyticsView key={analyticsPreset} scope={scope} colors={colors} refreshKey={dataTick} initialSection={analyticsPreset} onDrill={(c) => { setDrillCategory(c); changeTab('transactions'); }} /></KeepAlive>}
       {visited.has('budgets') && <KeepAlive active={tab === 'budgets'}><BudgetsView scope={scope} categories={catViews} colors={colors} refreshKey={dataTick} /></KeepAlive>}
-            {visited.has('people') && <KeepAlive active={tab === 'people'}><PeopleView key={peoplePreset} initialTab={peoplePreset} transactions={transactions} categories={catViews} session={session} colors={colors} refreshKey={dataTick} onOpenTx={setOpenTx} onChanged={() => void reloadData()} onAddTransaction={() => openForm('expense')} /></KeepAlive>}
+            {visited.has('people') && <KeepAlive active={tab === 'people'}><PeopleView key={peoplePreset} initialTab={peoplePreset} transactions={transactions} categories={catViews} session={session} colors={colors} refreshKey={dataTick} onOpenTx={setOpenTx} onChanged={() => void reloadData()} onAddTransaction={() => openForm('expense')}
+              onAddSplit={(g) => { openForm('expense'); split.reset(g ? setGroup({ ...emptyDraft(), enabled: true }, g.id, g.memberIds) : { ...emptyDraft(), enabled: true }); }} /></KeepAlive>}
       {visited.has('profile') && <KeepAlive active={tab === 'profile'}><ProfileView session={session} displayName={shownName} onEditName={() => setEditingName(true)} colors={colors} transactions={transactions} online={online} onOpenSettings={() => setShowSettings(true)} onOpenPrivacy={() => setShowPrivacy(true)}
         onOpenCategories={() => setShowCats(true)} onOpenAliases={() => setShowAliases(true)} reviewCount={ledgerHealth.needsReviewCount} onOpenReview={() => setShowReview(true)} onOpenAccounts={() => setShowAccounts(true)} onOpenImport={() => setShowImport('csv')} onOpenImportPdf={() => setShowImport('pdf')} onSignIn={() => openAuth('signin')} onCreate={() => openAuth('signup')}
         onLogout={async () => { if (!session) return; await clearReviewNotifications(getServiceDb(), session.user.id).catch(() => undefined); await logout(session); setSession(null); setSessionStale(false); setTransactions([]); setAuthScreen('welcome'); setShowAuth(true); }} /></KeepAlive>}
