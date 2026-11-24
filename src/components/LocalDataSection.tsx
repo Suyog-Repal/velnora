@@ -5,11 +5,12 @@ import { ActionRow } from '../ui/rows';
 import { Trash } from '../../icons';
 import { LocalDataDeletionController } from '../services/localDataController';
 import { purgeStagedSmsForUser } from '../services/smsStagingService';
+import { purgePaymentFiles } from '../services/paymentExpo';
 
 type Colors = { canvas: string; card: string; border: string; text: string; muted: string };
 
 export function LocalDataSection({ userId, colors, onDeleted }: { userId: string; colors: Colors; onDeleted: () => void }) {
-  const controller = useMemo(() => new LocalDataDeletionController(userId, { afterCommit: purgeStagedSmsForUser }), [userId]);
+  const controller = useMemo(() => new LocalDataDeletionController(userId, { afterCommit: async (id: string) => { await purgeStagedSmsForUser(id); await purgePaymentFiles(id); } }), [userId]);
   const [, force] = useState(0);
   const rerender = () => force((n) => n + 1);
   const open = controller.phase === 'confirming' || controller.phase === 'deleting';

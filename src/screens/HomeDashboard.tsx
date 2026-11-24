@@ -9,8 +9,8 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { palette, radius, space, tint } from '../../theme';
 import { type } from '../../typography';
 import {
-  ArrowDownLeft, ArrowLeftRight, ArrowRight, ArrowUpRight, Bell, CalendarDays, ChevronDown, ChevronRight, ChevronUp, Eye, EyeOff,
-  FileChart, Info, Plus, Search, Sliders as SlidersHorizontal, TrendingUp, WifiOff,
+  ArrowDownLeft, ArrowRight, ArrowUpRight, Bell, CalendarDays, ChevronDown, ChevronRight, ChevronUp, Eye, EyeOff,
+  FileChart, Info, Plus, Search, Sliders as SlidersHorizontal, TrendingUp, Users, WifiOff,
 } from '../../icons';
 import { Sheet, readableOn, type Colors } from '../ui/common';
 import { formatMinor } from '../ui/currency';
@@ -99,7 +99,7 @@ export const RecordedBalanceCard = memo(function RecordedBalanceCard({ balancePa
 });
 
 // ------------------------------------------------------------------------------------------------ Income / expenses month
-function SummaryCard({ title, value, color, Icon, colors, onPress, hint }: { title: string; value: string; color: string; Icon: typeof ArrowDownLeft; colors: Colors; onPress: () => void; hint: string }) {
+function SummaryCard({ title, value, color, Icon, colors, onPress, hint, footer }: { footer?: ReactNode; title: string; value: string; color: string; Icon: typeof ArrowDownLeft; colors: Colors; onPress: () => void; hint: string }) {
   return <Pressable onPress={onPress} accessibilityRole="button" accessibilityLabel={`${title} this month, ${value}`} accessibilityHint={hint}
     android_ripple={{ color: tint(color, 0.12) }}
     style={({ pressed }) => [s.summary, { backgroundColor: colors.card, borderColor: colors.border, opacity: pressed ? 0.9 : 1, transform: [{ scale: pressed ? 0.985 : 1 }] }]}>
@@ -112,23 +112,27 @@ function SummaryCard({ title, value, color, Icon, colors, onPress, hint }: { tit
       <ChevronRight color={colors.faint ?? colors.muted} size={16} strokeWidth={2} />
     </View>
     <Text style={[type.amountMd, { color, marginTop: space.md }]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.7}>{value}</Text>
+    {footer}
   </Pressable>;
 }
 
-export const MonthlySummary = memo(function MonthlySummary({ cashFlow, colors, onIncome, onExpenses }: { cashFlow: CashFlowSummary; colors: Colors; onIncome: () => void; onExpenses: () => void }) {
+export const MonthlySummary = memo(function MonthlySummary({ cashFlow, colors, onIncome, onExpenses, owedBackPaise = 0, onOwedBack }: { cashFlow: CashFlowSummary; colors: Colors; onIncome: () => void; onExpenses: () => void; owedBackPaise?: number; onOwedBack?: () => void }) {
   return <View style={s.summaryRow}>
     <SummaryCard title="Income" value={formatMinor(cashFlow.monthIncomePaise)} color={palette.accentText} Icon={ArrowDownLeft} colors={colors} onPress={onIncome} hint="Shows your income transactions" />
-    <SummaryCard title="Expenses" value={formatMinor(cashFlow.monthExpensePaise)} color={palette.expenseText} Icon={ArrowUpRight} colors={colors} onPress={onExpenses} hint="Shows your expense transactions" />
+    <SummaryCard title="Expenses" value={formatMinor(cashFlow.monthExpensePaise)} color={palette.expenseText} Icon={ArrowUpRight} colors={colors} onPress={onExpenses} hint="Shows your expense transactions"
+      footer={owedBackPaise > 0 && onOwedBack ? <Pressable onPress={onOwedBack} hitSlop={6} accessibilityRole="button" accessibilityLabel={`${formatMinor(owedBackPaise)} owed back by friends. Open Friends`} style={{ marginTop: space.sm }}>
+        <Text style={[type.caption, { color: palette.accentText }]} numberOfLines={1}>{formatMinor(owedBackPaise)} owed back by friends</Text>
+      </Pressable> : null} />
   </View>;
 });
 
 // ------------------------------------------------------------------------------------------------------------ Quick Access
-const QUICK_ICON: Record<QuickAccessId, typeof Plus> = { add: Plus, expected: CalendarDays, report: FileChart, incomeExpense: ArrowLeftRight };
+const QUICK_ICON: Record<QuickAccessId, typeof Plus> = { add: Plus, split: Users, expected: CalendarDays, report: FileChart };
 /** Two-line tile captions (the Customize list uses the single-line QUICK_ACCESS_LABELS). */
 const TILE_LABEL: Record<QuickAccessId, string> = {
-  add: 'Add\nTransaction', expected: 'Expected\nPayment', report: 'Monthly\nReport', incomeExpense: 'Income /\nExpense',
+  add: 'Add\nTransaction', split: 'Split', expected: 'Expected\nPayment', report: 'Monthly\nReport',
 };
-const quickColor = (id: QuickAccessId): string => (id === 'add' ? palette.accentText : id === 'expected' ? palette.info : id === 'report' ? palette.report : palette.amber);
+const quickColor = (id: QuickAccessId): string => (id === 'add' ? palette.accentText : id === 'split' ? palette.amber : id === 'expected' ? palette.info : palette.report);
 
 function QuickAccessTile({ id, colors, onPress }: { id: QuickAccessId; colors: Colors; onPress: () => void }) {
   const Icon = QUICK_ICON[id];

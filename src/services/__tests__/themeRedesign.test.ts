@@ -101,25 +101,37 @@ console.log('ok: text roles readable in both themes');
 
 // 6. Quick Access configuration.
 {
-  assert.deepEqual(visibleShortcuts(DEFAULT_QUICK_ACCESS), ['add', 'expected', 'report', 'incomeExpense']);
-  assert.deepEqual(Object.values(QUICK_ACCESS_LABELS), ['Add Transaction', 'Expected Payment', 'Monthly Report', 'Income / Expense']);
+  assert.deepEqual(visibleShortcuts(DEFAULT_QUICK_ACCESS), ['add', 'split', 'expected', 'report']);
+  assert.deepEqual(Object.values(QUICK_ACCESS_LABELS), ['Add Transaction', 'Split', 'Expected Payment', 'Monthly Report']);
   for (const bad of [null, undefined, 42, 'not json', '{}', '[1,2]', JSON.stringify({ id: 'add' })]) {
     assert.deepEqual(normalizeQuickAccess(bad), DEFAULT_QUICK_ACCESS.map((i) => ({ ...i })), `invalid ${String(bad)} -> default`);
   }
   // stored order kept, duplicates and unknown ids dropped, missing ids appended visible
   const stored = JSON.stringify([{ id: 'report', visible: false }, { id: 'bogus' }, { id: 'add' }, { id: 'report', visible: true }]);
   const n = normalizeQuickAccess(stored);
-  assert.deepEqual(n, [{ id: 'report', visible: false }, { id: 'add', visible: true }, { id: 'expected', visible: true }, { id: 'incomeExpense', visible: true }]);
+  assert.deepEqual(n, [{ id: 'report', visible: false }, { id: 'add', visible: true }, { id: 'split', visible: true }, { id: 'expected', visible: true }]);
   // move and hide; out-of-range moves are no-ops; inputs are never mutated
   const moved = move(DEFAULT_QUICK_ACCESS, 'report', -1);
-  assert.deepEqual(moved.map((i) => i.id), ['add', 'report', 'expected', 'incomeExpense']);
-  assert.deepEqual(move(DEFAULT_QUICK_ACCESS, 'add', -1).map((i) => i.id), ['add', 'expected', 'report', 'incomeExpense']);
-  assert.deepEqual(move(DEFAULT_QUICK_ACCESS, 'incomeExpense', 1).map((i) => i.id), ['add', 'expected', 'report', 'incomeExpense']);
+  assert.deepEqual(moved.map((i) => i.id), ['add', 'split', 'report', 'expected']);
+  assert.deepEqual(move(DEFAULT_QUICK_ACCESS, 'add', -1).map((i) => i.id), ['add', 'split', 'expected', 'report']);
+  assert.deepEqual(move(DEFAULT_QUICK_ACCESS, 'report', 1).map((i) => i.id), ['add', 'split', 'expected', 'report']);
   const hidden = setVisible(moved, 'expected', false);
-  assert.deepEqual(visibleShortcuts(hidden), ['add', 'report', 'incomeExpense']);
-  assert.deepEqual(visibleShortcuts(DEFAULT_QUICK_ACCESS), ['add', 'expected', 'report', 'incomeExpense'], 'default untouched');
+  assert.deepEqual(visibleShortcuts(hidden), ['add', 'split', 'report']);
+  assert.deepEqual(visibleShortcuts(DEFAULT_QUICK_ACCESS), ['add', 'split', 'expected', 'report'], 'default untouched');
   // storage round-trip
   assert.deepEqual(normalizeQuickAccess(serializeQuickAccess(hidden)), hidden);
+  // Migration: the removed Income / Expense id is replaced in place by an enabled Split, whatever its old visibility
+  const legacyDefault = JSON.stringify([{ id: 'add', visible: true }, { id: 'expected', visible: true }, { id: 'report', visible: true }, { id: 'incomeExpense', visible: true }]);
+  assert.deepEqual(normalizeQuickAccess(legacyDefault).map((i) => i.id), ['add', 'expected', 'report', 'split'], 'an old default list keeps its order with Split where Income / Expense was');
+  const legacyCustom = JSON.stringify([{ id: 'incomeExpense', visible: false }, { id: 'report', visible: false }, { id: 'add', visible: true }, { id: 'expected', visible: true }]);
+  assert.deepEqual(normalizeQuickAccess(legacyCustom), [{ id: 'split', visible: true }, { id: 'report', visible: false }, { id: 'add', visible: true }, { id: 'expected', visible: true }], 'hidden Income / Expense becomes a visible Split in the same slot');
+  assert.ok(!JSON.stringify(normalizeQuickAccess(legacyCustom)).includes('incomeExpense'), 'the removed id never survives');
+  assert.deepEqual(serializeQuickAccess(normalizeQuickAccess(legacyCustom)).includes('incomeExpense'), false, 'and is not written back');
+  // customised before Split existed and never had Income / Expense: Split is added, enabled
+  const noSplit = JSON.stringify([{ id: 'report', visible: false }, { id: 'add', visible: true }, { id: 'expected', visible: false }]);
+  assert.deepEqual(normalizeQuickAccess(noSplit), [{ id: 'report', visible: false }, { id: 'add', visible: true }, { id: 'expected', visible: false }, { id: 'split', visible: true }]);
+  // Reset to default is the default list (a fresh copy)
+  assert.deepEqual(DEFAULT_QUICK_ACCESS.map((x) => ({ ...x })), [{ id: 'add', visible: true }, { id: 'split', visible: true }, { id: 'expected', visible: true }, { id: 'report', visible: true }]);
   console.log('ok: Quick Access normalise / reorder / hide / persist');
 }
 

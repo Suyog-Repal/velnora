@@ -12,6 +12,11 @@ import { SignInCheckNotice } from './src/ui/SignInCheckNotice';
 import NetInfo from '@react-native-community/netinfo';
 import { diag, diagnostics } from './src/services/diagnostics';
 import { getGuestDataSummary, importGuestData, isGuestModeChosen, setGuestModeChosen } from './src/services/guestModeService';
+import { countGuestSplitData, createSplitExpense } from './src/services/splitService';
+import { emptyDraft, evaluateDraft, parseMoneyToPaise, setGroup } from './src/services/splitDraft';
+import { SplitSection, useSplitDraft } from './src/screens/SplitEditor';
+import { SplitDuesCard, useSplitDues } from './src/screens/SplitDues';
+import { hapticSuccess } from './src/ui/haptics';
 import { addSmsStagedListener, configureSupportedSenderPatterns, getNativeCheckIn, getNativeReviewNotifier } from './sms';
 import { confirmCheckInToday, setCheckInPort, syncCheckInSchedule } from './src/services/dailyCheckIn';
 import { drainNativeReviewActions } from './src/services/reviewActionDrain.native';
@@ -51,7 +56,7 @@ import { createSessionRefresher } from './src/services/sessionRefresh';
 import { API_URL } from './auth';
 import { Chip, Input, Sheet, TypeToggle, currencySymbol, readableOn, themeColors, useOnline } from './src/ui/common';
 import { KeepAlive, notifyNearEnd, useKeyboardHeight, useStableCallback } from './src/ui/perf';
-import { MOTION, useReduceMotion } from './src/ui/motion';
+import { MOTION, PopView, useReduceMotion } from './src/ui/motion';
 import { HomeHeader, MonthlySummary, QuickAccessSection, RecordedBalanceCard, SyncStatus, TodayActivityCard, fabColors } from './src/screens/HomeDashboard';
 import type { QuickAccessId } from './src/services/quickAccess';
 import { EMPTY_CASH_FLOW, EMPTY_LEDGER_HEALTH, getCashFlowSummary, getLedgerHealth, type CashFlowSummary, type LedgerHealth } from './src/services/cashFlowService';
@@ -185,6 +190,8 @@ function AppInner({ onReady, settled }: { onReady: () => void; settled: boolean 
   const [showPrivacy, setShowPrivacy] = useState(false);
   const online = useOnline();
   const scope = session?.user.id ?? null;
+  const split = useSplitDraft(scope, showForm);
+  const [savePop, setSavePop] = useState(0); // bumps when a valid entry is being saved: the Save button pops
   const greeting = useGreeting();
   // Date/time for a new transaction. Until the person picks one, the transaction is stamped with the moment of saving.
   const [txDate, setTxDate] = useState(localYmd());
@@ -562,9 +569,10 @@ function AppInner({ onReady, settled }: { onReady: () => void; settled: boolean 
     try { const next = screen === 'signup' ? await register(fullName.trim(), normalizedEmail, password) : await login(normalizedEmail, password); await saveSession(next);
       // Guest data is never attached silently: ask first, and only if there is something to import.
       const guest = await getGuestDataSummary().catch(() => ({ transactionCount: 0, budgetCount: 0, categoryCount: 0, expectedCount: 0 }));
+      const guestSplits = await countGuestSplitData(getServiceDb()).catch(() => 0); // friends and split expenses move with the guest data
       setSession(next); setSessionStale(false); setShowAuth(false); setPassword(''); setConfirmPassword('');
       setGuestMode(false); void setGuestModeChosen(false).catch(() => undefined); // an account session replaces the guest choice
-      if (guest.transactionCount + guest.budgetCount + guest.categoryCount + guest.expectedCount > 0) setImportPrompt({ count: guest.transactionCount }); } catch (caught) { setAuthError(caught instanceof Error ? caught.message : 'Authentication failed. Try again.'); } finally { setAuthBusy(false); }
+      if (guest.transactionCount + guest.budgetCount + guest.categoryCount + guest.expectedCount + guestSplits > 0) setImportPrompt({ count: guest.transactionCount }); } catch (caught) { setAuthError(caught instanceof Error ? caught.message : 'Authentication failed. Try again.'); } finally { setAuthBusy(false); }
   };
   const submitForgot = async () => { setAuthBusy(true); setAuthError(''); try { await requestPasswordReset(email.trim().toLowerCase()); setAuthNotice('Password reset delivery is not configured in this environment.'); } catch (caught) { setAuthError(caught instanceof Error ? caught.message : 'Password reset is unavailable.'); } finally { setAuthBusy(false); } };
 
@@ -580,6 +588,7 @@ function AppInner({ onReady, settled }: { onReady: () => void; settled: boolean 
     setCategory(categoriesFor(dir)[0]);
     setAmount(''); setCounterparty(''); setFormError(''); setAttachDraft(EMPTY_DRAFT); setReceiptRef(null); setReceiptNote('');
     setTxDate(localYmd()); setTxTime(localHm()); setDateTouched(false); setTimeTouched(false); setCategoryTouched(false);
+    split.reset();
     setShowForm(true);
   };
   const chooseDirection = (dir: Direction) => {
@@ -603,9 +612,19 @@ function AppInner({ onReady, settled }: { onReady: () => void; settled: boolean 
     const picked = dateTouched || timeTouched;
     const when = picked ? parseLocalDateTime(txDate, timeTouched ? txTime : localHm()) : null;
     if (picked && !when) { setFormError('Select a valid date and time.'); return; }
-    setFormError('');
+    // A split is checked in full BEFORE anything is written, so a bad split never leaves a half-saved payment.
+    const totalPaise = parseMoneyToPaise(typed);
+    const splitEval = split.draft.enabled && direction === 'expense' ? evaluateDraft(split.draft, totalPaise) : null;
+    if (splitEval && !splitEval.ok) { split.markAttempted(); setFormError(splitEval.error ?? 'Check the split.'); return; }
+    setFormError(''); setSavePop((n) => n + 1);
     savingRef.current = true; setSaving(true);
     try {
+      if (splitEval?.input && !splitEval.paidByMe) {
+        // Someone else paid: nothing left the owner's bank, so only the split (their share) is recorded.
+        await createSplitExpense(getServiceDb(), scope, { ...splitEval.input, groupId: split.draft.groupId, title: counterparty.trim(), category: savedCategory, totalPaise: totalPaise!, expenseDate: when ?? new Date().toISOString(), note: receiptNote.trim() || null });
+        if (draftChanges(attachDraft).added.length) showToast('Attachments need a payment of yours, so none were saved.', 'warning', 'attach-failed');
+        hapticSuccess(); showToast('Split saved. Your share counts in your spending.', 'success', 'split-saved'); setDataTick((n) => n + 1); closeForm(); return;
+      }
       const created = await recordAddTransaction({
         amount: value,
         direction: savedDirection,
@@ -617,6 +636,10 @@ function AppInner({ onReady, settled }: { onReady: () => void; settled: boolean 
         ...(when ? { transaction_date: when } : {}),
       }, session);
       notices.localSave(savedDirection, !!session);
+      if (splitEval?.input) {
+        try { await createSplitExpense(getServiceDb(), scope, { ...splitEval.input, groupId: split.draft.groupId, transactionId: created.id, title: created.counterparty, category: created.category, totalPaise: created.amount_paise, expenseDate: created.transaction_date }); hapticSuccess(); }
+        catch { showToast('The payment was saved, but the split could not be. Open it and tap Split this.', 'warning', 'split-failed'); }
+      }
       // Attachments are stored after the transaction (they reference its id). Each is stored on its own, so one unreadable
       // image never loses the transaction or the other images.
       const attachChanges = draftChanges(attachDraft);
@@ -688,16 +711,13 @@ function AppInner({ onReady, settled }: { onReady: () => void; settled: boolean 
     return () => { cancelled = true; timers.forEach(clearTimeout); };
   }, [dbReady]);
   const openAuth = (screen: 'signin' | 'signup') => { setAuthScreen(screen); setShowAuth(true); };
+  const openSplitFriends = () => { navTo('people'); setPeoplePreset('people'); };
   /** Home Quick Access: each shortcut opens an EXISTING flow (no new screens or financial logic). */
   const quickAccess = (id: QuickAccessId) => {
     if (id === 'add') { openForm('expense'); return; }                                  // the transaction form (type switch inside)
     if (id === 'expected') { navTo('people'); setPeoplePreset('expected'); return; }   // People -> Expected payments
     if (id === 'report') { navTo('analytics'); setAnalyticsPreset('report'); return; } // Analytics -> Monthly report
-    Alert.alert('Record a transaction', 'Is this money you received or money you spent?', [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Income', onPress: () => openForm('income') },
-      { text: 'Expense', onPress: () => openForm('expense') },
-    ], { cancelable: true });
+    openSplitFriends();
   };
 
   if (!themeReady) return null; // a few ms: avoids drawing the default theme before the saved one is known
@@ -716,11 +736,13 @@ function AppInner({ onReady, settled }: { onReady: () => void; settled: boolean 
         : session && sessionStale && !verifyProblem ? <Text style={[styles.caption, { color: colors.muted, marginBottom: 12 }]}>Offline · working from local data; sync resumes when you reconnect.</Text> : null}
       <Animated.View style={{ opacity: enter.interpolate({ inputRange: [0, 1], outputRange: [0.55, 1] }), transform: [{ translateX: enter.interpolate({ inputRange: [0, 1], outputRange: [slideDir.current * TAB_ENTER.offsetDp, 0] }) }] }}>
       {visited.has('home') && <KeepAlive active={tab === 'home'}><HomeScreen scope={scope} onOpen={setOpenTx} transactions={transactions} cashFlow={cashFlow} health={ledgerHealth} onReview={() => setShowReview(true)} colors={colors} dark={dark} onAddExpense={() => openForm('expense')} onViewAll={() => navTo('transactions')} onAnalytics={() => navTo('analytics')}
-        onTransactions={(type) => { navTo('transactions'); setTxPreset(type); }} onQuickAccess={(id) => quickAccess(id)} /></KeepAlive>}
+        onTransactions={(type) => { navTo('transactions'); setTxPreset(type); }} onQuickAccess={(id) => quickAccess(id)}
+          dataTick={dataTick} onSplitDues={openSplitFriends} /></KeepAlive>}
       {visited.has('transactions') && <KeepAlive active={tab === 'transactions'}><TransactionsView scope={scope} key={`${drillCategory ?? 'all'}-${txPreset}`} transactions={transactions} categories={catViews} colors={colors} loading={txLoading} online={online} onOpen={setOpenTx} onAdd={() => openForm('expense')} initialCategory={drillCategory} initialType={txPreset} /></KeepAlive>}
       {visited.has('analytics') && <KeepAlive active={tab === 'analytics'}><AnalyticsView key={analyticsPreset} scope={scope} colors={colors} refreshKey={dataTick} initialSection={analyticsPreset} onDrill={(c) => { setDrillCategory(c); changeTab('transactions'); }} /></KeepAlive>}
       {visited.has('budgets') && <KeepAlive active={tab === 'budgets'}><BudgetsView scope={scope} categories={catViews} colors={colors} refreshKey={dataTick} /></KeepAlive>}
-            {visited.has('people') && <KeepAlive active={tab === 'people'}><PeopleView key={peoplePreset} initialTab={peoplePreset} transactions={transactions} categories={catViews} session={session} colors={colors} refreshKey={dataTick} onOpenTx={setOpenTx} onChanged={() => void reloadData()} onAddTransaction={() => openForm('expense')} /></KeepAlive>}
+            {visited.has('people') && <KeepAlive active={tab === 'people'}><PeopleView key={peoplePreset} initialTab={peoplePreset} transactions={transactions} categories={catViews} session={session} colors={colors} refreshKey={dataTick} onOpenTx={setOpenTx} onChanged={() => void reloadData()} onAddTransaction={() => openForm('expense')}
+              onAddSplit={(g) => { openForm('expense'); split.reset(g ? setGroup({ ...emptyDraft(), enabled: true }, g.id, g.memberIds) : { ...emptyDraft(), enabled: true }); }} /></KeepAlive>}
       {visited.has('profile') && <KeepAlive active={tab === 'profile'}><ProfileView session={session} displayName={shownName} onEditName={() => setEditingName(true)} colors={colors} transactions={transactions} online={online} onOpenSettings={() => setShowSettings(true)} onOpenPrivacy={() => setShowPrivacy(true)}
         onOpenCategories={() => setShowCats(true)} onOpenAliases={() => setShowAliases(true)} reviewCount={ledgerHealth.needsReviewCount} onOpenReview={() => setShowReview(true)} onOpenAccounts={() => setShowAccounts(true)} onOpenImport={() => setShowImport('csv')} onOpenImportPdf={() => setShowImport('pdf')} onSignIn={() => openAuth('signin')} onCreate={() => openAuth('signup')}
         onLogout={async () => { if (!session) return; await clearReviewNotifications(getServiceDb(), session.user.id).catch(() => undefined); await logout(session); setSession(null); setSessionStale(false); setTransactions([]); setAuthScreen('welcome'); setShowAuth(true); }} /></KeepAlive>}
@@ -749,10 +771,10 @@ function AppInner({ onReady, settled }: { onReady: () => void; settled: boolean 
   <StatementImportSheet visible={showImport !== null} mode={showImport ?? 'csv'} scope={scope} session={session} categories={catViews} refreshSession={(stale) => sessionRefresher.current?.(stale) ?? Promise.resolve(null)} colors={colors} onClose={() => setShowImport(null)} onImported={() => { void reloadData(); if (session) void syncPendingTransactions(session); }} />
   <Sheet visible={showForm} onClose={closeForm} title="Record transaction" colors={colors} footer={<>
     {formError ? <Text style={[styles.errorText, { marginTop: 0, marginBottom: 8 }]} accessibilityLiveRegion="polite">{formError}</Text> : null}
-    <Pressable disabled={saving} onPress={() => void addTransaction()} accessibilityRole="button" accessibilityState={{ disabled: saving, busy: saving }}
+    <PopView popKey={savePop}><Pressable disabled={saving} onPress={() => void addTransaction()} accessibilityRole="button" accessibilityState={{ disabled: saving, busy: saving }}
       style={({ pressed }) => [styles.primaryButton, { marginTop: 0, opacity: saving ? 0.6 : pressed ? 0.85 : 1 }]}>
       <Text style={[styles.primaryButtonText, { color: readableOn(palette.accentText) }]}>{saving ? 'Saving…' : direction === 'income' ? 'Save income' : 'Save expense'}</Text>
-    </Pressable>
+    </Pressable></PopView>
   </>}>
     <Text style={[styles.label, { color: colors.muted, marginTop: 0 }]}>TYPE</Text>
     <TypeToggle value={direction} onChange={chooseDirection} colors={colors} />
@@ -774,6 +796,7 @@ function AppInner({ onReady, settled }: { onReady: () => void; settled: boolean 
     <ScrollView horizontal showsHorizontalScrollIndicator={false} keyboardShouldPersistTaps="handled" contentContainerStyle={{ paddingRight: 8 }}>
       {formCategories.map((item) => <Chip key={item} label={item} active={category.toLowerCase() === item.toLowerCase()} color={catViews.find((c) => c.type === direction && c.name === item)?.color} onPress={() => { setCategory(item); setCategoryTouched(true); }} colors={colors} />)}
     </ScrollView>
+    {direction === 'expense' ? <SplitSection split={split} totalPaise={parseMoneyToPaise(amount)} colors={colors} /> : null}
     <AttachmentSection draft={attachDraft} onChange={setAttachDraft} colors={colors} signedIn={!!session} receipt={{
       session, categories: catViews,
       current: { direction, merchant: counterparty, amount, date: txDate, time: txTime, category,
@@ -799,13 +822,14 @@ function AppInner({ onReady, settled }: { onReady: () => void; settled: boolean 
   </SafeAreaView>;
 }
 
-function HomeScreen({ scope, onOpen, transactions, cashFlow, health, onReview, colors, dark, onAddExpense, onViewAll, onAnalytics, onTransactions, onQuickAccess }: { scope: string | null; onOpen: (tx: TransactionEntity) => void; transactions: Transaction[]; cashFlow: CashFlowSummary; health: LedgerHealth; onReview: () => void; colors: Colors; dark: boolean; onAddExpense: () => void; onViewAll: () => void; onAnalytics: () => void; onTransactions: (type: 'all' | 'income' | 'expense') => void; onQuickAccess: (id: QuickAccessId) => void }) {
+function HomeScreen({ scope, onOpen, transactions, cashFlow, health, onReview, colors, dark, onAddExpense, onViewAll, onAnalytics, onTransactions, onQuickAccess, dataTick, onSplitDues }: { dataTick: number; onSplitDues: () => void; scope: string | null; onOpen: (tx: TransactionEntity) => void; transactions: Transaction[]; cashFlow: CashFlowSummary; health: LedgerHealth; onReview: () => void; colors: Colors; dark: boolean; onAddExpense: () => void; onViewAll: () => void; onAnalytics: () => void; onTransactions: (type: 'all' | 'income' | 'expense') => void; onQuickAccess: (id: QuickAccessId) => void }) {
   // Stable callbacks: the memoised sections below then skip re-rendering when Home is shown again (fast tab switches).
   const onIncome = useStableCallback(() => onTransactions('income'));
   const onExpenses = useStableCallback(() => onTransactions('expense'));
   const onOpenList = useStableCallback(() => onTransactions('all'));
   const onReviewStable = useStableCallback(onReview);
   const onQuickAccessStable = useStableCallback(onQuickAccess);
+  const dues = useSplitDues(scope, dataTick);
   const byId = useMemo(() => new Map(transactions.map((t) => [t.id, t])), [transactions]);
   const renderTransaction = useCallback((id: string) => {
     const item = byId.get(id);
@@ -813,8 +837,9 @@ function HomeScreen({ scope, onOpen, transactions, cashFlow, health, onReview, c
   }, [byId, colors, onOpen]);
   return <>
     <RecordedBalanceCard balancePaise={cashFlow.balancePaise} colors={colors} dark={dark} />
-    <MonthlySummary cashFlow={cashFlow} colors={colors} onIncome={onIncome} onExpenses={onExpenses} />
+    <MonthlySummary cashFlow={cashFlow} colors={colors} onIncome={onIncome} onExpenses={onExpenses} owedBackPaise={dues.totals.owed} onOwedBack={onSplitDues} />
     <QuickAccessSection colors={colors} onAction={onQuickAccessStable} />
+    <SplitDuesCard dues={dues} colors={colors} onOpen={onSplitDues} />
     <TodayActivityCard health={health} colors={colors} dark={dark} onReview={onReviewStable} onOpenList={onOpenList} />
     <SectionHeader title="Spending overview" action="Analytics" onPress={onAnalytics} colors={colors} />
     <SpendingOverview scope={scope} refreshKey={transactions} colors={colors} transactions={transactions} renderTransaction={renderTransaction} />

@@ -181,7 +181,8 @@ export function Sheet({ visible, onClose, title, colors, children, footer, heade
     rise.stopAnimation();
     if (reduceMotion) { rise.setValue(1); return; }
     rise.setValue(0);
-    Animated.timing(rise, { toValue: 1, duration: MOTION.sheet, easing: MOTION.easeOut, useNativeDriver: true }).start();
+    // Springs in with no overshoot (a sheet that rose past its place would show a gap under it).
+    Animated.spring(rise, { toValue: 1, stiffness: 300, damping: 30, mass: 1, overshootClamping: true, useNativeDriver: true }).start();
   }, [visible, rise, dragY, reduceMotion]);
 
   // After the keyboard opens (and the sheet shrinks), bring the focused field back into view.
@@ -200,7 +201,7 @@ export function Sheet({ visible, onClose, title, colors, children, footer, heade
   const animatedClose = useRef(() => {
     if (reduceMotionRef.current) { dragY.setValue(0); onCloseRef.current(); return; }
     rise.stopAnimation(); dragY.stopAnimation(); dragY.setValue(0);
-    Animated.timing(rise, { toValue: 0, duration: 200, useNativeDriver: true })
+    Animated.spring(rise, { toValue: 0, stiffness: 520, damping: 44, mass: 1, overshootClamping: true, useNativeDriver: true })
       .start(() => { onCloseRef.current(); });
   }).current;
 
@@ -232,7 +233,7 @@ export function Sheet({ visible, onClose, title, colors, children, footer, heade
   // Combined translateY: entrance slide (48 → 0 as rise goes 0 → 1) + live drag offset.
   // rise and dragY are stable Animated.Value refs — deps never change so this runs once.
   const sheetTranslateY = useMemo(
-    () => Animated.add(rise.interpolate({ inputRange: [0, 1], outputRange: [48, 0] }), dragY),
+    () => Animated.add(rise.interpolate({ inputRange: [0, 1], outputRange: [64, 0] }), dragY),
     [rise, dragY],
   );
 
@@ -292,9 +293,23 @@ export const ui = StyleSheet.create({
 
 /** Pill-shaped segmented control: one option selected, each option a 40dp-tall tab with an accessible selected state. */
 export function Segmented<T extends string>({ options, value, onChange, colors }: { options: readonly (readonly [T, string])[]; value: T; onChange: (v: T) => void; colors: Colors }) {
-  return <View accessibilityRole="tablist" style={{ flexDirection: 'row', backgroundColor: tint(palette.emerald, 0.1), borderRadius: radius.pill, padding: 3 }}>
+  // The highlight is ONE view that slides between the equal-width segments (transform only, native driver); with reduce-motion it jumps.
+  const reduce = useReduceMotion();
+  const [width, setWidth] = useState(0);
+  const x = useRef(new Animated.Value(0)).current;
+  const placed = useRef(false);
+  const index = Math.max(0, options.findIndex(([k]) => k === value));
+  const seg = options.length ? Math.max(0, width - 6) / options.length : 0;
+  useEffect(() => {
+    if (!seg) return;
+    const target = index * seg;
+    if (!placed.current || reduce) { x.setValue(target); placed.current = true; return; }
+    Animated.spring(x, { toValue: target, stiffness: 340, damping: 30, mass: 1, overshootClamping: true, useNativeDriver: true }).start();
+  }, [index, seg, reduce, x]);
+  return <View accessibilityRole="tablist" onLayout={(e) => setWidth(e.nativeEvent.layout.width)} style={{ flexDirection: 'row', backgroundColor: tint(palette.emerald, 0.1), borderRadius: radius.pill, padding: 3 }}>
+    {seg > 0 ? <Animated.View pointerEvents="none" style={{ position: 'absolute', top: 3, bottom: 3, left: 3, width: seg, borderRadius: radius.pill, backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border, transform: [{ translateX: x }] }} /> : null}
     {options.map(([k, label]) => { const on = value === k; return <Pressable key={k} onPress={() => onChange(k)} accessibilityRole="tab" accessibilityState={{ selected: on }} accessibilityLabel={label}
-      style={{ flex: 1, minHeight: 40, borderRadius: radius.pill, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 6, backgroundColor: on ? colors.card : 'transparent', borderWidth: on ? 1 : 0, borderColor: colors.border }}>
+      style={{ flex: 1, minHeight: 40, borderRadius: radius.pill, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 6, backgroundColor: seg > 0 ? 'transparent' : on ? colors.card : 'transparent', borderWidth: seg > 0 ? 0 : on ? 1 : 0, borderColor: colors.border }}>
       <Text style={{ ...type.chip, color: on ? palette.accentText : colors.muted }} numberOfLines={1}>{label}</Text></Pressable>; })}
   </View>;
 }

@@ -381,6 +381,121 @@ export const MIGRATIONS = [
       ALTER TABLE transaction_attachments ADD COLUMN last_error TEXT;
     `,
   },
+  {
+    version: 11,
+    description: 'Split payments (local only): contacts, groups, split expenses, shares, settlements, and the v_spend view',
+    up: `
+      -- Local-only by design (v1): no sync_status column and nothing is ever queued. Phone numbers and UPI ids stay on the device.
+      -- Money is integer paise. 'me' is the reserved party id of the device owner; every other party id is a contacts.id.
+      CREATE TABLE IF NOT EXISTS contacts (
+        id TEXT PRIMARY KEY,
+        user_id TEXT,
+        name TEXT NOT NULL,
+        name_key TEXT NOT NULL,
+        phone TEXT,
+        upi_id TEXT,
+        deleted_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_contacts_user ON contacts(user_id, name_key);
+
+      CREATE TABLE IF NOT EXISTS split_groups (
+        id TEXT PRIMARY KEY,
+        user_id TEXT,
+        name TEXT NOT NULL,
+        archived_at TEXT,
+        deleted_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_split_groups_user ON split_groups(user_id);
+
+      -- The device owner is always a member and is not stored here.
+      CREATE TABLE IF NOT EXISTS group_members (
+        group_id TEXT NOT NULL,
+        contact_id TEXT NOT NULL,
+        added_at TEXT NOT NULL,
+        PRIMARY KEY (group_id, contact_id),
+        FOREIGN KEY (group_id) REFERENCES split_groups(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_group_members_contact ON group_members(contact_id);
+
+      CREATE TABLE IF NOT EXISTS split_expenses (
+        id TEXT PRIMARY KEY,
+        user_id TEXT,
+        group_id TEXT,
+        transaction_id TEXT,
+        title TEXT NOT NULL,
+        category TEXT NOT NULL,
+        total_paise INTEGER NOT NULL CHECK(total_paise > 0),
+        expense_date TEXT NOT NULL,
+        mode TEXT NOT NULL CHECK(mode IN ('equal', 'exact', 'percent', 'shares')),
+        note TEXT,
+        deleted_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_split_expenses_user_date ON split_expenses(user_id, expense_date);
+      CREATE INDEX IF NOT EXISTS idx_split_expenses_group ON split_expenses(group_id);
+      -- One split per transaction: also guarantees the v_spend join can never duplicate a transaction row.
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_split_expenses_tx ON split_expenses(transaction_id) WHERE transaction_id IS NOT NULL AND deleted_at IS NULL;
+
+      -- One row per party of an expense. net = paid_paise - share_paise. Both columns sum to total_paise across the expense.
+      CREATE TABLE IF NOT EXISTS split_shares (
+        expense_id TEXT NOT NULL,
+        party_id TEXT NOT NULL,
+        paid_paise INTEGER NOT NULL DEFAULT 0 CHECK(paid_paise >= 0),
+        share_paise INTEGER NOT NULL DEFAULT 0 CHECK(share_paise >= 0),
+        PRIMARY KEY (expense_id, party_id),
+        FOREIGN KEY (expense_id) REFERENCES split_expenses(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_split_shares_party ON split_shares(party_id);
+
+      -- A payment between two parties. Never income or expense: it is not part of v_spend or any total.
+      CREATE TABLE IF NOT EXISTS settlements (
+        id TEXT PRIMARY KEY,
+        user_id TEXT,
+        group_id TEXT,
+        from_party TEXT NOT NULL,
+        to_party TEXT NOT NULL,
+        amount_paise INTEGER NOT NULL CHECK(amount_paise > 0),
+        settled_on TEXT NOT NULL,
+        note TEXT,
+        deleted_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        CHECK(from_party != to_party)
+      );
+      CREATE INDEX IF NOT EXISTS idx_settlements_user ON settlements(user_id, settled_on);
+      CREATE INDEX IF NOT EXISTS idx_settlements_group ON settlements(group_id);
+
+      -- The ONE definition of "what counts as my spending". Same column names as transactions, so a spending query only swaps its FROM.
+      --  1. Every transaction. If it is split, an expense counts only MY share (0 when I am not a participant).
+      --  2. Split expenses with no linked transaction (a friend paid, nothing hit my bank): my share, on the expense's own date and category.
+      -- Income, refunds and unsplit rows pass through unchanged. Settlements are not in here at all.
+      CREATE VIEW IF NOT EXISTS v_spend AS
+        SELECT t.id AS id, t.user_id AS user_id, t.direction AS direction, t.txn_kind AS txn_kind,
+               t.possible_duplicate_of AS possible_duplicate_of, t.category AS category, t.counterparty AS counterparty,
+               t.transaction_date AS transaction_date, t.deleted_at AS deleted_at, t.verification_status AS verification_status,
+               t.description AS description, t.reference_id AS reference_id, t.created_at AS created_at,
+               CASE WHEN t.direction = 'expense' AND se.id IS NOT NULL THEN COALESCE(me.share_paise, 0)
+                    ELSE COALESCE(t.amount_paise, CAST(ROUND(t.amount * 100) AS INTEGER)) END AS amount_paise,
+               CASE WHEN t.direction = 'expense' AND se.id IS NOT NULL THEN COALESCE(me.share_paise, 0) / 100.0
+                    ELSE t.amount END AS amount
+        FROM transactions t
+        LEFT JOIN split_expenses se ON se.transaction_id = t.id AND se.deleted_at IS NULL
+        LEFT JOIN split_shares me ON me.expense_id = se.id AND me.party_id = 'me'
+        UNION ALL
+        SELECT se.id, se.user_id, 'expense', 'payment', NULL, se.category, se.title,
+               se.expense_date, se.deleted_at, 'verified',
+               se.note, NULL, se.created_at,
+               COALESCE(me.share_paise, 0), COALESCE(me.share_paise, 0) / 100.0
+        FROM split_expenses se
+        LEFT JOIN split_shares me ON me.expense_id = se.id AND me.party_id = 'me'
+        WHERE se.transaction_id IS NULL;
+    `,
+  },
 ];
 
 export const DEFAULT_CATEGORIES = [

@@ -5,7 +5,9 @@ import { Check, FileText, LogOut, ReceiptIcon, Settings, ShieldCheck, Sliders, T
 import { formatPaise, Sheet, type Colors } from '../ui/common';
 import { readableOn } from '../ui/common';
 import { Group, NavRow, Tap } from '../ui/rows';
-import { countsAsExpense } from '../services/ledgerRules';
+import { PaymentDetailsSheet } from './PaymentDetails';
+import { useReduceMotion } from '../ui/motion';
+import { cashSpentInMonth } from '../services/ledgerRules';
 import type { Session, TransactionEntity } from '../db/types';
 
 // Tap and Group now live with the shared rows; re-exported so existing imports keep working.
@@ -13,8 +15,12 @@ export { Group, Tap };
 
 /** Fades + lifts a block in; blocks are staggered by `index` so the page assembles instead of popping in. */
 export function Reveal({ index, children }: { index: number; children: ReactNode }) {
-  const v = useRef(new Animated.Value(0)).current;
-  useEffect(() => { Animated.timing(v, { toValue: 1, duration: 420, delay: 60 + index * 70, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start(); }, [v, index]);
+  const reduce = useReduceMotion();
+  const v = useRef(new Animated.Value(reduce ? 1 : 0)).current;
+  useEffect(() => {
+    if (reduce) { v.setValue(1); return; }
+    Animated.timing(v, { toValue: 1, duration: 420, delay: 60 + index * 70, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start();
+  }, [v, index, reduce]);
   return <Animated.View style={{ opacity: v, transform: [{ translateY: v.interpolate({ inputRange: [0, 1], outputRange: [18, 0] }) }] }}>{children}</Animated.View>;
 }
 
@@ -64,16 +70,15 @@ export function AppearanceCard({ mode, setMode, accent, setAccent, colors }: { m
 }
 
 export function profileStats(transactions: TransactionEntity[], now = new Date()) {
-  let spentPaise = 0; let pending = 0; let failed = 0; let count = 0;
+  let pending = 0; let failed = 0; let count = 0;
   for (const t of transactions) {
     if (t.deleted_at) continue;
     count += 1;
     if (t.sync_status !== 'synced' && t.user_id) pending += 1;
     if (t.sync_status === 'failed' && t.user_id) failed += 1; // rejected by the server: also counted in `pending`
-    const d = new Date(t.transaction_date);
-    if (countsAsExpense(t) && d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth()) spentPaise += t.amount_paise;
   }
-  return { count, spentPaise, pending, failed };
+  // Cash view (the full amounts that left the account): the same rule Home uses (cashSpentInMonth).
+  return { count, spentPaise: cashSpentInMonth(transactions, now), pending, failed };
 }
 
 export function ProfileView({ session, displayName, onEditName, colors, transactions, online, onOpenSettings, onOpenPrivacy, onOpenCategories, onOpenAliases, onOpenReview, onOpenAccounts, onOpenImport, onOpenImportPdf, reviewCount, onSignIn, onCreate, onLogout }: {
@@ -81,12 +86,12 @@ export function ProfileView({ session, displayName, onEditName, colors, transact
   transactions: TransactionEntity[]; online: boolean; onOpenSettings: () => void; onOpenPrivacy: () => void; onOpenCategories: () => void; onOpenAliases: () => void; onOpenReview: () => void; onOpenAccounts: () => void; onOpenImport: () => void; onOpenImportPdf: () => void; reviewCount: number; onSignIn: () => void; onCreate: () => void; onLogout: () => void;
 }) {
   const stats = profileStats(transactions);
-  const name = displayName ?? 'Add your name';
   const status = !session ? 'Stored on this device only' : !online ? 'Offline' : stats.pending > 0 ? `${stats.pending} waiting to sync${stats.failed > 0 ? ` (${stats.failed} rejected by server)` : ''}` : 'All synced';
   const avatarPulse = useRef(new Animated.Value(0)).current;
   useEffect(() => { Animated.timing(avatarPulse, { toValue: 1, duration: 700, delay: 120, easing: Easing.out(Easing.back(1.6)), useNativeDriver: true }).start(); }, [avatarPulse]);
   let i = 0;
   const [importChoice, setImportChoice] = useState(false);
+  const [showPay, setShowPay] = useState(false);
   // Close the choice first, then open the chosen import flow (both are modal sheets).
   const chooseImport = (open: () => void) => { setImportChoice(false); open(); };
 
@@ -99,7 +104,10 @@ export function ProfileView({ session, displayName, onEditName, colors, transact
             {displayName ? <Text style={{ color: '#FFFFFF', fontSize: 28, fontWeight: '700' }}>{Array.from(displayName)[0].toUpperCase()}</Text> : <UserRound size={30} color="#FFFFFF" />}
           </Animated.View>
           <View style={{ flex: 1, marginLeft: 14 }}>
-            <Pressable onPress={onEditName} accessibilityRole="button" accessibilityLabel={`Name: ${name}. Edit`} hitSlop={6} style={{ flexDirection: 'row', alignItems: 'center', minHeight: 44 }}><Text style={{ color: palette.onNavySoft, fontSize: 13, marginLeft: 8 }}>Edit</Text></Pressable>
+            <Pressable onPress={onEditName} accessibilityRole="button" accessibilityLabel={displayName ? `Name: ${displayName}. Edit` : 'Add your name'} hitSlop={6} style={{ flexDirection: 'row', alignItems: 'center', minHeight: 44 }}>
+              {displayName ? <Text style={{ color: '#FFFFFF', fontSize: 20, fontWeight: '700', flexShrink: 1 }} numberOfLines={1}>{displayName}</Text> : null}
+              <Text style={{ color: palette.onNavySoft, fontSize: 13, marginLeft: displayName ? 10 : 0 }}>{displayName ? 'Edit' : 'Add your name'}</Text>
+            </Pressable>
             <Text style={{ color: palette.onNavySoft, fontSize: 13, marginTop: 2 }} numberOfLines={1}>{session?.user.email ?? 'Not signed in'}</Text>
           </View>
         </View>
@@ -129,6 +137,7 @@ export function ProfileView({ session, displayName, onEditName, colors, transact
         <NavRow icon={<Sliders size={18} color={palette.emerald} />} title="Merchant names" subtitle="Corrections Velnora remembers" colors={colors} onPress={onOpenAliases} />
         <NavRow icon={<Check size={18} color={palette.emerald} />} title="Review transactions" subtitle="Payments that need a category or details" badge={reviewCount} colors={colors} onPress={onOpenReview} />
         <NavRow icon={<WalletCards size={18} color={palette.emerald} />} title="Accounts" subtitle="Found from your bank messages" colors={colors} onPress={onOpenAccounts} />
+        <NavRow icon={<ReceiptIcon size={18} color={palette.emerald} />} title="Payment details" subtitle="Your UPI ID and QR for payment requests" colors={colors} onPress={() => setShowPay(true)} />
         <NavRow icon={<FileText size={18} color={palette.emerald} />} title="Import" subtitle="From a CSV file or a PDF statement" colors={colors} onPress={() => setImportChoice(true)} last />
       </Group>
     </Reveal>
@@ -149,6 +158,7 @@ export function ProfileView({ session, displayName, onEditName, colors, transact
       </View>
     </Reveal> : null}
 
+    <PaymentDetailsSheet visible={showPay} onClose={() => setShowPay(false)} scope={session?.user.id ?? null} colors={colors} />
     <Sheet visible={importChoice} onClose={() => setImportChoice(false)} title="Import transactions" colors={colors}>
       <Group colors={colors}>
         <NavRow icon={<ReceiptIcon size={18} color={palette.emerald} />} title="CSV file" subtitle="Add or match from a CSV file" colors={colors} onPress={() => chooseImport(onOpenImport)} />

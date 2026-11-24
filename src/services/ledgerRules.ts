@@ -54,3 +54,26 @@ export function sourceLabel(t: { source: string; capture_source?: CaptureSource 
   if (parts.length) return parts.join(' + ');
   return CAPTURE_LABELS[t.capture_source ?? (t.source === 'sms' ? 'sms' : 'manual')].toUpperCase();
 }
+
+/**
+ * The ONE source of "what counts as my spending" (defined in migration 11). Same columns as `transactions`, so a spending query only
+ * swaps its FROM: an expense that is split counts only the owner's share, and a split expense a friend paid for (no bank transaction)
+ * counts the owner's share on its own date and category. Settlements are not in it. Cash balance (money actually moved) must keep
+ * reading `transactions`, because the bank saw the full amount.
+ */
+export const SPEND_VIEW = 'v_spend';
+
+/**
+ * The CASH view of spending: money that actually left the account, full transaction amounts (a split bill counts in full).
+ * Used by Home, Profile and the recorded balance, which must agree with the bank SMS. Budgets, Analytics and the monthly report use
+ * SPEND_VIEW (own share) instead. This is the in-memory twin of the SQL in cashFlowService, and a test keeps the two equal.
+ */
+export function cashSpentInMonth(rows: ReadonlyArray<Countable & { amount_paise: number; transaction_date: string; deleted_at?: string | null }>, now: Date = new Date()): number {
+  let total = 0;
+  for (const t of rows) {
+    if (t.deleted_at || !countsAsExpense(t)) continue;
+    const d = new Date(t.transaction_date);
+    if (d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth()) total += t.amount_paise;
+  }
+  return total;
+}

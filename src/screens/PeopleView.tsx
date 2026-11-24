@@ -14,6 +14,8 @@ import {
   type ExpectedDirection, type ExpectedPayment,
 } from '../services/expectedPaymentService';
 import { getServiceDb, syncPendingTransactions } from '../services/transactionService';
+import { SplitPeople } from './SplitPeople';
+import type { SplitGroup } from '../services/splitService';
 import { normalizeMerchantKey } from '../services/merchantAliasService';
 import type { CategoryView } from '../services/categoryService';
 import type { Session, TransactionEntity } from '../db/types';
@@ -49,14 +51,17 @@ const PersonRow = memo(function PersonRow({ p, last, colors, onOpen }: { p: Pers
   </Tap>;
 });
 
-export function PeopleView({ transactions, categories, session, colors, refreshKey, onOpenTx, onChanged, onAddTransaction, initialTab = 'people' }: {
+export function PeopleView({ transactions, categories, session, colors, refreshKey, onOpenTx, onChanged, onAddTransaction, onAddSplit, initialTab = 'people' }: {
   transactions: TransactionEntity[]; categories: CategoryView[]; session: Session | null; colors: Colors; refreshKey: number;
   onOpenTx: (tx: TransactionEntity) => void; onChanged: () => void; onAddTransaction: () => void;
+  /** Opens the Add sheet with the split switched on (and the group chosen, if one is given). */
+  onAddSplit: (group: SplitGroup | null) => void;
   /** Home "Expected Payment" shortcut opens the existing Expected section directly. */
   initialTab?: 'people' | 'expected';
 }) {
   const scope = session?.user.id ?? null;
-  const [tab, setTab] = useState<'people' | 'expected'>(initialTab);
+  // Friends and Groups are the split ledger; Payees is the earlier list of names found on transactions; Expected is unchanged.
+  const [tab, setTab] = useState<'friends' | 'groups' | 'payees' | 'expected'>(initialTab === 'expected' ? 'expected' : 'friends');
   const [expected, setExpected] = useState<ExpectedPayment[]>([]);
   const [personKey, setPersonKey] = useState<string | null>(null);
   const [query, setQuery] = useState('');
@@ -78,9 +83,11 @@ export function PeopleView({ transactions, categories, session, colors, refreshK
   const summary = useMemo(() => summarizeExpected(expected), [expected]);
 
   return <View>
-    <View style={{ marginBottom: 14 }}><Segmented colors={colors} value={tab} onChange={setTab} options={[['people', 'People'], ['expected', `Expected${summary.receive.count + summary.pay.count ? ` (${summary.receive.count + summary.pay.count})` : ''}`]] as const} /></View>
+    <View style={{ marginBottom: 14 }}><Segmented colors={colors} value={tab} onChange={setTab} options={[['friends', 'Friends'], ['groups', 'Groups'], ['payees', 'Payees'], ['expected', `Expected${summary.receive.count + summary.pay.count ? ` (${summary.receive.count + summary.pay.count})` : ''}`]] as const} /></View>
 
-    {tab === 'people' ? <View>
+    {tab === 'friends' || tab === 'groups' ? <SplitPeople tab={tab} scope={scope} colors={colors} refreshKey={refreshKey} onChanged={onChanged} expected={expected} onGoExpected={() => setTab('expected')}
+      onOpenExpected={(e) => { setTab('expected'); setDetailId(e.id); }} onAddSplit={onAddSplit} /> : null}
+    {tab === 'payees' ? <View>
       <Reveal index={0}><View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginBottom: 14 }}>
         <Tile icon={<ArrowDownLeft size={16} color={palette.accentText} />} label="Received" value={formatPaise(all.incomingPaise)} sub={`${all.incomingCount} transaction${all.incomingCount === 1 ? '' : 's'}`} color={palette.accentText} colors={colors} />
         <Tile icon={<ArrowUpRight size={16} color={palette.expenseText} />} label="Paid" value={formatPaise(all.outgoingPaise)} sub={`${all.outgoingCount} transaction${all.outgoingCount === 1 ? '' : 's'}`} color={palette.expenseText} colors={colors} />
@@ -93,7 +100,8 @@ export function PeopleView({ transactions, categories, session, colors, refreshK
         : <View style={{ backgroundColor: colors.card, borderColor: colors.border, borderWidth: 1, borderRadius: radius.lg, paddingHorizontal: 14, overflow: 'hidden' }}>
           {shown.slice(0, limit).map((p, i) => <PersonRow key={p.key} p={p} last={i === shown.length - 1} colors={colors} onOpen={setPersonKey} />)}
         </View>}
-    </View> : <ExpectedTab expected={expected} summary={summary} colors={colors} onAdd={() => setForm({})} onOpen={(e) => setDetailId(e.id)} />}
+    </View> : null}
+    {tab === 'expected' ? <ExpectedTab expected={expected} summary={summary} colors={colors} onAdd={() => setForm({})} onOpen={(e) => setDetailId(e.id)} /> : null}
 
     <PersonSheet person={person} transactions={transactions} categories={categories} expected={expected} colors={colors} onClose={() => setPersonKey(null)} onOpenTx={onOpenTx}
       onOpenExpected={(e) => setDetailId(e.id)} onAddExpected={(name) => setForm({ person: name })} />

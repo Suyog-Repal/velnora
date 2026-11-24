@@ -1,7 +1,7 @@
 import type { IDatabase } from '../db/types.ts';
 import type { Scope } from './categoryService.ts';
 import { monthRange } from './budgetService.ts';
-import { SQL_COUNTS_AS_EXPENSE, SQL_COUNTS_AS_INCOME } from './ledgerRules.ts';
+import { SPEND_VIEW, SQL_COUNTS_AS_EXPENSE, SQL_COUNTS_AS_INCOME } from './ledgerRules.ts';
 
 /**
  * Income-vs-expense series for the Spending Overview chart (daily / weekly / monthly).
@@ -67,7 +67,7 @@ export async function loadPoints(db: IDatabase, scope: Scope, fromMonth: string,
   const end = monthRange(toMonth).end;
   const rows = await db.getAllAsync<{ date: string; direction: string; paise: number | null }>(
     `SELECT transaction_date AS date, direction, ${PAISE} AS paise
-       FROM transactions
+       FROM ${SPEND_VIEW}
       WHERE deleted_at IS NULL AND (${SQL_COUNTS_AS_INCOME} OR ${SQL_COUNTS_AS_EXPENSE})
         AND transaction_date >= ? AND transaction_date < ?
         AND (user_id = ? OR (user_id IS NULL AND ? IS NULL))`,
