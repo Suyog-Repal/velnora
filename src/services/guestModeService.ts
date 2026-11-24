@@ -1,6 +1,7 @@
 import { AttachmentRepository } from '../db/repositories/attachmentRepository.ts';
 import { getDatabase } from '../db/database.ts';
 import { withWriteLock } from '../db/writeLock.ts';
+import { claimGuestSplitData } from './splitService.ts';
 import type { IDatabase } from '../db/types.ts';
 
 /**
@@ -76,6 +77,7 @@ export async function importGuestData(userId: string, database?: IDatabase): Pro
     try {
       let imported = 0;
       let skipped = 0;
+      const skippedTo = new Map<string, string>();
       const now = new Date().toISOString();
       for (const row of guestRows) {
         const dupRef = row.reference_id
@@ -93,6 +95,7 @@ export async function importGuestData(userId: string, database?: IDatabase): Pro
             `UPDATE transaction_attachments SET transaction_id = ?, updated_at = ? WHERE transaction_id = ? AND user_id IS NULL AND deleted_at IS NULL`,
             (dupRef ?? dupFp)!.id, now, row.id,
           );
+          skippedTo.set(row.id, (dupRef ?? dupFp)!.id);
           skipped += 1;
           continue;
         }
@@ -155,6 +158,8 @@ export async function importGuestData(userId: string, database?: IDatabase): Pro
            ON CONFLICT(entity_type, entity_id) DO UPDATE SET payload = excluded.payload, operation = 'create'`,
           `import-exp-${e.id}`, e.id, JSON.stringify({ user_id: id, person: e.person, direction: e.direction, amount_paise: e.amount_paise, paid_paise: e.paid_paise, note: e.note, due_date: e.due_date, status: e.status, settled_at: e.settled_at, payments }), now);
       }
+      // Split data (friends, groups, expenses, shares, settlements) is local-only: it changes owner with its transactions and is never queued.
+      await claimGuestSplitData(db, id, skippedTo, now);
       // Photos and scans of the imported transactions now belong to the account too, and are queued for upload.
       await new AttachmentRepository(db).adoptForUser(id);
       await db.execAsync('COMMIT');

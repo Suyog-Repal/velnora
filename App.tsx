@@ -12,6 +12,10 @@ import { SignInCheckNotice } from './src/ui/SignInCheckNotice';
 import NetInfo from '@react-native-community/netinfo';
 import { diag, diagnostics } from './src/services/diagnostics';
 import { getGuestDataSummary, importGuestData, isGuestModeChosen, setGuestModeChosen } from './src/services/guestModeService';
+import { countGuestSplitData, createSplitExpense } from './src/services/splitService';
+import { evaluateDraft, parseMoneyToPaise } from './src/services/splitDraft';
+import { SplitSection, useSplitDraft } from './src/screens/SplitEditor';
+import { hapticSuccess } from './src/ui/haptics';
 import { addSmsStagedListener, configureSupportedSenderPatterns, getNativeCheckIn, getNativeReviewNotifier } from './sms';
 import { confirmCheckInToday, setCheckInPort, syncCheckInSchedule } from './src/services/dailyCheckIn';
 import { drainNativeReviewActions } from './src/services/reviewActionDrain.native';
@@ -185,6 +189,7 @@ function AppInner({ onReady, settled }: { onReady: () => void; settled: boolean 
   const [showPrivacy, setShowPrivacy] = useState(false);
   const online = useOnline();
   const scope = session?.user.id ?? null;
+  const split = useSplitDraft(scope, showForm);
   const greeting = useGreeting();
   // Date/time for a new transaction. Until the person picks one, the transaction is stamped with the moment of saving.
   const [txDate, setTxDate] = useState(localYmd());
@@ -562,9 +567,10 @@ function AppInner({ onReady, settled }: { onReady: () => void; settled: boolean 
     try { const next = screen === 'signup' ? await register(fullName.trim(), normalizedEmail, password) : await login(normalizedEmail, password); await saveSession(next);
       // Guest data is never attached silently: ask first, and only if there is something to import.
       const guest = await getGuestDataSummary().catch(() => ({ transactionCount: 0, budgetCount: 0, categoryCount: 0, expectedCount: 0 }));
+      const guestSplits = await countGuestSplitData(getServiceDb()).catch(() => 0); // friends and split expenses move with the guest data
       setSession(next); setSessionStale(false); setShowAuth(false); setPassword(''); setConfirmPassword('');
       setGuestMode(false); void setGuestModeChosen(false).catch(() => undefined); // an account session replaces the guest choice
-      if (guest.transactionCount + guest.budgetCount + guest.categoryCount + guest.expectedCount > 0) setImportPrompt({ count: guest.transactionCount }); } catch (caught) { setAuthError(caught instanceof Error ? caught.message : 'Authentication failed. Try again.'); } finally { setAuthBusy(false); }
+      if (guest.transactionCount + guest.budgetCount + guest.categoryCount + guest.expectedCount + guestSplits > 0) setImportPrompt({ count: guest.transactionCount }); } catch (caught) { setAuthError(caught instanceof Error ? caught.message : 'Authentication failed. Try again.'); } finally { setAuthBusy(false); }
   };
   const submitForgot = async () => { setAuthBusy(true); setAuthError(''); try { await requestPasswordReset(email.trim().toLowerCase()); setAuthNotice('Password reset delivery is not configured in this environment.'); } catch (caught) { setAuthError(caught instanceof Error ? caught.message : 'Password reset is unavailable.'); } finally { setAuthBusy(false); } };
 
@@ -580,6 +586,7 @@ function AppInner({ onReady, settled }: { onReady: () => void; settled: boolean 
     setCategory(categoriesFor(dir)[0]);
     setAmount(''); setCounterparty(''); setFormError(''); setAttachDraft(EMPTY_DRAFT); setReceiptRef(null); setReceiptNote('');
     setTxDate(localYmd()); setTxTime(localHm()); setDateTouched(false); setTimeTouched(false); setCategoryTouched(false);
+    split.reset();
     setShowForm(true);
   };
   const chooseDirection = (dir: Direction) => {
@@ -603,9 +610,19 @@ function AppInner({ onReady, settled }: { onReady: () => void; settled: boolean 
     const picked = dateTouched || timeTouched;
     const when = picked ? parseLocalDateTime(txDate, timeTouched ? txTime : localHm()) : null;
     if (picked && !when) { setFormError('Select a valid date and time.'); return; }
+    // A split is checked in full BEFORE anything is written, so a bad split never leaves a half-saved payment.
+    const totalPaise = parseMoneyToPaise(typed);
+    const splitEval = split.draft.enabled && direction === 'expense' ? evaluateDraft(split.draft, totalPaise) : null;
+    if (splitEval && !splitEval.ok) { split.markAttempted(); setFormError(splitEval.error ?? 'Check the split.'); return; }
     setFormError('');
     savingRef.current = true; setSaving(true);
     try {
+      if (splitEval?.input && !splitEval.paidByMe) {
+        // Someone else paid: nothing left the owner's bank, so only the split (their share) is recorded.
+        await createSplitExpense(getServiceDb(), scope, { ...splitEval.input, groupId: split.draft.groupId, title: counterparty.trim(), category: savedCategory, totalPaise: totalPaise!, expenseDate: when ?? new Date().toISOString(), note: receiptNote.trim() || null });
+        if (draftChanges(attachDraft).added.length) showToast('Attachments need a payment of yours, so none were saved.', 'warning', 'attach-failed');
+        hapticSuccess(); showToast('Split saved. Your share counts in your spending.', 'success', 'split-saved'); setDataTick((n) => n + 1); closeForm(); return;
+      }
       const created = await recordAddTransaction({
         amount: value,
         direction: savedDirection,
@@ -617,6 +634,10 @@ function AppInner({ onReady, settled }: { onReady: () => void; settled: boolean 
         ...(when ? { transaction_date: when } : {}),
       }, session);
       notices.localSave(savedDirection, !!session);
+      if (splitEval?.input) {
+        try { await createSplitExpense(getServiceDb(), scope, { ...splitEval.input, groupId: split.draft.groupId, transactionId: created.id, title: created.counterparty, category: created.category, totalPaise: created.amount_paise, expenseDate: created.transaction_date }); hapticSuccess(); }
+        catch { showToast('The payment was saved, but the split could not be. Open it and tap Split this.', 'warning', 'split-failed'); }
+      }
       // Attachments are stored after the transaction (they reference its id). Each is stored on its own, so one unreadable
       // image never loses the transaction or the other images.
       const attachChanges = draftChanges(attachDraft);
@@ -774,6 +795,7 @@ function AppInner({ onReady, settled }: { onReady: () => void; settled: boolean 
     <ScrollView horizontal showsHorizontalScrollIndicator={false} keyboardShouldPersistTaps="handled" contentContainerStyle={{ paddingRight: 8 }}>
       {formCategories.map((item) => <Chip key={item} label={item} active={category.toLowerCase() === item.toLowerCase()} color={catViews.find((c) => c.type === direction && c.name === item)?.color} onPress={() => { setCategory(item); setCategoryTouched(true); }} colors={colors} />)}
     </ScrollView>
+    {direction === 'expense' ? <SplitSection split={split} totalPaise={parseMoneyToPaise(amount)} colors={colors} /> : null}
     <AttachmentSection draft={attachDraft} onChange={setAttachDraft} colors={colors} signedIn={!!session} receipt={{
       session, categories: catViews,
       current: { direction, merchant: counterparty, amount, date: txDate, time: txTime, category,

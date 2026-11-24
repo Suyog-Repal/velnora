@@ -11,7 +11,7 @@
 import type { IDatabase, TransactionKind } from '../db/types.ts';
 import { listCategories, fallbackColor, type Scope } from './categoryService.ts';
 import { monthRange } from './budgetService.ts';
-import { countsAsExpense, countsAsIncome, countsAsRefund } from './ledgerRules.ts';
+import { SPEND_VIEW, countsAsExpense, countsAsIncome, countsAsRefund } from './ledgerRules.ts';
 import { summarize } from './cashFlowService.ts';
 import { MONTH_NAMES, localYmd } from './dateUtils.ts';
 import { activeCurrency } from '../ui/currency.ts';
@@ -92,7 +92,7 @@ export const reportMonthLabel = (month: string) => { const p = parseReportMonth(
 /** Local calendar months ('YYYY-MM', newest first) that have at least one live transaction in this scope. */
 export async function listReportMonths(db: IDatabase, scope: Scope): Promise<string[]> {
   const rows = await db.getAllAsync<{ transaction_date: string }>(
-    `SELECT transaction_date FROM transactions WHERE deleted_at IS NULL AND (user_id = ? OR (user_id IS NULL AND ? IS NULL))`, scope, scope);
+    `SELECT transaction_date FROM ${SPEND_VIEW} WHERE deleted_at IS NULL AND amount_paise > 0 AND (user_id = ? OR (user_id IS NULL AND ? IS NULL))`, scope, scope);
   const months = new Set<string>();
   for (const r of rows) {
     const d = new Date(r.transaction_date);
@@ -128,8 +128,8 @@ export async function buildMonthlyReport(db: IDatabase, scope: Scope, month: str
   const rows = await db.getAllAsync<Row>(
     `SELECT id, counterparty, description, category, transaction_date, direction, txn_kind, possible_duplicate_of, reference_id,
             amount, amount_paise, verification_status, created_at
-     FROM transactions
-     WHERE deleted_at IS NULL AND (user_id = ? OR (user_id IS NULL AND ? IS NULL)) AND transaction_date >= ? AND transaction_date < ?
+     FROM ${SPEND_VIEW}
+     WHERE deleted_at IS NULL AND amount_paise > 0 AND (user_id = ? OR (user_id IS NULL AND ? IS NULL)) AND transaction_date >= ? AND transaction_date < ?
      ORDER BY transaction_date ASC, created_at ASC, id ASC`, scope, scope, start, end);
   const colors = new Map((await listCategories(db, scope)).map((c) => [c.name.toLowerCase(), c.color]));
 

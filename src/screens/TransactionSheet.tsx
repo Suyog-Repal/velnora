@@ -9,7 +9,10 @@ import { TimeField } from '../ui/TimePicker';
 import { notices, showToast } from '../ui/Toast';
 import { buildMerchantPhone, type LocationInput } from '../services/transactionDetails';
 import { formFromTransaction, planEdit, type EditFormState } from '../services/transactionEdit';
-import { deleteTransaction, getServiceDb, syncPendingTransactions, updateLedgerFields, updateTransactionDetails } from '../services/transactionService';
+import { deleteTransaction, getServiceDb, hasSplit, syncPendingTransactions, updateLedgerFields, updateTransactionDetailsDetailed } from '../services/transactionService';
+import { SELF } from '../services/splitMath';
+import { SplitReentryRequired, contactLabels, createSplitExpense, deleteSplitExpense, getSplitForTransaction, listContacts, updateSplitExpense, type SplitExpense, type SplitExpenseInput } from '../services/splitService';
+import { SplitSheet } from './SplitEditor';
 import { rememberAlias } from '../services/merchantAliasService';
 import { removeReceipt } from '../services/receiptService';
 import { downloadReceipt, expoReceiptFs } from '../services/receiptFiles';
@@ -60,6 +63,19 @@ export function TransactionSheet({ tx, initialMode = 'view', session, categories
   /** Location change made in this edit, applied only by "Save changes": undefined = untouched, null = remove. */
   const [locDraft, setLocDraft] = useState<LocationInput | null | undefined>(undefined);
   const [markReviewed, setMarkReviewed] = useState(false);
+  /** The split attached to this transaction (if any) and the names to show for it. */
+  const [splitInfo, setSplitInfo] = useState<{ split: SplitExpense | null; names: Map<string, string> }>({ split: null, names: new Map() });
+  const [splitMode, setSplitMode] = useState<null | 'create' | 'edit'>(null);
+  /** Set when the amount of an Exact split changed: the person must enter the exact amounts again before anything is saved. */
+  const [reentry, setReentry] = useState<SplitReentryRequired | null>(null);
+
+  const loadSplit = async (txn: TransactionEntity) => {
+    const db = getServiceDb();
+    const split = await getSplitForTransaction(db, txn.user_id, txn.id).catch(() => null);
+    const names = contactLabels(await listContacts(db, txn.user_id, { includeDeleted: true }).catch(() => []));
+    names.set(SELF, 'You');
+    setSplitInfo({ split, names });
+  };
 
   /** Puts the saved values of `t` into the edit fields (prefill, and cancel): every unsaved change is dropped. */
   const fillForm = (t: TransactionEntity) => {
@@ -74,7 +90,7 @@ export function TransactionSheet({ tx, initialMode = 'view', session, categories
   useEffect(() => {
     if (!tx) return;
     setCurrent(tx); setMode(initialMode); fillForm(tx);
-    void loadAttachments(tx);
+    void loadAttachments(tx); void loadSplit(tx);
   }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /**
@@ -138,7 +154,7 @@ export function TransactionSheet({ tx, initialMode = 'view', session, categories
   const cancelEdit = () => { fillForm(t); setAttachDraft({ items: savedItems, removed: [] }); setShowMap(false); setMode('view'); };
   const backToDetails = async () => {
     const fresh = await refresh();
-    if (fresh) await loadAttachments(fresh);
+    if (fresh) { await loadAttachments(fresh); await loadSplit(fresh); }
     setMode('view');
   };
 
@@ -149,7 +165,8 @@ export function TransactionSheet({ tx, initialMode = 'view', session, categories
     if (!valid.some((c) => c.name.toLowerCase() === category.toLowerCase())) setCategory(valid[0]?.name ?? (d === 'income' ? 'Other Income' : 'Other Expenses'));
   };
 
-  const save = async () => {
+  /** Returns null on success, otherwise the message to show. `override` is the re-entered Exact split (see SplitReentryRequired). */
+  const save = async (override?: SplitExpenseInput): Promise<string | null> => {
     setError('');
     const cat = categories.find((c) => c.type === direction && c.name.toLowerCase() === category.toLowerCase()) ?? categories.find((c) => c.name.toLowerCase() === category.toLowerCase());
     const form: EditFormState = {
@@ -158,13 +175,17 @@ export function TransactionSheet({ tx, initialMode = 'view', session, categories
     };
     // Only what changed is written; the stored timestamp keeps its exact instant unless the date or time was changed.
     const planned = planEdit(t, form);
-    if (!planned.ok) { setError(planned.error); return; }
+    if (!planned.ok) { setError(planned.error); return planned.error; }
     const attachmentsDirty = draftIsDirty(attachDraft);
-    if (!planned.changed && !attachmentsDirty) { setShowMap(false); setMode('view'); return; } // nothing to save
+    if (!planned.changed && !attachmentsDirty) { setShowMap(false); setMode('view'); return null; } // nothing to save
     setBusy(true);
     try {
       // Same transaction id: an update, never a new record. Synced by the existing engine.
-      if (planned.plan.details) await updateTransactionDetails(t.id, planned.plan.details, session);
+      if (planned.plan.details) {
+        const r = await updateTransactionDetailsDetailed(t.id, planned.plan.details, session, override);
+        if (r.splitPlan.kind === 'resplit') showToast(r.splitPlan.zeroShare.length ? 'Split updated. The amount is too small to give everyone a paisa.' : 'Split updated to the new amount.', 'info', 'split-updated');
+        if (r.splitPlan.kind === 'remove') showToast('This is no longer an expense, so its split was removed.', 'info', 'split-removed');
+      }
       if (planned.plan.ledger) await updateLedgerFields(t.id, planned.plan.ledger, session);
       // Attachment changes apply to this same transaction id. Only removed items are removed.
       if (attachmentsDirty) {
@@ -173,6 +194,7 @@ export function TransactionSheet({ tx, initialMode = 'view', session, categories
         if (res.failed > 0) showToast(`${res.failed} attachment change${res.failed === 1 ? '' : 's'} could not be saved. Try again.`, 'warning', 'attach-failed');
         if (session) void syncPendingTransactions(session).catch(() => undefined);
       }
+      setReentry(null);
       onChanged();
       notices.localSave('edit', !!session);
       const before = t;
@@ -188,23 +210,74 @@ export function TransactionSheet({ tx, initialMode = 'view', session, categories
             { text: 'Remember', onPress: () => { void rememberAlias(getServiceDb(), session.user.id, before.counterparty, merchant.trim(), categoryChanged ? category : undefined).catch(() => undefined); } }],
         );
       }
-    } catch (e) { setError(e instanceof Error ? e.message : 'Could not save.'); }
-    finally { setBusy(false); }
+      return null;
+    } catch (e) {
+      if (e instanceof SplitReentryRequired && !override) { setReentry(e); return null; } // nothing was changed; ask for the exact amounts first
+      const message = e instanceof Error ? e.message : 'Could not save.';
+      setError(message); return message;
+    } finally { setBusy(false); }
   };
 
-  const confirmDelete = () => Alert.alert('Delete transaction?', 'This removes it from your history and, when signed in, from your other devices.', [
+  const confirmDelete = async () => {
+    const split = await hasSplit(t.id).catch(() => false);
+    Alert.alert('Delete transaction?', `This removes it from your history and, when signed in, from your other devices.${split ? ' The split with friends is removed too; payments you recorded between you and your friends stay.' : ''}`, [
     { text: 'Cancel', style: 'cancel' },
     { text: 'Delete', style: 'destructive', onPress: () => { void deleteTransaction(t.id, session).then(async () => {
       await removeAttachmentsForTransaction(getServiceDb(), expoAttachmentFs, session, t.id).catch(() => undefined);
       onChanged(); onClose();
     }); } },
-  ]);
+    ]);
+  };
 
   const hasLoc = t.location_lat != null && t.location_lng != null;
   const statusLine = `${sourceLabel(t)} · ${VERIFICATION_LABELS[t.verification_status ?? 'verified']} · ${t.user_id ? (t.sync_status === 'synced' ? 'Synced' : 'Waiting to sync') : 'Stored on this device only'}`;
   const amountHeader = (d: Direction) => <>
     <Text style={{ fontSize: 30, fontWeight: '700', color: d === 'income' ? palette.accentText : palette.expenseText, marginBottom: 4, fontVariant: ['tabular-nums'] }}>{d === 'income' ? '+' : '-'}{formatPaise(t.amount_paise)}</Text>
     <Text style={{ color: colors.muted, marginBottom: 16 }}>{statusLine}</Text>
+  </>;
+
+  // ---------------------------------------------------------------- Split (local only)
+  const splitScope = t.user_id;
+  const sp = splitInfo.split;
+  const nameOf = (party: string) => splitInfo.names.get(party) ?? 'Removed person';
+  const myShare = sp ? (sp.rows.find((r) => r.party === SELF)?.sharePaise ?? 0) : 0;
+  const splitHeader = { title: t.counterparty, category: t.category, expenseDate: t.transaction_date, totalPaise: t.amount_paise };
+  const removeSplit = () => Alert.alert('Remove split?', 'The split with friends is removed and this counts in full in your spending again. Payments you recorded stay.', [
+    { text: 'Cancel', style: 'cancel' },
+    { text: 'Remove', style: 'destructive', onPress: () => { if (!sp) return; void deleteSplitExpense(getServiceDb(), splitScope, sp.id).then(async () => { setSplitMode(null); await loadSplit(t); onChanged(); }); } },
+  ]);
+  const canSplit = t.direction === 'expense' && (t.txn_kind ?? 'payment') !== 'transfer';
+  const splitCard = !canSplit && !sp ? null : <View style={{ marginTop: 14, borderRadius: 14, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.card, padding: 14 }}>
+    {sp ? <>
+      <Text style={{ color: colors.text, fontWeight: '700' }}>Split with {sp.rows.filter((r) => r.party !== SELF).map((r) => nameOf(r.party)).join(', ') || 'friends'}</Text>
+      <Text style={{ color: colors.muted, marginTop: 4 }}>Your share <Text style={{ color: palette.accentText, fontWeight: '700' }}>{formatPaise(myShare)}</Text> counts in your spending. The payment above stays at the full amount.</Text>
+      <View style={{ flexDirection: 'row', gap: 10, marginTop: 10 }}>
+        <View style={{ flex: 1 }}><Button title="Edit split" kind="ghost" onPress={() => setSplitMode('edit')} /></View>
+        <View style={{ flex: 1 }}><Button title="Remove split" kind="ghost" onPress={removeSplit} /></View>
+      </View>
+    </> : <>
+      <Text style={{ color: colors.text, fontWeight: '700' }}>Shared this expense?</Text>
+      <Text style={{ color: colors.muted, marginTop: 4, marginBottom: 10 }}>Split it with friends. The payment stays as it is; only your share counts in your spending.</Text>
+      <Button title="Split this" onPress={() => setSplitMode('create')} />
+    </>}
+  </View>;
+  const splitSheets = <>
+    <SplitSheet visible={splitMode !== null} onClose={() => setSplitMode(null)} scope={splitScope} title={t.counterparty} totalPaise={t.amount_paise} existing={splitMode === 'edit' ? sp : null} colors={colors}
+      onRemove={removeSplit}
+      onSubmit={async (input) => {
+        const db = getServiceDb();
+        if (splitMode === 'edit' && sp) await updateSplitExpense(db, splitScope, sp.id, { ...input, ...splitHeader });
+        else await createSplitExpense(db, splitScope, { ...input, ...splitHeader, transactionId: t.id });
+        setSplitMode(null); await loadSplit(t); onChanged();
+        showToast('Split saved. Your share counts in your spending.', 'success', 'split-saved');
+      }} />
+    <SplitSheet visible={!!reentry} onClose={() => setReentry(null)} scope={splitScope} title={merchant.trim() || t.counterparty} totalPaise={reentry?.newTotalPaise ?? t.amount_paise} existing={reentry?.split ?? null} startFresh colors={colors}
+      reentryNote="The amount changed. Enter each person's exact amount again."
+      onSubmit={async (input) => {
+        if (!reentry) return;
+        const failure = await save({ ...input, title: merchant.trim() || t.counterparty, category, expenseDate: reentry.split.expense_date, totalPaise: reentry.newTotalPaise });
+        if (failure) throw new Error(failure);
+      }} />
   </>;
 
   // ---------------------------------------------------------------- Transaction Details (read-only)
@@ -228,7 +301,7 @@ export function TransactionSheet({ tx, initialMode = 'view', session, categories
       style={({ pressed }) => [{ width: 40, height: 40, borderRadius: 20, borderWidth: 1, alignItems: 'center', justifyContent: 'center', borderColor: colors.border, backgroundColor: colors.card, opacity: pressed ? 0.7 : 1 }]}>
       <Pencil color={palette.accentText} size={18} />
     </Pressable>;
-    return <Sheet visible onClose={onClose} title={t.counterparty} colors={colors} headerAction={edit}>
+    return <><Sheet visible onClose={onClose} title={t.counterparty} colors={colors} headerAction={edit}>
       {amountHeader(t.direction)}
       <View style={{ borderRadius: 14, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.card, paddingHorizontal: 14 }}>
         {rows.filter(([, v]) => v && String(v).trim()).map(([label, value], i, all) => <View key={label} style={{ flexDirection: 'row', paddingVertical: 12, borderBottomWidth: i === all.length - 1 ? 0 : 1, borderBottomColor: colors.border, gap: 12 }}>
@@ -236,9 +309,10 @@ export function TransactionSheet({ tx, initialMode = 'view', session, categories
           <Text style={{ color: colors.text, flex: 1, fontSize: 14, fontWeight: '600' }} selectable>{value}</Text>
         </View>)}
       </View>
+      {splitCard}
       <AttachmentSection draft={attachDraft} onChange={setAttachDraft} colors={colors} signedIn={!!session} loading={attachLoading} readOnly />
       <Text style={{ color: colors.muted, fontSize: 12, marginTop: 18 }}>Created {new Date(t.created_at).toLocaleString('en-IN')}</Text>
-    </Sheet>;
+    </Sheet>{splitSheets}</>;
   }
 
   // ---------------------------------------------------------------- Edit Transaction
@@ -252,12 +326,12 @@ export function TransactionSheet({ tx, initialMode = 'view', session, categories
       <View style={{ flex: 2 }}><Button title="Save changes" onPress={() => void save()} busy={busy} /></View>
     </View>
   </>;
-  return <Sheet visible onClose={cancelEdit} title="Edit transaction" colors={colors} footer={footer}>
+  return <><Sheet visible onClose={cancelEdit} title="Edit transaction" colors={colors} footer={footer}>
     {amountHeader(direction)}
 
-    <Labeled label="TYPE" colors={colors} hint={direction !== t.direction ? `Will be saved as ${direction === 'income' ? 'income' : 'an expense'}.` : undefined}><TypeToggle value={direction} onChange={chooseDirection} colors={colors} /></Labeled>
+    <Labeled label="TYPE" colors={colors} hint={direction !== t.direction ? `Will be saved as ${direction === 'income' ? 'income' : 'an expense'}.${sp && direction === 'income' ? ' Its split with friends will be removed.' : ''}` : undefined}><TypeToggle value={direction} onChange={chooseDirection} colors={colors} /></Labeled>
     <Labeled label="MERCHANT" colors={colors}><Input colors={colors} value={merchant} onChangeText={setMerchant} accessibilityLabel="Merchant" /></Labeled>
-    <Labeled label={`AMOUNT (${currencySymbol()})`} colors={colors}><Input colors={colors} value={amount} onChangeText={setAmount} keyboardType="decimal-pad" accessibilityLabel="Amount" /></Labeled>
+    <Labeled label={`AMOUNT (${currencySymbol()})`} colors={colors} hint={sp && Math.round(Number(amount) * 100) !== t.amount_paise ? (sp.mode === 'exact' ? 'This expense is split with exact amounts. You will enter them again when you save.' : 'Its split will follow the new amount.') : undefined}><Input colors={colors} value={amount} onChangeText={setAmount} keyboardType="decimal-pad" accessibilityLabel="Amount" /></Labeled>
     <View style={{ flexDirection: 'row', gap: 10 }}>
       <View style={{ flex: 1 }}><Labeled label="DATE" colors={colors}><DateField value={date} colors={colors} title="Transaction date" accessibilityLabel="Transaction date" onChange={(v) => { setDate(v); setError(''); }} /></Labeled></View>
       <View style={{ flex: 1 }}><Labeled label="TIME" colors={colors}><TimeField value={time} colors={colors} title="Transaction time" accessibilityLabel="Transaction time" onChange={setTime} /></Labeled></View>
@@ -326,5 +400,5 @@ export function TransactionSheet({ tx, initialMode = 'view', session, categories
 
     <LocationPicker visible={showMap} colors={colors} initial={editLoc}
       onCancel={() => setShowMap(false)} onConfirm={(loc) => { setShowMap(false); setLocDraft(loc); }} />
-  </Sheet>;
+  </Sheet>{splitSheets}</>;
 }

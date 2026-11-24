@@ -14,6 +14,7 @@ import { canEditTransaction, toUpdateInput, type DetailsPatch } from './transact
 import { applyAlias, rememberAlias } from './merchantAliasService.ts';
 import { autoSettleFromTransaction } from './expectedPaymentService.ts';
 import { listCategories } from './categoryService.ts';
+import { applySplitPlan, deleteSplitForTransaction, planSplitForTransactionEdit, type SplitEditPlan, type SplitExpenseInput } from './splitService.ts';
 import { syncEngine, triggerSync, type SyncSummary } from './syncEngine.ts';
 import { installSyncHttpTally, recordSyncCycle } from './syncDiagnostics.ts';
 
@@ -248,7 +249,10 @@ export async function updateTransaction(
   session: Session | null,
 ): Promise<TransactionEntity> {
   const { transactionRepository } = await initTransactionService();
+  const before = await transactionRepository.getById(id);
+  const plan = before && !before.deleted_at ? await planSplitForTransactionEdit(getServiceDb(), before.user_id, id, afterEdit(before, updates)) : null;
   const updated = await transactionRepository.update(id, updates);
+  if (before && plan) await applySplitPlan(getServiceDb(), before.user_id, plan, updated);
 
   if (session) {
     void syncPendingTransactions(session);
@@ -283,12 +287,26 @@ export async function applyNotificationCategory(id: string, category: string, se
   return 'applied';
 }
 
+/** The amount (paise) and direction a transaction will have once `updates` is applied. */
+function afterEdit(t: TransactionEntity, updates: { amount?: number; direction?: Direction }): { amountPaise: number; direction: string } {
+  return { amountPaise: updates.amount !== undefined ? Math.round(updates.amount * 100) : t.amount_paise, direction: updates.direction ?? t.direction };
+}
+
+/** True when the transaction has a split, so the UI can ask before deleting both. */
+export async function hasSplit(id: string): Promise<boolean> {
+  await initTransactionService();
+  return !!(await getServiceDb().getFirstAsync<{ id: string }>(`SELECT id FROM split_expenses WHERE transaction_id = ? AND deleted_at IS NULL`, id));
+}
+
+/** Deleting a transaction also removes its split (settlements are separate records and stay), so nothing orphaned keeps counting. */
 export async function deleteTransaction(
   id: string,
   session: Session | null,
 ): Promise<boolean> {
   const { transactionRepository } = await initTransactionService();
+  const existing = await transactionRepository.getById(id);
   const success = await transactionRepository.delete(id);
+  if (success && existing) await deleteSplitForTransaction(getServiceDb(), existing.user_id, id);
   cancelReviewNotification(id);
   kickReviewPass(session?.user.id ?? null);
 
@@ -433,14 +451,33 @@ export async function updateTransactionDetails(
   id: string,
   patch: DetailsPatch,
   session: Session | null,
+  splitOverride?: SplitExpenseInput,
 ): Promise<TransactionEntity> {
+  return (await updateTransactionDetailsDetailed(id, patch, session, splitOverride)).transaction;
+}
+
+/**
+ * Same edit, also reporting what happened to the transaction's split. If the transaction has an EXACT split and its amount changes,
+ * this throws SplitReentryRequired BEFORE changing anything; call again with `splitOverride` (the re-entered split) to apply both.
+ * Equal / percent / shares splits re-split by themselves, and a split's category and date always follow the transaction.
+ */
+export async function updateTransactionDetailsDetailed(
+  id: string,
+  patch: DetailsPatch,
+  session: Session | null,
+  splitOverride?: SplitExpenseInput,
+): Promise<{ transaction: TransactionEntity; splitPlan: SplitEditPlan }> {
   const { transactionRepository } = await initTransactionService();
   const existing = await transactionRepository.getById(id);
   if (!existing || existing.deleted_at) throw new Error('Transaction not found.');
   if (!canEditTransaction(existing, session)) throw new Error('This transaction belongs to a different account.');
-  await transactionRepository.update(id, toUpdateInput(patch));
+  const updates = toUpdateInput(patch);
+  const splitPlan = await planSplitForTransactionEdit(getServiceDb(), existing.user_id, id, afterEdit(existing, updates), splitOverride);
+  await transactionRepository.update(id, updates);
+  const transaction = (await transactionRepository.getById(id))!;
+  await applySplitPlan(getServiceDb(), existing.user_id, splitPlan, transaction);
   await refreshReviewState(id, session?.user.id ?? null, true);
   kickReviewPass(session?.user.id ?? null);
   if (session) void syncPendingTransactions(session);
-  return (await transactionRepository.getById(id))!;
+  return { transaction, splitPlan };
 }

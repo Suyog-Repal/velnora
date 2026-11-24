@@ -54,3 +54,11 @@ export function sourceLabel(t: { source: string; capture_source?: CaptureSource 
   if (parts.length) return parts.join(' + ');
   return CAPTURE_LABELS[t.capture_source ?? (t.source === 'sms' ? 'sms' : 'manual')].toUpperCase();
 }
+
+/**
+ * The ONE source of "what counts as my spending" (defined in migration 11). Same columns as `transactions`, so a spending query only
+ * swaps its FROM: an expense that is split counts only the owner's share, and a split expense a friend paid for (no bank transaction)
+ * counts the owner's share on its own date and category. Settlements are not in it. Cash balance (money actually moved) must keep
+ * reading `transactions`, because the bank saw the full amount.
+ */
+export const SPEND_VIEW = 'v_spend';
