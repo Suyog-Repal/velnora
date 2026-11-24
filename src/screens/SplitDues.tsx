@@ -9,18 +9,25 @@ import { loadOverview, type FriendRow } from '../services/splitOverview';
  * Home: who owes you (and whom you owe) from split expenses, as plain sentences ("Rohan owes you Rs 450"). It is not shown at all when
  * nothing is open, so Home stays quiet for people who do not split. Tapping it opens the People tab.
  */
-export function SplitDuesCard({ scope, colors, refreshKey, onOpen }: { scope: string | null; colors: Colors; refreshKey: unknown; onOpen: () => void }) {
-  const [rows, setRows] = useState<FriendRow[]>([]);
-  const [totals, setTotals] = useState({ owed: 0, owe: 0 });
+export interface SplitDues { rows: FriendRow[]; totals: { owed: number; owe: number } }
+const NO_DUES: SplitDues = { rows: [], totals: { owed: 0, owe: 0 } };
+
+/** Open split balances for Home (read once, shared by the dues card and the "owed back" caption under Expenses). */
+export function useSplitDues(scope: string | null, refreshKey: unknown): SplitDues {
+  const [dues, setDues] = useState<SplitDues>(NO_DUES);
   useEffect(() => {
     let live = true;
     void loadOverview(getServiceDb(), scope).then(({ overview }) => {
       if (!live) return;
-      setRows(overview.friends.filter((f) => f.balancePaise !== 0));
-      setTotals({ owed: overview.owedToMePaise, owe: overview.iOwePaise });
+      setDues({ rows: overview.friends.filter((f) => f.balancePaise !== 0), totals: { owed: overview.owedToMePaise, owe: overview.iOwePaise } });
     }).catch(() => undefined);
     return () => { live = false; };
   }, [scope, refreshKey]);
+  return dues;
+}
+
+export function SplitDuesCard({ dues, colors, onOpen }: { dues: SplitDues; colors: Colors; onOpen: () => void }) {
+  const { rows, totals } = dues;
   if (rows.length === 0) return null;
   const shown = rows.slice(0, 3);
   return <Pressable onPress={onOpen} accessibilityRole="button" accessibilityLabel="Split dues. Open People" style={({ pressed }) => ({ marginTop: 16, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.card, padding: 14, opacity: pressed ? 0.85 : 1 })}>

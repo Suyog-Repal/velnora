@@ -1,6 +1,8 @@
 /**
- * The own-share rule through every real spending service (Analytics, Budgets, Home cash flow, daily/monthly series, monthly report):
- * they must all agree, and settlements must never move any of them. Cash balance keeps the full bank amount.
+ * Two views of spending, each consistent with itself:
+ *   own share (v_spend): Analytics, Budgets, daily/monthly series, monthly report: a split bill counts only my part;
+ *   cash (transactions): Home income/expenses/Today, Profile, recorded balance: the full amount that left the account.
+ * Settlements must never move any of them.
  */
 import assert from 'node:assert/strict';
 import { NodeSqliteAdapter } from '../../db/__tests__/testAdapter.ts';
@@ -11,6 +13,7 @@ import { currentMonth, getBudgetProgress, monthRange, saveBudget, spentPaise } f
 import { getCashFlowSummary, getLedgerHealth } from '../cashFlowService.ts';
 import { loadPoints, buildDaily } from '../cashFlowSeries.ts';
 import { buildMonthlyReport, listReportMonths, verifyReport } from '../monthlyReportService.ts';
+import { cashSpentInMonth } from '../ledgerRules.ts';
 import { SELF } from '../splitMath.ts';
 import { createContact, createSplitExpense, deleteSplitExpense, recordSettlement } from '../splitService.ts';
 
@@ -56,12 +59,19 @@ const breakdown = await categoryBreakdown(db, null, monthRange(month));
 assert.equal(breakdown.totalPaise, EXPECT_SPEND);
 assert.deepEqual(Object.fromEntries(breakdown.slices.map((s) => [s.category, s.totalPaise])), { 'Food & Dining': 40000, Groceries: 30000, Travel: 25000 });
 
+const CASH_SPEND = 120000 + 30000; // the full Rs 1200 dinner and the Rs 300 groceries left the account; the friend-paid trip never did
 const cash = await getCashFlowSummary(db, null, now);
-assert.equal(cash.monthExpensePaise, EXPECT_SPEND, 'Home monthly expenses = my share');
+assert.equal(cash.monthExpensePaise, CASH_SPEND, 'Home monthly expenses = money that actually left the account');
 assert.equal(cash.monthIncomePaise, 500000);
 assert.equal(cash.balancePaise, 500000 - 120000 - 30000, 'cash balance is money that actually left the bank: the full Rs 1200, not the share');
 const health = await getLedgerHealth(db, null, now);
-assert.equal(health.todayExpensePaise, now.getDate() === 1 ? EXPECT_SPEND : health.todayExpensePaise);
+assert.equal(health.todayExpensePaise, now.getDate() === 1 ? CASH_SPEND : health.todayExpensePaise, 'Home Today Out is cash too');
+// Profile "spent this month" reads the loaded rows with the same rule: it must equal Home's figure
+const rows = await db.getAllAsync<{ amount_paise: number; direction: string; txn_kind: string | null; possible_duplicate_of: string | null; transaction_date: string; deleted_at: string | null }>(
+  `SELECT amount_paise, direction, txn_kind, possible_duplicate_of, transaction_date, deleted_at FROM transactions`);
+assert.equal(cashSpentInMonth(rows as never, now), cash.monthExpensePaise, 'Profile and Home show the same spending');
+assert.ok(cash.monthExpensePaise > EXPECT_SPEND, 'cash is larger than my share while friends owe me');
+assert.equal(cash.monthExpensePaise - EXPECT_SPEND, 120000 - 40000 - 25000, 'the gap is what friends owe back, less the trip share a friend paid');
 
 const points = await loadPoints(db, null, month, month);
 const daily = buildDaily(points, month);
@@ -73,14 +83,14 @@ assert.deepEqual(verifyReport(report), [], 'report is internally consistent');
 assert.ok((await listReportMonths(db, null)).includes(month));
 
 // every screen shows the same number
-assert.equal(breakdown.totalPaise, cash.monthExpensePaise); assert.equal(cash.monthExpensePaise, report.summary.expensePaise);
+assert.equal(breakdown.totalPaise, EXPECT_SPEND); assert.equal(EXPECT_SPEND, report.summary.expensePaise);
 assert.equal(report.summary.expensePaise, await spentPaise(db, null, month, null));
 
 // settlements move nobody's spending
 await recordSettlement(db, null, { from: a.id, to: SELF, amountPaise: 20000 });
 await recordSettlement(db, null, { from: SELF, to: a.id, amountPaise: 5000 });
 assert.equal(await spentPaise(db, null, month, null), EXPECT_SPEND);
-assert.equal((await getCashFlowSummary(db, null, now)).monthExpensePaise, EXPECT_SPEND);
+assert.equal((await getCashFlowSummary(db, null, now)).monthExpensePaise, CASH_SPEND);
 assert.equal((await buildMonthlyReport(db, null, month, now)).summary.expensePaise, EXPECT_SPEND);
 assert.equal((await getCashFlowSummary(db, null, now)).balancePaise, cash.balancePaise, 'settlements are not income or expense');
 

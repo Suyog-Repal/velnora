@@ -49,7 +49,9 @@ export async function markNamePrompted(db: IDatabase): Promise<void> {
 
 /** The name to show: a name set on this device wins, then the account's name, then null (callers show no name, never "Guest"). */
 export function resolveDisplayName(localName: string | null, accountName: string | null | undefined): string | null {
-  return localName || normalizeDisplayName(accountName ?? '') || null;
+  // An account name can be longer than a local one (the server allows 120 characters): shorten it rather than lose it.
+  const account = (accountName ?? '').replace(/\s+/g, ' ').trim().slice(0, NAME_MAX_LENGTH).trim();
+  return localName || normalizeDisplayName(account) || null;
 }
 
 export const firstName = (name: string | null): string | null => (name ? name.split(' ')[0] : null);

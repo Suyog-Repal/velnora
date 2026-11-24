@@ -2,7 +2,7 @@
  * Home "Quick Access" shortcuts: which ones are shown and in what order. Pure (no React / storage), so it is unit-tested.
  * The preference is stored as JSON under QUICK_ACCESS_STORAGE_KEY; anything unreadable falls back to the default.
  */
-export type QuickAccessId = 'add' | 'expected' | 'report' | 'incomeExpense';
+export type QuickAccessId = 'add' | 'split' | 'expected' | 'report';
 
 export interface QuickAccessItem { id: QuickAccessId; visible: boolean }
 
@@ -10,18 +10,20 @@ export const QUICK_ACCESS_STORAGE_KEY = 'velnora.home.quickAccess.v1';
 
 export const QUICK_ACCESS_LABELS: Record<QuickAccessId, string> = {
   add: 'Add Transaction',
+  split: 'Split',
   expected: 'Expected Payment',
   report: 'Monthly Report',
-  incomeExpense: 'Income / Expense',
 };
 
 export const DEFAULT_QUICK_ACCESS: readonly QuickAccessItem[] = [
   { id: 'add', visible: true },
+  { id: 'split', visible: true },
   { id: 'expected', visible: true },
   { id: 'report', visible: true },
-  { id: 'incomeExpense', visible: true },
 ];
 
+/** Id of the shortcut that no longer exists (it duplicated Add Transaction); still recognised in saved preferences. */
+const REMOVED_ID = 'incomeExpense';
 const KNOWN = new Set<QuickAccessId>(DEFAULT_QUICK_ACCESS.map((i) => i.id));
 
 /**
@@ -37,10 +39,12 @@ export function normalizeQuickAccess(stored: unknown): QuickAccessItem[] {
   const out: QuickAccessItem[] = [];
   const seen = new Set<QuickAccessId>();
   for (const entry of raw) {
-    const id = (entry as { id?: unknown })?.id;
+    const stored = (entry as { id?: unknown })?.id;
+    // The removed "Income / Expense" shortcut is replaced in place by the (enabled) Split shortcut, so a customised order keeps its shape.
+    const id = stored === REMOVED_ID ? 'split' : stored;
     if (typeof id !== 'string' || !KNOWN.has(id as QuickAccessId) || seen.has(id as QuickAccessId)) continue;
     seen.add(id as QuickAccessId);
-    out.push({ id: id as QuickAccessId, visible: (entry as { visible?: unknown }).visible !== false });
+    out.push({ id: id as QuickAccessId, visible: stored === REMOVED_ID ? true : (entry as { visible?: unknown }).visible !== false });
   }
   for (const d of DEFAULT_QUICK_ACCESS) if (!seen.has(d.id)) out.push({ ...d });
   return out;

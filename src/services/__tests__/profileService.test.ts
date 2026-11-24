@@ -48,6 +48,9 @@ async function main() {
     assert.equal(resolveDisplayName('Asha', 'Account Name'), 'Asha');
     assert.equal(resolveDisplayName(null, 'Account Name'), 'Account Name');
     assert.equal(resolveDisplayName(null, ''), null);
+    assert.equal(resolveDisplayName(null, '   '), null, 'blank account name: no name, never an empty line');
+    assert.equal(resolveDisplayName(null, undefined), null);
+    assert.equal(resolveDisplayName(null, 'A'.repeat(60)), 'A'.repeat(40), 'a long account name is shortened, not dropped'); 
     assert.equal(firstName('Asha Rao'), 'Asha');
     assert.equal(firstName(null), null);
     assert.equal(initialOf('asha'), 'A');

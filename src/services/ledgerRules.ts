@@ -62,3 +62,18 @@ export function sourceLabel(t: { source: string; capture_source?: CaptureSource 
  * reading `transactions`, because the bank saw the full amount.
  */
 export const SPEND_VIEW = 'v_spend';
+
+/**
+ * The CASH view of spending: money that actually left the account, full transaction amounts (a split bill counts in full).
+ * Used by Home, Profile and the recorded balance, which must agree with the bank SMS. Budgets, Analytics and the monthly report use
+ * SPEND_VIEW (own share) instead. This is the in-memory twin of the SQL in cashFlowService, and a test keeps the two equal.
+ */
+export function cashSpentInMonth(rows: ReadonlyArray<Countable & { amount_paise: number; transaction_date: string; deleted_at?: string | null }>, now: Date = new Date()): number {
+  let total = 0;
+  for (const t of rows) {
+    if (t.deleted_at || !countsAsExpense(t)) continue;
+    const d = new Date(t.transaction_date);
+    if (d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth()) total += t.amount_paise;
+  }
+  return total;
+}

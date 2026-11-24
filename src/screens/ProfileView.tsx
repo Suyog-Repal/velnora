@@ -7,7 +7,7 @@ import { readableOn } from '../ui/common';
 import { Group, NavRow, Tap } from '../ui/rows';
 import { PaymentDetailsSheet } from './PaymentDetails';
 import { useReduceMotion } from '../ui/motion';
-import { countsAsExpense } from '../services/ledgerRules';
+import { cashSpentInMonth } from '../services/ledgerRules';
 import type { Session, TransactionEntity } from '../db/types';
 
 // Tap and Group now live with the shared rows; re-exported so existing imports keep working.
@@ -70,16 +70,15 @@ export function AppearanceCard({ mode, setMode, accent, setAccent, colors }: { m
 }
 
 export function profileStats(transactions: TransactionEntity[], now = new Date()) {
-  let spentPaise = 0; let pending = 0; let failed = 0; let count = 0;
+  let pending = 0; let failed = 0; let count = 0;
   for (const t of transactions) {
     if (t.deleted_at) continue;
     count += 1;
     if (t.sync_status !== 'synced' && t.user_id) pending += 1;
     if (t.sync_status === 'failed' && t.user_id) failed += 1; // rejected by the server: also counted in `pending`
-    const d = new Date(t.transaction_date);
-    if (countsAsExpense(t) && d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth()) spentPaise += t.amount_paise;
   }
-  return { count, spentPaise, pending, failed };
+  // Cash view (the full amounts that left the account): the same rule Home uses (cashSpentInMonth).
+  return { count, spentPaise: cashSpentInMonth(transactions, now), pending, failed };
 }
 
 export function ProfileView({ session, displayName, onEditName, colors, transactions, online, onOpenSettings, onOpenPrivacy, onOpenCategories, onOpenAliases, onOpenReview, onOpenAccounts, onOpenImport, onOpenImportPdf, reviewCount, onSignIn, onCreate, onLogout }: {
@@ -87,7 +86,6 @@ export function ProfileView({ session, displayName, onEditName, colors, transact
   transactions: TransactionEntity[]; online: boolean; onOpenSettings: () => void; onOpenPrivacy: () => void; onOpenCategories: () => void; onOpenAliases: () => void; onOpenReview: () => void; onOpenAccounts: () => void; onOpenImport: () => void; onOpenImportPdf: () => void; reviewCount: number; onSignIn: () => void; onCreate: () => void; onLogout: () => void;
 }) {
   const stats = profileStats(transactions);
-  const name = displayName ?? 'Add your name';
   const status = !session ? 'Stored on this device only' : !online ? 'Offline' : stats.pending > 0 ? `${stats.pending} waiting to sync${stats.failed > 0 ? ` (${stats.failed} rejected by server)` : ''}` : 'All synced';
   const avatarPulse = useRef(new Animated.Value(0)).current;
   useEffect(() => { Animated.timing(avatarPulse, { toValue: 1, duration: 700, delay: 120, easing: Easing.out(Easing.back(1.6)), useNativeDriver: true }).start(); }, [avatarPulse]);
@@ -106,7 +104,10 @@ export function ProfileView({ session, displayName, onEditName, colors, transact
             {displayName ? <Text style={{ color: '#FFFFFF', fontSize: 28, fontWeight: '700' }}>{Array.from(displayName)[0].toUpperCase()}</Text> : <UserRound size={30} color="#FFFFFF" />}
           </Animated.View>
           <View style={{ flex: 1, marginLeft: 14 }}>
-            <Pressable onPress={onEditName} accessibilityRole="button" accessibilityLabel={`Name: ${name}. Edit`} hitSlop={6} style={{ flexDirection: 'row', alignItems: 'center', minHeight: 44 }}><Text style={{ color: palette.onNavySoft, fontSize: 13, marginLeft: 8 }}>Edit</Text></Pressable>
+            <Pressable onPress={onEditName} accessibilityRole="button" accessibilityLabel={displayName ? `Name: ${displayName}. Edit` : 'Add your name'} hitSlop={6} style={{ flexDirection: 'row', alignItems: 'center', minHeight: 44 }}>
+              {displayName ? <Text style={{ color: '#FFFFFF', fontSize: 20, fontWeight: '700', flexShrink: 1 }} numberOfLines={1}>{displayName}</Text> : null}
+              <Text style={{ color: palette.onNavySoft, fontSize: 13, marginLeft: displayName ? 10 : 0 }}>{displayName ? 'Edit' : 'Add your name'}</Text>
+            </Pressable>
             <Text style={{ color: palette.onNavySoft, fontSize: 13, marginTop: 2 }} numberOfLines={1}>{session?.user.email ?? 'Not signed in'}</Text>
           </View>
         </View>

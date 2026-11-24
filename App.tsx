@@ -15,7 +15,7 @@ import { getGuestDataSummary, importGuestData, isGuestModeChosen, setGuestModeCh
 import { countGuestSplitData, createSplitExpense } from './src/services/splitService';
 import { emptyDraft, evaluateDraft, parseMoneyToPaise, setGroup } from './src/services/splitDraft';
 import { SplitSection, useSplitDraft } from './src/screens/SplitEditor';
-import { SplitDuesCard } from './src/screens/SplitDues';
+import { SplitDuesCard, useSplitDues } from './src/screens/SplitDues';
 import { hapticSuccess } from './src/ui/haptics';
 import { addSmsStagedListener, configureSupportedSenderPatterns, getNativeCheckIn, getNativeReviewNotifier } from './sms';
 import { confirmCheckInToday, setCheckInPort, syncCheckInSchedule } from './src/services/dailyCheckIn';
@@ -711,16 +711,13 @@ function AppInner({ onReady, settled }: { onReady: () => void; settled: boolean 
     return () => { cancelled = true; timers.forEach(clearTimeout); };
   }, [dbReady]);
   const openAuth = (screen: 'signin' | 'signup') => { setAuthScreen(screen); setShowAuth(true); };
+  const openSplitFriends = () => { navTo('people'); setPeoplePreset('people'); };
   /** Home Quick Access: each shortcut opens an EXISTING flow (no new screens or financial logic). */
   const quickAccess = (id: QuickAccessId) => {
     if (id === 'add') { openForm('expense'); return; }                                  // the transaction form (type switch inside)
     if (id === 'expected') { navTo('people'); setPeoplePreset('expected'); return; }   // People -> Expected payments
     if (id === 'report') { navTo('analytics'); setAnalyticsPreset('report'); return; } // Analytics -> Monthly report
-    Alert.alert('Record a transaction', 'Is this money you received or money you spent?', [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Income', onPress: () => openForm('income') },
-      { text: 'Expense', onPress: () => openForm('expense') },
-    ], { cancelable: true });
+    openSplitFriends();
   };
 
   if (!themeReady) return null; // a few ms: avoids drawing the default theme before the saved one is known
@@ -740,7 +737,7 @@ function AppInner({ onReady, settled }: { onReady: () => void; settled: boolean 
       <Animated.View style={{ opacity: enter.interpolate({ inputRange: [0, 1], outputRange: [0.55, 1] }), transform: [{ translateX: enter.interpolate({ inputRange: [0, 1], outputRange: [slideDir.current * TAB_ENTER.offsetDp, 0] }) }] }}>
       {visited.has('home') && <KeepAlive active={tab === 'home'}><HomeScreen scope={scope} onOpen={setOpenTx} transactions={transactions} cashFlow={cashFlow} health={ledgerHealth} onReview={() => setShowReview(true)} colors={colors} dark={dark} onAddExpense={() => openForm('expense')} onViewAll={() => navTo('transactions')} onAnalytics={() => navTo('analytics')}
         onTransactions={(type) => { navTo('transactions'); setTxPreset(type); }} onQuickAccess={(id) => quickAccess(id)}
-          dataTick={dataTick} onSplitDues={() => { navTo('people'); setPeoplePreset('people'); }} /></KeepAlive>}
+          dataTick={dataTick} onSplitDues={openSplitFriends} /></KeepAlive>}
       {visited.has('transactions') && <KeepAlive active={tab === 'transactions'}><TransactionsView scope={scope} key={`${drillCategory ?? 'all'}-${txPreset}`} transactions={transactions} categories={catViews} colors={colors} loading={txLoading} online={online} onOpen={setOpenTx} onAdd={() => openForm('expense')} initialCategory={drillCategory} initialType={txPreset} /></KeepAlive>}
       {visited.has('analytics') && <KeepAlive active={tab === 'analytics'}><AnalyticsView key={analyticsPreset} scope={scope} colors={colors} refreshKey={dataTick} initialSection={analyticsPreset} onDrill={(c) => { setDrillCategory(c); changeTab('transactions'); }} /></KeepAlive>}
       {visited.has('budgets') && <KeepAlive active={tab === 'budgets'}><BudgetsView scope={scope} categories={catViews} colors={colors} refreshKey={dataTick} /></KeepAlive>}
@@ -832,6 +829,7 @@ function HomeScreen({ scope, onOpen, transactions, cashFlow, health, onReview, c
   const onOpenList = useStableCallback(() => onTransactions('all'));
   const onReviewStable = useStableCallback(onReview);
   const onQuickAccessStable = useStableCallback(onQuickAccess);
+  const dues = useSplitDues(scope, dataTick);
   const byId = useMemo(() => new Map(transactions.map((t) => [t.id, t])), [transactions]);
   const renderTransaction = useCallback((id: string) => {
     const item = byId.get(id);
@@ -839,9 +837,9 @@ function HomeScreen({ scope, onOpen, transactions, cashFlow, health, onReview, c
   }, [byId, colors, onOpen]);
   return <>
     <RecordedBalanceCard balancePaise={cashFlow.balancePaise} colors={colors} dark={dark} />
-    <MonthlySummary cashFlow={cashFlow} colors={colors} onIncome={onIncome} onExpenses={onExpenses} />
+    <MonthlySummary cashFlow={cashFlow} colors={colors} onIncome={onIncome} onExpenses={onExpenses} owedBackPaise={dues.totals.owed} onOwedBack={onSplitDues} />
     <QuickAccessSection colors={colors} onAction={onQuickAccessStable} />
-    <SplitDuesCard scope={scope} colors={colors} refreshKey={dataTick} onOpen={onSplitDues} />
+    <SplitDuesCard dues={dues} colors={colors} onOpen={onSplitDues} />
     <TodayActivityCard health={health} colors={colors} dark={dark} onReview={onReviewStable} onOpenList={onOpenList} />
     <SectionHeader title="Spending overview" action="Analytics" onPress={onAnalytics} colors={colors} />
     <SpendingOverview scope={scope} refreshKey={transactions} colors={colors} transactions={transactions} renderTransaction={renderTransaction} />

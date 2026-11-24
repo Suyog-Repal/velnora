@@ -1,11 +1,11 @@
-import { useEffect, useState } from 'react';
-import { Alert, Image, Text, View } from 'react-native';
+import { useEffect, useRef, useState } from 'react';
+import { Alert, Animated, Image, Pressable, Text, View } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
-import { palette, radius } from '../../theme';
+import { palette, radius, tint } from '../../theme';
+import { Check, Pencil } from '../../icons';
 import { Button, Input, Labeled, Sheet, type Colors } from '../ui/common';
 import { hapticSuccess } from '../ui/haptics';
-import { PopView } from '../ui/motion';
-import { showToast } from '../ui/Toast';
+import { MOTION, PopView, useReduceMotion } from '../ui/motion';
 import { getServiceDb } from '../services/transactionService';
 import { SplitError } from '../services/splitMath';
 import { getPaymentDetails, removePaymentQr, replacePaymentQr, savePaymentDetails, type PaymentDetails } from '../services/paymentDetails';
@@ -15,15 +15,49 @@ import { expoQrFiles } from '../services/paymentExpo';
  * Profile > Payment details. The owner's UPI ID, the name shown on the payment link and (optionally) a picture of their own
  * GPay / PhonePe / Paytm QR. Everything stays on this device: it is never uploaded, never synced and never logged.
  */
+/** A green check that springs in (scale + fade, native driver). With reduce-motion on it simply appears. */
+function SavedCheck({ colors }: { colors: Colors }) {
+  const reduce = useReduceMotion();
+  const v = useRef(new Animated.Value(reduce ? 1 : 0)).current;
+  useEffect(() => {
+    if (reduce) { v.setValue(1); return; }
+    const anim = Animated.spring(v, { toValue: 1, stiffness: 260, damping: 14, mass: 1, useNativeDriver: true });
+    anim.start();
+    return () => anim.stop();
+  }, [v, reduce]);
+  return <View style={{ alignItems: 'center', paddingVertical: 28 }} accessible accessibilityLiveRegion="polite" accessibilityLabel="Payment details saved on this device">
+    <View style={{ width: 84, height: 84, alignItems: 'center', justifyContent: 'center' }}>
+      <Animated.View pointerEvents="none" style={{ position: 'absolute', width: 64, height: 64, borderRadius: 32, backgroundColor: tint(palette.emerald, 0.25), opacity: v.interpolate({ inputRange: [0, 0.6, 1], outputRange: [0, 0.9, 0] }), transform: [{ scale: v.interpolate({ inputRange: [0, 1], outputRange: [0.6, 1.5] }) }] }} />
+      <Animated.View style={{ width: 64, height: 64, borderRadius: 32, backgroundColor: palette.emerald, alignItems: 'center', justifyContent: 'center', opacity: v.interpolate({ inputRange: [0, 0.4], outputRange: [0, 1], extrapolate: 'clamp' }), transform: [{ scale: v.interpolate({ inputRange: [0, 1], outputRange: [0.4, 1] }) }] }}>
+        <Check size={32} color="#FFFFFF" strokeWidth={3} />
+      </Animated.View>
+    </View>
+    <Text style={{ color: colors.text, fontWeight: '700', fontSize: 16, marginTop: 10 }}>Saved on this device</Text>
+  </View>;
+}
+
+function DetailRow({ label, value, colors }: { label: string; value: string; colors: Colors }) {
+  return <View style={{ marginBottom: 14 }}>
+    <Text style={{ color: colors.muted, fontSize: 11, fontWeight: '700', letterSpacing: 0.6 }}>{label}</Text>
+    <Text style={{ color: colors.text, fontSize: 16, marginTop: 4 }} selectable>{value}</Text>
+  </View>;
+}
+
 export function PaymentDetailsSheet({ visible, onClose, scope, colors }: { visible: boolean; onClose: () => void; scope: string | null; colors: Colors }) {
   const [details, setDetails] = useState<PaymentDetails>({ upiId: null, displayName: null, qrPath: null });
   const [upi, setUpi] = useState(''); const [name, setName] = useState('');
   const [error, setError] = useState(''); const [note, setNote] = useState(''); const [busy, setBusy] = useState(false); const [pop, setPop] = useState(0);
+  // What is on screen: the read-only summary once something is saved, the form to add or change it, or the brief "saved" confirmation.
+  const [mode, setMode] = useState<'view' | 'edit'>('edit'); const [celebrate, setCelebrate] = useState(false);
+  const reduce = useReduceMotion();
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
 
   useEffect(() => {
     if (!visible) return;
-    setError(''); setNote('');
-    void getPaymentDetails(getServiceDb(), scope).then((d) => { setDetails(d); setUpi(d.upiId ?? ''); setName(d.displayName ?? ''); }).catch(() => setError('Could not read your payment details.'));
+    setError(''); setNote(''); setCelebrate(false);
+    if (timer.current) { clearTimeout(timer.current); timer.current = null; }
+    void getPaymentDetails(getServiceDb(), scope).then((d) => { setDetails(d); setUpi(d.upiId ?? ''); setName(d.displayName ?? ''); setMode(d.upiId || d.qrPath ? 'view' : 'edit'); }).catch(() => setError('Could not read your payment details.'));
   }, [visible, scope]);
 
   const save = async () => {
@@ -31,7 +65,11 @@ export function PaymentDetailsSheet({ visible, onClose, scope, colors }: { visib
     try {
       const d = await savePaymentDetails(getServiceDb(), scope, { upiId: upi, displayName: name });
       setDetails(d); setUpi(d.upiId ?? ''); setName(d.displayName ?? '');
-      setPop((n) => n + 1); hapticSuccess(); showToast('Payment details saved on this device.', 'success', 'payment-saved');
+      setPop((n) => n + 1); hapticSuccess();
+      // A green check, then the read-only summary (no toast: the check is the confirmation).
+      setCelebrate(true);
+      if (timer.current) clearTimeout(timer.current);
+      timer.current = setTimeout(() => { timer.current = null; setCelebrate(false); setMode('view'); }, reduce ? 700 : MOTION.base * 5);
     } catch (e) { setError(e instanceof SplitError || e instanceof Error ? e.message : 'Could not save.'); }
     finally { setBusy(false); }
   };
@@ -54,10 +92,28 @@ export function PaymentDetailsSheet({ visible, onClose, scope, colors }: { visib
     { text: 'Remove', style: 'destructive', onPress: () => { void removePaymentQr(getServiceDb(), scope, expoQrFiles).then(() => setDetails((d) => ({ ...d, qrPath: null }))).catch(() => setError('Could not remove the picture.')); } },
   ]);
 
-  const dirty = (upi.trim() || '') !== (details.upiId ?? '') || (name.trim() || '') !== (details.displayName ?? '');
+  const startEdit = () => { setUpi(details.upiId ?? ''); setName(details.displayName ?? ''); setError(''); setNote(''); setMode('edit'); };
+  if (celebrate) return <Sheet visible={visible} onClose={onClose} title="Payment details" colors={colors}><SavedCheck colors={colors} /></Sheet>;
+  if (mode === 'view') return <Sheet visible={visible} onClose={onClose} title="Payment details" colors={colors}>
+    <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 14 }}>
+      <Text style={{ color: colors.muted, flex: 1 }}>Saved on this device. Nothing here is uploaded or synced.</Text>
+      <Pressable onPress={startEdit} accessibilityRole="button" accessibilityLabel="Edit payment details" hitSlop={8}
+        style={({ pressed }) => ({ width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center', backgroundColor: pressed ? tint(palette.emerald, 0.2) : tint(palette.emerald, 0.12) })}>
+        <Pencil size={18} color={palette.accentText} />
+      </Pressable>
+    </View>
+    {details.upiId ? <DetailRow label="YOUR UPI ID" value={details.upiId} colors={colors} /> : null}
+    {details.displayName ? <DetailRow label="NAME ON THE PAYMENT LINK" value={details.displayName} colors={colors} /> : null}
+    {details.qrPath ? <>
+      <Text style={{ color: colors.muted, fontSize: 11, fontWeight: '700', letterSpacing: 0.6, marginBottom: 8 }}>YOUR PAYMENT QR</Text>
+      <View style={{ alignSelf: 'flex-start', borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.card, padding: 8 }}>
+        <Image source={{ uri: details.qrPath }} style={{ width: 96, height: 96, backgroundColor: '#FFFFFF' }} resizeMode="contain" accessibilityLabel="Your saved payment QR" />
+      </View>
+    </> : null}
+  </Sheet>;
   return <Sheet visible={visible} onClose={onClose} title="Payment details" colors={colors} footer={<>
     {error ? <Text style={{ color: palette.expenseText, marginBottom: 8 }} accessibilityLiveRegion="polite">{error}</Text> : null}
-    <PopView popKey={pop}><Button title={dirty ? 'Save details' : 'Saved'} onPress={() => void save()} busy={busy} /></PopView>
+    <PopView popKey={pop}><Button title="Save" onPress={() => void save()} busy={busy} /></PopView>
   </>}>
     <Text style={{ color: colors.muted, marginBottom: 14 }}>Used only to build the payment requests you send to friends. They stay on this device: nothing here is uploaded or synced.</Text>
     <Labeled label="YOUR UPI ID" colors={colors} hint="Like name@bank. With it, Velnora can add the exact amount to a QR and a payment link.">
