@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { Pressable, Text, View } from 'react-native';
 import { palette, space } from '../../theme';
+import { Ellipsis } from '../../icons';
 import { Button, Input, Sheet, type Colors } from '../ui/common';
 import { ReminderOptions, sendReminderOnWhatsApp } from './Reminder';
 import { getServiceDb } from '../services/transactionService';
@@ -54,13 +55,13 @@ export function useExpectedReminder(item: ExpectedPayment | null, scope: string 
   const errorText = error ? <Text style={{ color: palette.expenseText, marginBottom: space.sm }} accessibilityLiveRegion="polite">{error}</Text> : null;
 
   const actions = <View style={{ marginBottom: space.lg }}>
-    <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
-      <View style={{ flex: 1 }}><Button title="Remind on WhatsApp" onPress={send} disabled={!saved} /></View>
-      <Pressable onPress={() => { setError(''); setMore(true); }} disabled={!saved} accessibilityRole="button" accessibilityLabel="More reminder options" hitSlop={8} style={{ minHeight: 44, justifyContent: 'center', marginTop: space.sm }}>
-        <Text style={{ color: palette.accentText, fontWeight: '700' }}>More options</Text>
-      </Pressable>
-    </View>
-    {saved && note ? <Text style={{ color: colors.muted, fontSize: 12, marginTop: 6 }}>{note}</Text> : null}
+    <Button title="Remind on WhatsApp" onPress={send} disabled={!saved} />
+    <Pressable onPress={() => { setError(''); setMore(true); }} disabled={!saved} accessibilityRole="button" accessibilityLabel="More reminder options"
+      style={({ pressed }) => ({ alignSelf: 'center', flexDirection: 'row', alignItems: 'center', gap: space.xs + 2, minHeight: 44, paddingHorizontal: space.md, opacity: !saved ? 0.5 : pressed ? 0.7 : 1 })}>
+      <Ellipsis size={16} color={palette.accentText} />
+      <Text style={{ color: palette.accentText, fontWeight: '700' }}>More options</Text>
+    </Pressable>
+    {saved && note ? <Text style={{ color: colors.muted, fontSize: 12, textAlign: 'center' }}>{note}</Text> : null}
     {!more ? errorText : null}
   </View>;
 

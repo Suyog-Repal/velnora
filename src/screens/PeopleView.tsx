@@ -16,6 +16,7 @@ import {
 import { getServiceDb, syncPendingTransactions } from '../services/transactionService';
 import { SplitPeople } from './SplitPeople';
 import { useExpectedReminder } from './ExpectedReminder';
+import { payables } from '../services/expectedPayables';
 import type { SplitGroup } from '../services/splitService';
 import { normalizeMerchantKey } from '../services/merchantAliasService';
 import type { CategoryView } from '../services/categoryService';
@@ -52,13 +53,15 @@ const PersonRow = memo(function PersonRow({ p, last, colors, onOpen }: { p: Pers
   </Tap>;
 });
 
-export function PeopleView({ transactions, categories, session, colors, refreshKey, onOpenTx, onChanged, onAddTransaction, onAddSplit, initialTab = 'people' }: {
+export function PeopleView({ transactions, categories, session, colors, refreshKey, onOpenTx, onChanged, onAddTransaction, onAddSplit, initialTab = 'people', initialFilter, initialExpectedId }: {
   transactions: TransactionEntity[]; categories: CategoryView[]; session: Session | null; colors: Colors; refreshKey: number;
   onOpenTx: (tx: TransactionEntity) => void; onChanged: () => void; onAddTransaction: () => void;
   /** Opens the Add sheet with the split switched on (and the group chosen, if one is given). */
   onAddSplit: (group: SplitGroup | null) => void;
   /** Home "Expected Payment" shortcut opens the existing Expected section directly. */
   initialTab?: 'people' | 'expected';
+  /** Home "You'll pay" card: Expected opens showing what you will pay, with the tapped item's sheet open. */
+  initialFilter?: 'pay'; initialExpectedId?: string;
 }) {
   const scope = session?.user.id ?? null;
   // Friends and Groups are the split ledger; Payees is the earlier list of names found on transactions; Expected is unchanged.
@@ -67,7 +70,9 @@ export function PeopleView({ transactions, categories, session, colors, refreshK
   const [personKey, setPersonKey] = useState<string | null>(null);
   const [query, setQuery] = useState('');
   const [form, setForm] = useState<{ edit?: ExpectedPayment; person?: string; direction?: ExpectedDirection } | null>(null);
-  const [detailId, setDetailId] = useState<string | null>(null);
+  const [detailId, setDetailId] = useState<string | null>(initialExpectedId ?? null);
+  // Applies to the first look only: after switching sub-tabs, Expected starts on Pending as usual.
+  const [startFilter, setStartFilter] = useState(initialFilter);
 
   const load = useCallback(async () => { setExpected(await listExpected(getServiceDb(), scope)); }, [scope]);
   useEffect(() => { void load(); }, [load, refreshKey]);
@@ -84,7 +89,7 @@ export function PeopleView({ transactions, categories, session, colors, refreshK
   const summary = useMemo(() => summarizeExpected(expected), [expected]);
 
   return <View>
-    <View style={{ marginBottom: 14 }}><Segmented fitContent colors={colors} value={tab} onChange={setTab} badges={{ expected: expectedBadge(summary) }} options={[['friends', 'Friends'], ['groups', 'Groups'], ['payees', 'Payees'], ['expected', 'Expected']] as const} /></View>
+    <View style={{ marginBottom: 14 }}><Segmented fitContent colors={colors} value={tab} onChange={(next) => { setStartFilter(undefined); setTab(next); }} badges={{ expected: expectedBadge(summary) }} options={[['friends', 'Friends'], ['groups', 'Groups'], ['payees', 'Payees'], ['expected', 'Expected']] as const} /></View>
 
     {tab === 'friends' || tab === 'groups' ? <SplitPeople tab={tab} scope={scope} colors={colors} refreshKey={refreshKey} onChanged={onChanged} expected={expected} onGoExpected={() => setTab('expected')}
       onOpenExpected={(e) => { setTab('expected'); setDetailId(e.id); }} onAddSplit={onAddSplit} /> : null}
@@ -102,7 +107,7 @@ export function PeopleView({ transactions, categories, session, colors, refreshK
           {shown.slice(0, limit).map((p, i) => <PersonRow key={p.key} p={p} last={i === shown.length - 1} colors={colors} onOpen={setPersonKey} />)}
         </View>}
     </View> : null}
-    {tab === 'expected' ? <ExpectedTab expected={expected} summary={summary} colors={colors} onAdd={() => setForm({})} onOpen={(e) => setDetailId(e.id)} /> : null}
+    {tab === 'expected' ? <ExpectedTab expected={expected} summary={summary} initialFilter={startFilter} colors={colors} onAdd={() => setForm({})} onOpen={(e) => setDetailId(e.id)} /> : null}
 
     <PersonSheet person={person} transactions={transactions} categories={categories} expected={expected} colors={colors} onClose={() => setPersonKey(null)} onOpenTx={onOpenTx}
       onOpenExpected={(e) => setDetailId(e.id)} onAddExpected={(name) => setForm({ person: name })} />
@@ -111,9 +116,10 @@ export function PeopleView({ transactions, categories, session, colors, refreshK
   </View>;
 }
 
-function ExpectedTab({ expected, summary, colors, onAdd, onOpen }: { expected: ExpectedPayment[]; summary: ReturnType<typeof summarizeExpected>; colors: Colors; onAdd: () => void; onOpen: (e: ExpectedPayment) => void }) {
-  const [filter, setFilter] = useState<'pending' | 'overdue' | 'settled' | 'all'>('pending');
-  const items = expected.filter((e) => filter === 'all' || (filter === 'pending' && e.status === 'pending') || (filter === 'settled' && e.status === 'settled') || (filter === 'overdue' && isOverdue(e)));
+function ExpectedTab({ expected, summary, initialFilter, colors, onAdd, onOpen }: { expected: ExpectedPayment[]; summary: ReturnType<typeof summarizeExpected>; initialFilter?: 'pay'; colors: Colors; onAdd: () => void; onOpen: (e: ExpectedPayment) => void }) {
+  const [filter, setFilter] = useState<'pending' | 'pay' | 'overdue' | 'settled' | 'all'>(initialFilter ?? 'pending');
+  // "To pay" lists in the same order as the Home card: overdue first, then by due date.
+  const items = filter === 'pay' ? payables(expected) : expected.filter((e) => filter === 'all' || (filter === 'pending' && e.status === 'pending') || (filter === 'settled' && e.status === 'settled') || (filter === 'overdue' && isOverdue(e)));
   return <View>
     <Reveal index={0}><View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginBottom: 12 }}>
       <Tile label="To receive" value={formatPaise(summary.receive.outstandingPaise)} sub={`${summary.receive.count} pending · ${summary.receive.people} ${summary.receive.people === 1 ? 'person' : 'people'}`} color={palette.accentText} colors={colors} />
@@ -121,12 +127,13 @@ function ExpectedTab({ expected, summary, colors, onAdd, onOpen }: { expected: E
     </View></Reveal>
     <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 10 }}>
       <Chip label="Pending" active={filter === 'pending'} onPress={() => setFilter('pending')} colors={colors} />
+      <Chip label="To pay" active={filter === 'pay'} onPress={() => setFilter('pay')} colors={colors} color={palette.danger} />
       <Chip label={`Overdue${summary.overdueCount ? ` (${summary.overdueCount})` : ''}`} active={filter === 'overdue'} onPress={() => setFilter('overdue')} colors={colors} color={palette.danger} />
       <Chip label="Settled" active={filter === 'settled'} onPress={() => setFilter('settled')} colors={colors} />
       <Chip label="All" active={filter === 'all'} onPress={() => setFilter('all')} colors={colors} />
     </ScrollView>
     <Button title="Add expected payment" onPress={onAdd} />
-    {items.length === 0 ? <EmptyBlock title={filter === 'settled' ? 'Nothing settled yet' : filter === 'overdue' ? 'Nothing overdue' : 'No expected payments'} text="Track money someone will pay you (or that you will pay), with a reason. It settles automatically when the matching payment arrives." colors={colors} />
+    {items.length === 0 ? <EmptyBlock title={filter === 'settled' ? 'Nothing settled yet' : filter === 'overdue' ? 'Nothing overdue' : filter === 'pay' ? 'Nothing to pay' : 'No expected payments'} text="Track money someone will pay you (or that you will pay), with a reason. It settles automatically when the matching payment arrives." colors={colors} />
       : items.map((e, i) => {
         const over = isOverdue(e); const recv = e.direction === 'receive'; const pct = Math.min(100, Math.floor((e.paid_paise * 100) / e.amount_paise));
         return <Reveal key={e.id} index={Math.min(i, 8) + 1}><Tap onPress={() => onOpen(e)} label={e.person} style={{ backgroundColor: colors.card, borderColor: over ? `${palette.danger}88` : colors.border, borderWidth: 1, borderRadius: 16, padding: 14, marginTop: 10 }}>
