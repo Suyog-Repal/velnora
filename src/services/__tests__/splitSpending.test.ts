@@ -10,10 +10,10 @@ import { runMigrations } from '../../db/migrations.ts';
 import type { IDatabase } from '../../db/types.ts';
 import { categoryBreakdown } from '../analyticsService.ts';
 import { currentMonth, getBudgetProgress, monthRange, saveBudget, spentPaise } from '../budgetService.ts';
-import { getCashFlowSummary, getLedgerHealth } from '../cashFlowService.ts';
+import { getCashFlowSummary, getLedgerHealth, profileCashFigures } from '../cashFlowService.ts';
 import { loadPoints, buildDaily } from '../cashFlowSeries.ts';
 import { buildMonthlyReport, listReportMonths, verifyReport } from '../monthlyReportService.ts';
-import { cashSpentInMonth } from '../ledgerRules.ts';
+import { TransactionRepository } from '../../db/repositories/transactionRepository.ts';
 import { SELF } from '../splitMath.ts';
 import { createContact, createSplitExpense, deleteSplitExpense, recordSettlement } from '../splitService.ts';
 
@@ -28,8 +28,9 @@ async function tx(db: IDatabase, paise: number, category: string, date: Date, di
 
 const db = (() => new NodeSqliteAdapter() as unknown as IDatabase)();
 await runMigrations(db);
-const now = new Date(); const month = currentMonth(now);
-const day = new Date(now.getFullYear(), now.getMonth(), 1, 12, 0, 0);
+// The clock is injected, so "today" and "this month" do not depend on when the test runs.
+const now = new Date(2026, 5, 15, 18, 0, 0); const month = currentMonth(now);
+const day = new Date(2026, 5, 15, 12, 0, 0);
 const a = await createContact(db, null, { name: 'Asha' }); const b = await createContact(db, null, { name: 'Bala' });
 
 await tx(db, 500000, 'Salary', day, 'income');           // income Rs 5000
@@ -40,7 +41,7 @@ await saveBudget(db, null, { category: 'Travel', amountPaise: 100000 });
 const split = (over: object) => ({ title: 'x', category: 'Food & Dining', expenseDate: day.toISOString(), mode: 'equal' as const, ...over });
 
 const before = {
-  cash: await getCashFlowSummary(db, null), spent: await spentPaise(db, null, month, null),
+  cash: await getCashFlowSummary(db, null, now), spent: await spentPaise(db, null, month, null),
 };
 assert.equal(before.spent, 150000); assert.equal(before.cash.monthExpensePaise, 150000);
 
@@ -65,11 +66,9 @@ assert.equal(cash.monthExpensePaise, CASH_SPEND, 'Home monthly expenses = money 
 assert.equal(cash.monthIncomePaise, 500000);
 assert.equal(cash.balancePaise, 500000 - 120000 - 30000, 'cash balance is money that actually left the bank: the full Rs 1200, not the share');
 const health = await getLedgerHealth(db, null, now);
-assert.equal(health.todayExpensePaise, now.getDate() === 1 ? CASH_SPEND : health.todayExpensePaise, 'Home Today Out is cash too');
-// Profile "spent this month" reads the loaded rows with the same rule: it must equal Home's figure
-const rows = await db.getAllAsync<{ amount_paise: number; direction: string; txn_kind: string | null; possible_duplicate_of: string | null; transaction_date: string; deleted_at: string | null }>(
-  `SELECT amount_paise, direction, txn_kind, possible_duplicate_of, transaction_date, deleted_at FROM transactions`);
-assert.equal(cashSpentInMonth(rows as never, now), cash.monthExpensePaise, 'Profile and Home show the same spending');
+assert.equal(health.todayExpensePaise, CASH_SPEND, 'Home Today Out is cash too: the full bill, not my share');
+assert.equal((await getLedgerHealth(db, null, new Date(2026, 5, 16, 9, 0, 0))).todayExpensePaise, 0, 'and only that day counts as today');
+assert.deepEqual(profileCashFigures(cash, health), { spentPaise: CASH_SPEND, transactionCount: 3 }, 'Profile shows Home\'s spending and the transaction total');
 assert.ok(cash.monthExpensePaise > EXPECT_SPEND, 'cash is larger than my share while friends owe me');
 assert.equal(cash.monthExpensePaise - EXPECT_SPEND, 120000 - 40000 - 25000, 'the gap is what friends owe back, less the trip share a friend paid');
 
@@ -106,5 +105,33 @@ assert.equal(await spentPaise(db, null, month, 'Shopping'), 0);
 const e = (await db.getFirstAsync<{ id: string }>(`SELECT id FROM split_expenses WHERE transaction_id = ?`, dinner))!;
 await deleteSplitExpense(db, null, e.id);
 assert.equal(await spentPaise(db, null, month, 'Food & Dining'), 120000);
+
+// More rows than one load returns (getAll stops at 500): Profile's figure and count still equal Home's and the true values.
+{
+  const big = (() => new NodeSqliteAdapter() as unknown as IDatabase)();
+  await runMigrations(big);
+  const friend = await createContact(big, null, { name: 'Asha' });
+  const MANY = 620;
+  for (let i = 0; i < MANY; i += 1) await tx(big, 1000, 'Groceries', new Date(2026, 5, 1 + (i % 15), 12, 0, 0));
+  const bill = await tx(big, 90000, 'Food & Dining', day);
+  await createSplitExpense(big, null, split({ transactionId: bill, totalPaise: 90000, participants: [{ party: SELF }, { party: friend.id }], payers: [{ party: SELF, paidPaise: 90000 }] }));
+  await tx(big, 7000, 'Groceries', new Date(2026, 4, 20, 12, 0, 0)); // last month: counted as a transaction, not as this month's spending
+  const gone = await tx(big, 5000, 'Groceries', day);
+  await big.runAsync('UPDATE transactions SET deleted_at = ? WHERE id = ?', now.toISOString(), gone);
+  const theirs = await tx(big, 4000, 'Groceries', day);
+  await big.runAsync(`UPDATE transactions SET user_id = 'someone-else' WHERE id = ?`, theirs);
+
+  const TRUE_COUNT = MANY + 2; // the split bill and last month's row; not the deleted one or the other account's
+  const TRUE_SPEND = MANY * 1000 + 90000;
+  assert.equal((await new TransactionRepository(big).getAll({ userId: null })).length, 500, 'the cap really is in play');
+  const home = await getCashFlowSummary(big, null, now);
+  const homeHealth = await getLedgerHealth(big, null, now);
+  const profile = profileCashFigures(home, homeHealth);
+  assert.equal(home.monthExpensePaise, TRUE_SPEND);
+  assert.equal(profile.spentPaise, home.monthExpensePaise, 'Profile spending equals Home');
+  assert.equal(profile.transactionCount, homeHealth.totalCount, 'Profile count equals Home');
+  assert.equal(profile.transactionCount, TRUE_COUNT);
+  assert.equal(await spentPaise(big, null, month, null), TRUE_SPEND - 45000, 'budgets still count only my share of the split');
+}
 
 console.log('split spending tests passed');

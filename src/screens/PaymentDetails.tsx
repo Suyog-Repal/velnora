@@ -61,6 +61,8 @@ export function PaymentDetailsSheet({ visible, onClose, scope, colors }: { visib
   }, [visible, scope]);
 
   const save = async () => {
+    // Nothing to keep: say so and stay on the form, never show the "saved" state.
+    if (!upi.trim() && !name.trim() && !details.qrPath) { setError('Add a UPI ID or a QR to save'); return; }
     setBusy(true); setError('');
     try {
       const d = await savePaymentDetails(getServiceDb(), scope, { upiId: upi, displayName: name });

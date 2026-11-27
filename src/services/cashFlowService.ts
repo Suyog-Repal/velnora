@@ -96,6 +96,14 @@ export async function getCashFlowSummary(db: IDatabase, scope: Scope, now: Date 
   return summarize(Number(row?.income ?? 0), Number(spend?.expense ?? 0), Number(row?.balance ?? 0), Number(row?.refund ?? 0));
 }
 
+/**
+ * Profile's "Spent this month" and "Transactions". They are Home's own SQL results, not a second calculation, so the two screens
+ * cannot disagree and neither depends on how many rows the app has loaded.
+ */
+export function profileCashFigures(cashFlow: CashFlowSummary, health: LedgerHealth): { spentPaise: number; transactionCount: number } {
+  return { spentPaise: cashFlow.monthExpensePaise, transactionCount: health.totalCount };
+}
+
 export function summarize(monthIncomePaise: number, monthExpensePaise: number, balancePaise: number, monthRefundPaise = 0): CashFlowSummary {
   return {
     monthIncomePaise,

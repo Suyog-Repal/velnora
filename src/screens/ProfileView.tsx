@@ -7,7 +7,7 @@ import { readableOn } from '../ui/common';
 import { Group, NavRow, Tap } from '../ui/rows';
 import { PaymentDetailsSheet } from './PaymentDetails';
 import { useReduceMotion } from '../ui/motion';
-import { cashSpentInMonth } from '../services/ledgerRules';
+import { profileCashFigures, type CashFlowSummary, type LedgerHealth } from '../services/cashFlowService';
 import type { Session, TransactionEntity } from '../db/types';
 
 // Tap and Group now live with the shared rows; re-exported so existing imports keep working.
@@ -69,23 +69,23 @@ export function AppearanceCard({ mode, setMode, accent, setAccent, colors }: { m
   </Group>;
 }
 
-export function profileStats(transactions: TransactionEntity[], now = new Date()) {
-  let pending = 0; let failed = 0; let count = 0;
+/** Sync status of the loaded rows. Money and the transaction total are not worked out here: see profileCashFigures. */
+export function profileStats(transactions: TransactionEntity[]) {
+  let pending = 0; let failed = 0;
   for (const t of transactions) {
     if (t.deleted_at) continue;
-    count += 1;
     if (t.sync_status !== 'synced' && t.user_id) pending += 1;
     if (t.sync_status === 'failed' && t.user_id) failed += 1; // rejected by the server: also counted in `pending`
   }
-  // Cash view (the full amounts that left the account): the same rule Home uses (cashSpentInMonth).
-  return { count, spentPaise: cashSpentInMonth(transactions, now), pending, failed };
+  return { pending, failed };
 }
 
-export function ProfileView({ session, displayName, onEditName, colors, transactions, online, onOpenSettings, onOpenPrivacy, onOpenCategories, onOpenAliases, onOpenReview, onOpenAccounts, onOpenImport, onOpenImportPdf, reviewCount, onSignIn, onCreate, onLogout }: {
+export function ProfileView({ session, displayName, onEditName, colors, transactions, cashFlow, health, online, onOpenSettings, onOpenPrivacy, onOpenCategories, onOpenAliases, onOpenReview, onOpenAccounts, onOpenImport, onOpenImportPdf, reviewCount, onSignIn, onCreate, onLogout }: {
   session: Session | null; displayName: string | null; onEditName: () => void; colors: Colors;
-  transactions: TransactionEntity[]; online: boolean; onOpenSettings: () => void; onOpenPrivacy: () => void; onOpenCategories: () => void; onOpenAliases: () => void; onOpenReview: () => void; onOpenAccounts: () => void; onOpenImport: () => void; onOpenImportPdf: () => void; reviewCount: number; onSignIn: () => void; onCreate: () => void; onLogout: () => void;
+  transactions: TransactionEntity[]; cashFlow: CashFlowSummary; health: LedgerHealth; online: boolean; onOpenSettings: () => void; onOpenPrivacy: () => void; onOpenCategories: () => void; onOpenAliases: () => void; onOpenReview: () => void; onOpenAccounts: () => void; onOpenImport: () => void; onOpenImportPdf: () => void; reviewCount: number; onSignIn: () => void; onCreate: () => void; onLogout: () => void;
 }) {
   const stats = profileStats(transactions);
+  const cash = profileCashFigures(cashFlow, health);
   const status = !session ? 'Stored on this device only' : !online ? 'Offline' : stats.pending > 0 ? `${stats.pending} waiting to sync${stats.failed > 0 ? ` (${stats.failed} rejected by server)` : ''}` : 'All synced';
   const avatarPulse = useRef(new Animated.Value(0)).current;
   useEffect(() => { Animated.timing(avatarPulse, { toValue: 1, duration: 700, delay: 120, easing: Easing.out(Easing.back(1.6)), useNativeDriver: true }).start(); }, [avatarPulse]);
@@ -116,8 +116,8 @@ export function ProfileView({ session, displayName, onEditName, colors, transact
           <Text style={{ color: '#FFFFFF', fontSize: 12, fontWeight: '700', marginLeft: 6 }}>{status}</Text>
         </View>
         <View style={{ flexDirection: 'row', gap: 10, marginTop: 16 }}>
-          <Stat label="TRANSACTIONS" value={String(stats.count)} colors={colors} />
-          <Stat label="SPENT THIS MONTH" value={formatPaise(stats.spentPaise)} colors={colors} />
+          <Stat label="TRANSACTIONS" value={String(cash.transactionCount)} colors={colors} />
+          <Stat label="SPENT THIS MONTH" value={formatPaise(cash.spentPaise)} colors={colors} />
         </View>
       </View>
     </Reveal>
