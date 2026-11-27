@@ -10,11 +10,12 @@ import { TransactionCard } from './TransactionsView';
 import { useProgressiveCount } from '../ui/perf';
 import { aggregatePeople, personTransactions, totalsOf, type PersonAggregate } from '../services/peopleService';
 import {
-  createExpected, deleteExpected, isOverdue, listExpected, markSettled, outstandingPaise, recordPayment, recordPaymentWithTransaction, summarizeExpected, updateExpected,
+  createExpected, deleteExpected, expectedBadge, isOverdue, listExpected, markSettled, outstandingPaise, recordPayment, recordPaymentWithTransaction, summarizeExpected, updateExpected,
   type ExpectedDirection, type ExpectedPayment,
 } from '../services/expectedPaymentService';
 import { getServiceDb, syncPendingTransactions } from '../services/transactionService';
 import { SplitPeople } from './SplitPeople';
+import { useExpectedReminder } from './ExpectedReminder';
 import type { SplitGroup } from '../services/splitService';
 import { normalizeMerchantKey } from '../services/merchantAliasService';
 import type { CategoryView } from '../services/categoryService';
@@ -83,7 +84,7 @@ export function PeopleView({ transactions, categories, session, colors, refreshK
   const summary = useMemo(() => summarizeExpected(expected), [expected]);
 
   return <View>
-    <View style={{ marginBottom: 14 }}><Segmented colors={colors} value={tab} onChange={setTab} options={[['friends', 'Friends'], ['groups', 'Groups'], ['payees', 'Payees'], ['expected', `Expected${summary.receive.count + summary.pay.count ? ` (${summary.receive.count + summary.pay.count})` : ''}`]] as const} /></View>
+    <View style={{ marginBottom: 14 }}><Segmented fitContent colors={colors} value={tab} onChange={setTab} badges={{ expected: expectedBadge(summary) }} options={[['friends', 'Friends'], ['groups', 'Groups'], ['payees', 'Payees'], ['expected', 'Expected']] as const} /></View>
 
     {tab === 'friends' || tab === 'groups' ? <SplitPeople tab={tab} scope={scope} colors={colors} refreshKey={refreshKey} onChanged={onChanged} expected={expected} onGoExpected={() => setTab('expected')}
       onOpenExpected={(e) => { setTab('expected'); setDetailId(e.id); }} onAddSplit={onAddSplit} /> : null}
@@ -249,6 +250,7 @@ function ExpectedForm({ state, people, scope, colors, onClose, onSaved }: {
 function ExpectedDetail({ item, scope, colors, onClose, onChanged, onEdit }: { item: ExpectedPayment | null; scope: string | null; colors: Colors; onClose: () => void; onChanged: () => Promise<void>; onEdit: (e: ExpectedPayment) => void }) {
   const [amount, setAmount] = useState(''); const [asTx, setAsTx] = useState(true); const [error, setError] = useState(''); const [busy, setBusy] = useState(false);
   useEffect(() => { if (item) { setAmount(String(outstandingPaise(item) / 100)); setError(''); setAsTx(true); } }, [item?.id, item?.paid_paise]); // eslint-disable-line react-hooks/exhaustive-deps
+  const reminder = useExpectedReminder(item, scope, colors);
   if (!item) return null;
   const recv = item.direction === 'receive'; const left = outstandingPaise(item); const over = isOverdue(item);
   const run = async (fn: () => Promise<unknown>) => { setError(''); setBusy(true); try { await fn(); await onChanged(); } catch (e) { setError(e instanceof Error ? e.message : 'Something went wrong.'); } finally { setBusy(false); } };
@@ -257,18 +259,19 @@ function ExpectedDetail({ item, scope, colors, onClose, onChanged, onEdit }: { i
     const paise = Math.round(rupees * 100); const db = getServiceDb();
     if (asTx) await recordPaymentWithTransaction(db, scope, item.id, { amountPaise: paise }); else await recordPayment(db, scope, item.id, { amountPaise: paise });
   });
-  return <Sheet visible onClose={onClose} title={item.person} colors={colors}>
+  return <><Sheet visible onClose={onClose} title={item.person} colors={colors}>
     <Text style={{ ...typo.amountLg, fontSize: 30, color: item.status === 'settled' ? colors.muted : recv ? palette.accentText : palette.expenseText, fontVariant: ['tabular-nums'] }}>{formatPaise(item.status === 'settled' ? item.amount_paise : left)}</Text>
     <Text style={{ color: colors.muted, marginBottom: 12 }}>{item.status === 'settled' ? `Settled${item.settled_at ? ` on ${fmtDate(item.settled_at)}` : ''}` : recv ? `still to receive from ${item.person}` : `still to pay to ${item.person}`}</Text>
     {item.note ? <View style={{ backgroundColor: colors.card, borderColor: colors.border, borderWidth: 1, borderRadius: 14, padding: 12, marginBottom: 12 }}><Text style={{ color: colors.muted, fontSize: 12, fontWeight: '600' }}>REASON</Text><Text style={{ color: colors.text, marginTop: 4 }}>{item.note}</Text></View> : null}
     <Text style={{ color: colors.muted, marginBottom: 4, fontVariant: ['tabular-nums'] }}>Total {formatPaise(item.amount_paise)} · paid {formatPaise(item.paid_paise)}</Text>
     <Text style={{ color: over ? palette.expenseText : colors.muted, fontWeight: over ? '700' : '500', marginBottom: 12 }}>{item.due_date ? `${over ? 'Overdue since' : 'Expected by'} ${fmtDue(item.due_date)}` : 'No due date'}</Text>
 
+    {reminder.actions}
     {item.status === 'pending' ? <View style={{ marginBottom: 8 }}>
       <Labeled label={recv ? 'RECORD A PAYMENT RECEIVED' : 'RECORD A PAYMENT MADE'} colors={colors}><Input colors={colors} value={amount} onChangeText={setAmount} keyboardType="decimal-pad" /></Labeled>
       <Pressable onPress={() => setAsTx(!asTx)} accessibilityRole="checkbox" accessibilityState={{ checked: asTx }} style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
         <View style={{ width: 22, height: 22, borderRadius: 6, borderWidth: 2, borderColor: palette.emerald, backgroundColor: asTx ? palette.emerald : 'transparent', alignItems: 'center', justifyContent: 'center', marginRight: 10 }}>{asTx ? <Text style={{ color: readableOn(palette.emerald), fontWeight: '700' }}>✓</Text> : null}</View>
-        <Text style={{ color: colors.text, flex: 1 }}>Also add it as a {recv ? 'income' : 'expense'} transaction</Text></Pressable>
+        <Text style={{ color: colors.text, flex: 1 }}>Also add it as an {recv ? 'income' : 'expense'} transaction</Text></Pressable>
       <Button title="Record payment" onPress={() => void pay()} busy={busy} />
       <Button title="Mark as fully paid" kind="ghost" onPress={() => void run(() => markSettled(getServiceDb(), scope, item.id))} disabled={busy} />
     </View> : null}
@@ -282,6 +285,6 @@ function ExpectedDetail({ item, scope, colors, onClose, onChanged, onEdit }: { i
 
     <Button title="Edit" kind="ghost" onPress={() => onEdit(item)} />
     <Button title="Delete" kind="danger" onPress={() => Alert.alert('Delete this?', 'Linked transactions are not deleted.', [{ text: 'Cancel', style: 'cancel' }, { text: 'Delete', style: 'destructive', onPress: () => { void run(async () => { await deleteExpected(getServiceDb(), scope, item.id); onClose(); }); } }])} />
-  </Sheet>;
+  </Sheet>{reminder.sheet}</>;
 }
 void CategoryIcon;

@@ -162,7 +162,7 @@ export function useKeyboardVisible(): boolean {
  * swipe never conflict. All enter/exit animations (including backdrop) are driven by `rise`
  * and `dragY` so the Modal uses animationType="none".
  */
-export function Sheet({ visible, onClose, title, colors, children, footer, headerAction }: { visible: boolean; onClose: () => void; title: string; colors: Colors; children: ReactNode; footer?: ReactNode; /** Optional button shown left of the close button (e.g. edit). */ headerAction?: ReactNode }) {
+export function Sheet({ visible, onClose, title, colors, children, footer, headerAction, footerGap = space.md }: { visible: boolean; onClose: () => void; title: string; colors: Colors; children: ReactNode; footer?: ReactNode; /** Optional button shown left of the close button (e.g. edit). */ headerAction?: ReactNode; /** Space left under the last item when there is a footer: give a long form more, so its end clears the footer. */ footerGap?: number }) {
   const keyboard = useKeyboardVisible();
   const scrollRef = useRef<ComponentRef<typeof ScrollView>>(null);
   const contentRef = useRef<ComponentRef<typeof View>>(null);
@@ -253,7 +253,7 @@ export function Sheet({ visible, onClose, title, colors, children, footer, heade
           <View style={[ui.grabber, { backgroundColor: colors.border }]} />
           <View style={ui.sheetHeader}><Text style={[ui.sheetTitle, { color: colors.text, flex: 1 }]} numberOfLines={1}>{title}</Text>{headerAction ? <View style={{ marginRight: 10 }}>{headerAction}</View> : null}<Pressable onPress={animatedClose} hitSlop={14} accessibilityRole="button" accessibilityLabel="Close" style={[ui.closeButton, { backgroundColor: colors.card, borderColor: colors.border }]}><X color={colors.muted} size={18} /></Pressable></View>
         </View>
-        <ScrollView ref={scrollRef} style={ui.sheetScroll} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" contentContainerStyle={{ paddingHorizontal: 20, paddingTop: 14, paddingBottom: footer ? 12 : 28 }}>
+        <ScrollView ref={scrollRef} style={ui.sheetScroll} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" contentContainerStyle={{ paddingHorizontal: 20, paddingTop: 14, paddingBottom: footer ? footerGap : 28 }}>
           <View ref={contentRef} collapsable={false}>{children}</View>
         </ScrollView>
         {footer ? <View style={[ui.sheetFooter, { borderTopColor: colors.border, backgroundColor: colors.canvas }]}>{footer}</View> : null}
@@ -291,26 +291,53 @@ export const ui = StyleSheet.create({
   empty: { borderWidth: 1, borderRadius: radius.lg, padding: 24, alignItems: 'center', marginVertical: 8 },
 });
 
-/** Pill-shaped segmented control: one option selected, each option a 40dp-tall tab with an accessible selected state. */
-export function Segmented<T extends string>({ options, value, onChange, colors }: { options: readonly (readonly [T, string])[]; value: T; onChange: (v: T) => void; colors: Colors }) {
-  // The highlight is ONE view that slides between the equal-width segments (transform only, native driver); with reduce-motion it jumps.
+/**
+ * Pill-shaped segmented control: one option selected, each option a 40dp-tall tab with an accessible selected state.
+ *
+ * Segments share the width equally by default. With `fitContent` each is as wide as its label needs (spare width is shared
+ * out) and the row scrolls sideways when they do not all fit, so a label is never cut off at any width or font size.
+ * `badges` puts a dot beside a label; its text is only spoken ("Expected, 1 pending").
+ */
+export function Segmented<T extends string>({ options, value, onChange, colors, fitContent, badges }: {
+  options: readonly (readonly [T, string])[]; value: T; onChange: (v: T) => void; colors: Colors; fitContent?: boolean; badges?: Partial<Record<T, string>>;
+}) {
+  // The highlight is ONE view that slides between the segments (transform only, native driver); with reduce-motion it jumps.
   const reduce = useReduceMotion();
   const [width, setWidth] = useState(0);
+  const [boxes, setBoxes] = useState<Record<string, { x: number; width: number }>>({});
+  const scroller = useRef<ComponentRef<typeof ScrollView>>(null);
   const x = useRef(new Animated.Value(0)).current;
   const placed = useRef(false);
   const index = Math.max(0, options.findIndex(([k]) => k === value));
   const seg = options.length ? Math.max(0, width - 6) / options.length : 0;
+  // Where the highlight goes: measured per segment when they differ in width, otherwise worked out from the equal share.
+  const box = fitContent ? boxes[value] : undefined;
+  const size = fitContent ? box?.width ?? 0 : seg;
+  const target = fitContent ? box?.x ?? 0 : index * seg;
   useEffect(() => {
-    if (!seg) return;
-    const target = index * seg;
+    if (!size) return;
     if (!placed.current || reduce) { x.setValue(target); placed.current = true; return; }
     Animated.spring(x, { toValue: target, stiffness: 340, damping: 30, mass: 1, overshootClamping: true, useNativeDriver: true }).start();
-  }, [index, seg, reduce, x]);
-  return <View accessibilityRole="tablist" onLayout={(e) => setWidth(e.nativeEvent.layout.width)} style={{ flexDirection: 'row', backgroundColor: tint(palette.emerald, 0.1), borderRadius: radius.pill, padding: 3 }}>
-    {seg > 0 ? <Animated.View pointerEvents="none" style={{ position: 'absolute', top: 3, bottom: 3, left: 3, width: seg, borderRadius: radius.pill, backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border, transform: [{ translateX: x }] }} /> : null}
-    {options.map(([k, label]) => { const on = value === k; return <Pressable key={k} onPress={() => onChange(k)} accessibilityRole="tab" accessibilityState={{ selected: on }} accessibilityLabel={label}
-      style={{ flex: 1, minHeight: 40, borderRadius: radius.pill, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 6, backgroundColor: seg > 0 ? 'transparent' : on ? colors.card : 'transparent', borderWidth: seg > 0 ? 0 : on ? 1 : 0, borderColor: colors.border }}>
-      <Text style={{ ...type.chip, color: on ? palette.accentText : colors.muted }} numberOfLines={1}>{label}</Text></Pressable>; })}
+  }, [target, size, reduce, x]);
+  // Keep the chosen tab on screen when the row scrolls (large fonts, or opened straight onto the last tab).
+  useEffect(() => { if (box) scroller.current?.scrollTo({ x: Math.max(0, box.x - 24), animated: !reduce }); }, [box?.x, reduce]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const track = { backgroundColor: tint(palette.emerald, 0.1), borderRadius: radius.pill } as const;
+  const highlight = size > 0 ? <Animated.View pointerEvents="none" style={{ position: 'absolute', top: 3, bottom: 3, left: fitContent ? 0 : 3, width: size, borderRadius: radius.pill, backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border, transform: [{ translateX: x }] }} /> : null;
+  const segments = options.map(([k, label]) => {
+    const on = value === k; const badge = badges?.[k];
+    return <Pressable key={k} onPress={() => onChange(k)} accessibilityRole="tab" accessibilityState={{ selected: on }} accessibilityLabel={badge ? `${label}, ${badge}` : label}
+      onLayout={fitContent ? (e) => { const { x: left, width: w } = e.nativeEvent.layout; setBoxes((b) => (b[k]?.x === left && b[k]?.width === w ? b : { ...b, [k]: { x: left, width: w } })); } : undefined}
+      style={[{ minHeight: 40, borderRadius: radius.pill, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingHorizontal: 6, backgroundColor: size > 0 ? 'transparent' : on ? colors.card : 'transparent', borderWidth: size > 0 ? 0 : on ? 1 : 0, borderColor: colors.border }, fitContent ? { flexGrow: 1, flexShrink: 0 } : { flex: 1 }]}>
+      <Text style={{ ...type.chip, color: on ? palette.accentText : colors.muted }} numberOfLines={1}>{label}</Text>
+      {badge ? <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: palette.emerald, marginLeft: space.xs }} /> : null}
+    </Pressable>;
+  });
+  if (fitContent) return <View accessibilityRole="tablist" style={[track, { overflow: 'hidden' }]}>
+    <ScrollView ref={scroller} horizontal showsHorizontalScrollIndicator={false} keyboardShouldPersistTaps="handled" contentContainerStyle={{ flexGrow: 1, flexDirection: 'row', padding: 3 }}>{highlight}{segments}</ScrollView>
+  </View>;
+  return <View accessibilityRole="tablist" onLayout={(e) => setWidth(e.nativeEvent.layout.width)} style={[track, { flexDirection: 'row', padding: 3 }]}>
+    {highlight}{segments}
   </View>;
 }
 

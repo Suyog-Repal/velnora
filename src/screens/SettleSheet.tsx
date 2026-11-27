@@ -1,20 +1,19 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { Image, Pressable, Switch, Text, View } from 'react-native';
-import type Svg from 'react-native-svg';
-import { palette, radius } from '../../theme';
+import { useEffect, useMemo, useState } from 'react';
+import { Pressable, Text, View } from 'react-native';
+import { palette, radius, space } from '../../theme';
 import { Button, Initial, Input, Segmented, Sheet, currencySymbol, formatPaise, type Colors } from '../ui/common';
 import { hapticSuccess } from '../ui/haptics';
 import { PopView } from '../ui/motion';
 import { showToast } from '../ui/Toast';
-import { UpiQr, qrToPngBase64 } from './UpiQr';
+import { Caption, ReminderOptions, sendReminderOnWhatsApp } from './Reminder';
 import { getServiceDb } from '../services/transactionService';
 import { SELF, SplitError } from '../services/splitMath';
 import { paiseToInput, parseMoneyToPaise } from '../services/splitDraft';
 import { recordSettlement } from '../services/splitService';
 import { settleWithFriend } from '../services/splitSettle';
 import { getPaymentDetails, type PaymentDetails } from '../services/paymentDetails';
-import { buildReminderMessage, buildUpiLink, formatRupees, qrChoice, sendOnWhatsApp } from '../services/upiLinks';
-import { copyText, openLink, shareImageFile, shareQrPng, shareText } from '../services/paymentExpo';
+import { buildReminderMessage, buildUpiLink, noPhoneNote } from '../services/upiLinks';
+import { openLink } from '../services/paymentExpo';
 
 export interface SettleTarget {
   id: string; label: string;
@@ -31,9 +30,6 @@ export interface SettleTarget {
   upiId?: string | null;
 }
 
-const Caption = ({ children, colors }: { children: string; colors: Colors }) =>
-  <Text style={{ color: colors.muted, fontSize: 11, fontWeight: '700', letterSpacing: 0.6, marginTop: 16, marginBottom: 8 }}>{children}</Text>;
-
 /**
  * Settle up with one person. The amount starts as exactly what is owed (editable: a partial payment is fine, and paying more simply flips
  * the balance). When they owe you it also builds the reminder: friendly text with your UPI ID and link, a QR that carries the amount, and
@@ -47,15 +43,12 @@ export function SettleSheet({ visible, onClose, scope, target, colors, onDone }:
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [details, setDetails] = useState<PaymentDetails>({ upiId: null, displayName: null, qrPath: null });
-  const [showQr, setShowQr] = useState(false);
-  const [useSaved, setUseSaved] = useState(false);
   const [signature, setSignature] = useState(false);
   const [pop, setPop] = useState(0);
-  const svgRef = useRef<Svg>(null);
 
   useEffect(() => {
     if (!visible || !target) return;
-    setError(''); setBusy(false); setShowQr(false); setUseSaved(false); setSignature(false);
+    setError(''); setBusy(false); setSignature(false);
     setDirection(target.balancePaise < 0 ? 'i_pay' : 'they_pay');
     setAmount(target.balancePaise !== 0 ? paiseToInput(Math.abs(target.balancePaise)) : '');
     void getPaymentDetails(getServiceDb(), scope).then(setDetails).catch(() => undefined);
@@ -71,7 +64,6 @@ export function SettleSheet({ visible, onClose, scope, target, colors, onDone }:
   const forWhat = target?.context ?? 'our shared expenses';
   const firstName = target?.name ?? target?.label ?? '';
 
-  const choice = qrChoice({ hasUpiId: !!details.upiId, hasSavedQr: !!details.qrPath, useSaved });
   const myLink = useMemo(() => (details.upiId && paise ? buildUpiLink({ pa: details.upiId, pn: details.displayName, amountPaise: paise, note: forWhat }) : null), [details.upiId, details.displayName, paise, forWhat]);
   const message = useMemo(() => (remind && paise ? buildReminderMessage({ name: firstName, forWhat, amountPaise: paise, upiId: details.upiId, upiLink: myLink, signature }) : ''), [remind, paise, firstName, forWhat, details.upiId, myLink, signature]);
   const payLink = target?.upiId && paise ? buildUpiLink({ pa: target.upiId, pn: target.name ?? target.label, amountPaise: paise, note: forWhat }) : null;
@@ -100,21 +92,7 @@ export function SettleSheet({ visible, onClose, scope, target, colors, onDone }:
   const sendWhatsApp = async () => {
     const text = guard(); if (!text) return;
     setPop((n) => n + 1);
-    const outcome = await sendOnWhatsApp(text, target.phone, { open: openLink, share: shareText });
-    if (outcome === 'share') showToast("WhatsApp isn't available here, so the share sheet opened instead.", 'info', 'wa-share');
-    if (outcome === 'failed') setError('Could not open WhatsApp or the share sheet.');
-  };
-  const shareOther = async () => { const text = guard(); if (text) await shareText(text).catch(() => undefined); };
-  const copy = async () => {
-    const text = guard(); if (!text) return;
-    if (await copyText(text)) { hapticSuccess(); showToast('Message copied.', 'success', 'copied'); }
-    else { showToast("Copy isn't available in this version of the app, so the share sheet opened.", 'info', 'copy-share'); await shareText(text).catch(() => undefined); }
-  };
-  const shareQr = async () => {
-    try {
-      if (choice === 'saved' && details.qrPath) await shareImageFile(details.qrPath, /\.png$/i.test(details.qrPath) ? 'image/png' : 'image/jpeg');
-      else if (choice === 'generated' && svgRef.current) await shareQrPng(await qrToPngBase64(svgRef.current));
-    } catch (e) { setError(e instanceof Error ? e.message : 'Could not share the QR.'); }
+    await sendReminderOnWhatsApp(text, target.phone, setError);
   };
   const openUpiApp = async () => {
     if (!payLink) return;
@@ -125,7 +103,7 @@ export function SettleSheet({ visible, onClose, scope, target, colors, onDone }:
   const recordLabel = full ? 'Mark as settled' : 'Record this payment';
   const title = direction === 'they_pay' ? (settled || target.balancePaise > 0 ? 'Settle up' : 'Payment received') : 'Pay back';
 
-  return <Sheet visible={visible} onClose={onClose} title={title} colors={colors} footer={<>
+  return <Sheet visible={visible} onClose={onClose} title={title} colors={colors} footerGap={space.xxl + space.sm} footer={<>
     {error ? <Text style={{ color: palette.expenseText, marginBottom: 8 }} accessibilityLiveRegion="polite">{error}</Text> : null}
     {remind && target.balancePaise > 0 ? <>
       <PopView popKey={pop}><Button title="Send on WhatsApp" onPress={() => void sendWhatsApp()} /></PopView>
@@ -149,46 +127,13 @@ export function SettleSheet({ visible, onClose, scope, target, colors, onDone }:
     {over && outstanding > 0 ? <Text style={{ color: palette.amber, marginTop: 6, fontSize: 12 }}>That is more than {formatPaise(outstanding)}. The balance will flip to the other direction.</Text> : null}
     {over && outstanding === 0 && !settled ? <Text style={{ color: palette.amber, marginTop: 6, fontSize: 12 }}>This goes the other way from what is owed, so it increases the balance.</Text> : null}
 
-    {remind ? <>
-      <Caption colors={colors}>REMINDER</Caption>
-      <View style={{ borderRadius: radius.md, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.card, padding: 12 }}>
+    {remind ? <ReminderOptions key={`${target.id}:${target.groupId ?? ''}:${target.balancePaise}`} colors={colors} name={firstName} getText={guard}
+      phoneNote={!target.phone ? noPhoneNote(firstName) : null} signature={signature} onSignature={setSignature} details={details} amountPaise={paise} upiLink={myLink} onError={setError}
+      detailsHint="Add your UPI ID or QR in Profile → Payment details to include a payment link and QR. The reminder works without them."
+      preview={<View style={{ borderRadius: radius.md, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.card, padding: 12 }}>
         {message ? <Text selectable style={{ color: colors.text, lineHeight: 20 }}>{message}</Text> : <Text style={{ color: colors.muted }}>Enter an amount to see the message.</Text>}
-      </View>
-      {!details.upiId && !details.qrPath ? <Text style={{ color: colors.muted, fontSize: 12, marginTop: 8 }}>
-        Add your UPI ID or QR in Profile → Payment details to include a payment link and QR. The reminder works without them.
-      </Text> : null}
-      {!target.phone ? <Text style={{ color: colors.muted, fontSize: 12, marginTop: 6 }}>No phone saved for {firstName.split(' ')[0]}: WhatsApp will ask you to choose the chat.</Text> : null}
-      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 10 }}>
-        <Text style={{ color: colors.text }}>Add "Sent from Velnora"</Text>
-        <Switch value={signature} onValueChange={setSignature} trackColor={{ true: palette.emerald, false: colors.border }} thumbColor="#FFFFFF" accessibilityLabel="Add Sent from Velnora" />
-      </View>
-
-      <View style={{ flexDirection: 'row', gap: 8, marginTop: 12 }}>
-        <View style={{ flex: 1 }}><Button title={showQr ? 'Hide UPI QR' : 'Show UPI QR'} kind="ghost" onPress={() => setShowQr((v) => !v)} /></View>
-        <View style={{ flex: 1 }}><Button title="Copy message" kind="ghost" onPress={() => void copy()} /></View>
-      </View>
-      <View style={{ marginTop: 8 }}><Button title="Share via other apps" kind="ghost" onPress={() => void shareOther()} /></View>
-
-      {showQr ? <View style={{ marginTop: 14, alignItems: 'center', borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.card, padding: 14 }}>
-        {choice === 'generated' && myLink ? <>
-          <UpiQr ref={svgRef} text={myLink} size={220} />
-          <Text style={{ color: colors.text, fontWeight: '700', marginTop: 8 }}>{formatRupees(paise ?? 0)} to {details.upiId}</Text>
-          <Text style={{ color: colors.muted, fontSize: 12, marginTop: 2, textAlign: 'center' }}>Scanning fills in the amount.</Text>
-        </> : null}
-        {choice === 'generated' && !myLink ? <Text style={{ color: colors.muted, textAlign: 'center' }}>Enter an amount to draw a QR that includes it.</Text> : null}
-        {choice === 'saved' && details.qrPath ? <>
-          <Image source={{ uri: details.qrPath }} style={{ width: 220, height: 220, backgroundColor: '#FFFFFF' }} resizeMode="contain" accessibilityLabel="Your saved payment QR" />
-          <Text style={{ color: palette.amber, fontSize: 12, marginTop: 8, textAlign: 'center' }}>This is your own saved QR. It has no amount, so {firstName.split(' ')[0]} has to enter {formatRupees(paise ?? 0)} themselves.</Text>
-        </> : null}
-        {choice === 'none' ? <Text style={{ color: colors.muted, textAlign: 'center' }}>No payment details yet. Add your UPI ID or your QR in Profile → Payment details to show one here.</Text> : null}
-        {details.upiId && details.qrPath ? <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', alignSelf: 'stretch', marginTop: 12 }}>
-          <Text style={{ color: colors.text }}>Use my saved QR</Text>
-          <Switch value={useSaved} onValueChange={setUseSaved} trackColor={{ true: palette.emerald, false: colors.border }} thumbColor="#FFFFFF" accessibilityLabel="Use my saved QR" />
-        </View> : null}
-        {choice !== 'none' && (choice === 'saved' || myLink) ? <View style={{ alignSelf: 'stretch', marginTop: 12 }}><Button title="Share QR image" kind="ghost" onPress={() => void shareQr()} /></View> : null}
-      </View> : null}
-      <Text style={{ color: colors.muted, fontSize: 12, marginTop: 10 }}>WhatsApp opens with the text ready. It cannot attach the QR picture, so use "Share QR image" to send that as well.</Text>
-    </> : <>
+      </View>} />
+    : <>
       {target.upiId ? <>
         <Caption colors={colors}>{`PAY ${firstName.split(' ')[0].toUpperCase()}`}</Caption>
         <Button title="Open in UPI app" kind="ghost" onPress={() => void openUpiApp()} />

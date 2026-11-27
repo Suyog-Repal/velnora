@@ -199,6 +199,11 @@ export async function autoSettleFromTransaction(
 }
 
 export interface ExpectedSummary { receive: { outstandingPaise: number; count: number; people: number }; pay: { outstandingPaise: number; count: number; people: number }; overdueCount: number }
+/** What the Expected tab's dot announces ("3 pending"), or undefined when there is nothing pending and no dot. */
+export function expectedBadge(summary: ExpectedSummary): string | undefined {
+  const pending = summary.receive.count + summary.pay.count;
+  return pending ? `${pending} pending` : undefined;
+}
 export function summarizeExpected(items: ExpectedPayment[], now = new Date()): ExpectedSummary {
   const out: ExpectedSummary = { receive: { outstandingPaise: 0, count: 0, people: 0 }, pay: { outstandingPaise: 0, count: 0, people: 0 }, overdueCount: 0 };
   const people = { receive: new Set<string>(), pay: new Set<string>() };

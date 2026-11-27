@@ -52,16 +52,56 @@ export interface ReminderInput {
   signature?: boolean;
 }
 
+/** The name a message greets someone by. */
+export const greetingName = (name: string): string => name.trim().split(/\s+/)[0] || name;
+
+/** Adds the optional sign-off, so an edited message can carry it too. */
+export const withSignature = (message: string, signature?: boolean): string => (signature ? `${message}\nSent from Velnora` : message);
+
+/** How to pay, as far as the owner has saved it. Nothing when there is neither. */
+function paymentLines(upiId?: string | null, upiLink?: string | null): string[] {
+  if (upiLink) return [...(upiId ? [`UPI ID: ${upiId}`] : []), `Pay here: ${upiLink}`];
+  return upiId ? [`You can pay on UPI: ${upiId}`] : [];
+}
+
 /** "Hey Asha, your share for Goa trip is Rs 450. Pay here: upi://...". Plain, friendly, no emoji. */
 export function buildReminderMessage(i: ReminderInput): string {
-  const lines = [`Hey ${i.name.trim().split(/\s+/)[0] || i.name}, your share for ${i.forWhat} is ${formatRupees(i.amountPaise)}.`];
-  if (i.upiLink) {
-    if (i.upiId) lines.push(`UPI ID: ${i.upiId}`);
-    lines.push(`Pay here: ${i.upiLink}`);
-  } else if (i.upiId) lines.push(`You can pay on UPI: ${i.upiId}`);
-  if (i.signature) lines.push('Sent from Velnora');
-  return lines.join('\n');
+  const lines = [`Hey ${greetingName(i.name)}, your share for ${i.forWhat} is ${formatRupees(i.amountPaise)}.`, ...paymentLines(i.upiId, i.upiLink)];
+  return withSignature(lines.join('\n'), i.signature);
 }
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+/** "2026-11-05" -> "5 Nov 2026" (the same on every device); anything else is returned unchanged. */
+export function formatDay(ymd: string): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ymd);
+  const month = m ? MONTHS[Number(m[2]) - 1] : undefined;
+  return m && month ? `${Number(m[3])} ${month} ${m[1]}` : ymd;
+}
+
+export interface ExpectedReminderInput {
+  name: string;
+  /** What is still owed: the total minus what has been paid. */
+  amountPaise: number;
+  /** The person's own words for what it is for. */
+  reason?: string | null;
+  /** The due date (YYYY-MM-DD), only when it has passed. */
+  overdueSince?: string | null;
+  /** The owner's UPI ID, when saved. */
+  upiId?: string | null;
+  signature?: boolean;
+}
+
+/** A reminder for money someone is expected to pay: "Hey Asha, a friendly reminder that Rs 450 is still pending for Dinner." */
+export function buildExpectedReminderMessage(i: ExpectedReminderInput): string {
+  const reason = (i.reason ?? '').replace(/\s+/g, ' ').trim().replace(/^for\s+/i, '').replace(/[.\s]+$/, '');
+  const lines = [`Hey ${greetingName(i.name)}, a friendly reminder that ${formatRupees(i.amountPaise)} is still pending${reason ? ` for ${reason}` : ''}.`];
+  if (i.overdueSince) lines.push(`It has been overdue since ${formatDay(i.overdueSince)}.`);
+  lines.push(...paymentLines(i.upiId));
+  return withSignature(lines.join('\n'), i.signature);
+}
+
+/** Shown wherever a reminder is sent to someone without a saved number. */
+export const noPhoneNote = (name: string): string => `No phone saved for ${greetingName(name)}: WhatsApp will ask you to choose the chat.`;
 
 /**
  * Digits for wa.me / whatsapp://: a bare 10-digit Indian mobile number gets 91 in front; anything with a country code is kept.
