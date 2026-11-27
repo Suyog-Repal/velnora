@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState, type ComponentRef, type ReactNode } from 'react';
-import { Animated, Easing, Keyboard, KeyboardAvoidingView, Modal, PanResponder, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View, type TextInputProps, type TextStyle, type ViewStyle } from 'react-native';
+import { useEffect, useMemo, useRef, useState, type ComponentRef, type ComponentType, type ReactNode } from 'react';
+import { Animated, Easing, Keyboard, KeyboardAvoidingView, Modal, PanResponder, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View, useWindowDimensions, type TextInputProps, type TextStyle, type ViewStyle } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import NetInfo from '@react-native-community/netinfo';
 import Svg, { Circle, Defs, LinearGradient, Path, Stop } from 'react-native-svg';
@@ -83,14 +83,16 @@ export function TypeToggle({ value, onChange, colors, expenseLabel = 'Expense', 
   return <View accessibilityRole="radiogroup" style={ui.typeRow}>{option('expense', expenseLabel, ArrowUpRight)}{option('income', incomeLabel, ArrowDownLeft)}</View>;
 }
 
-export function Button({ title, onPress, kind = 'primary', disabled, busy }: { title: string; onPress: () => void; kind?: 'primary' | 'danger' | 'ghost'; disabled?: boolean; busy?: boolean }) {
+export function Button({ title, onPress, kind = 'primary', disabled, busy, icon: Icon }: { title: string; onPress: () => void; kind?: 'primary' | 'danger' | 'ghost'; disabled?: boolean; busy?: boolean; icon?: ComponentType<{ size: number; color: string }> }) {
+  const { fontScale } = useWindowDimensions(); // the icon grows with the label at larger text sizes
   const bg = kind === 'primary' ? palette.emerald : kind === 'danger' ? tint(palette.danger, 0.14) : 'transparent';
   const border = kind === 'ghost' ? { borderWidth: 1.5, borderColor: palette.emerald } : null;
   const fg = kind === 'primary' ? readableOn(palette.emerald) : kind === 'danger' ? palette.expenseText : palette.accentText;
   const off = disabled || busy;
   return <Pressable accessibilityRole="button" accessibilityState={{ disabled: !!off, busy: !!busy }} disabled={off} onPress={onPress}
-    style={({ pressed }) => [ui.button, border, { backgroundColor: bg, opacity: off ? 0.5 : pressed ? 0.85 : 1, transform: [{ scale: pressed && !off ? 0.985 : 1 }] }]}>
-    <Text style={{ ...type.button, color: fg }}>{busy ? 'Please wait…' : title}</Text>
+    style={({ pressed }) => [ui.button, border, Icon ? { flexDirection: 'row' as const, gap: space.sm } : null, { backgroundColor: bg, opacity: off ? 0.5 : pressed ? 0.85 : 1, transform: [{ scale: pressed && !off ? 0.985 : 1 }] }]}>
+    {Icon ? <Icon size={type.button.fontSize * fontScale} color={fg} /> : null}
+    <Text style={{ ...type.button, color: fg, ...(Icon ? { flexShrink: 1 } : null) }}>{busy ? 'Please wait…' : title}</Text>
   </Pressable>;
 }
 

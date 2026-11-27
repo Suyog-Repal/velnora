@@ -5,6 +5,7 @@ import { Button, Initial, Input, Segmented, Sheet, currencySymbol, formatPaise, 
 import { hapticSuccess } from '../ui/haptics';
 import { PopView } from '../ui/motion';
 import { showToast } from '../ui/Toast';
+import { WhatsAppIcon } from '../ui/WhatsAppIcon';
 import { Caption, ReminderOptions, sendReminderOnWhatsApp } from './Reminder';
 import { getServiceDb } from '../services/transactionService';
 import { SELF, SplitError } from '../services/splitMath';
@@ -106,7 +107,7 @@ export function SettleSheet({ visible, onClose, scope, target, colors, onDone }:
   return <Sheet visible={visible} onClose={onClose} title={title} colors={colors} footerGap={space.xxl + space.sm} footer={<>
     {error ? <Text style={{ color: palette.expenseText, marginBottom: 8 }} accessibilityLiveRegion="polite">{error}</Text> : null}
     {remind && target.balancePaise > 0 ? <>
-      <PopView popKey={pop}><Button title="Send on WhatsApp" onPress={() => void sendWhatsApp()} /></PopView>
+      <PopView popKey={pop}><Button title="Send on WhatsApp" icon={WhatsAppIcon} onPress={() => void sendWhatsApp()} /></PopView>
       <Pressable onPress={() => void record()} disabled={busy} accessibilityRole="button" hitSlop={8} style={{ minHeight: 44, alignItems: 'center', justifyContent: 'center', marginTop: 4 }}>
         <Text style={{ color: palette.accentText, fontWeight: '700' }}>{busy ? 'Saving…' : recordLabel}</Text>
       </Pressable>

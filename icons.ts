@@ -51,7 +51,7 @@ export const Images = NativeImages as any;
 export const RefreshCw = NativeRefreshCw as any;
 export const ScanText = NativeScanText as any;
 // Home dashboard (theme redesign): same lucide set, no new dependency.
-import { Info as NativeInfo, Wifi as NativeWifi, FileChartColumn as NativeFileChart, ArrowLeftRight as NativeArrowLeftRight, ShieldCheck as NativeShieldCheck, ArrowRight as NativeArrowRight, ChevronUp as NativeChevronUp, ChevronDown as NativeChevronDown, Ellipsis as NativeEllipsis } from 'lucide-react-native';
+import { Info as NativeInfo, Wifi as NativeWifi, FileChartColumn as NativeFileChart, ArrowLeftRight as NativeArrowLeftRight, ShieldCheck as NativeShieldCheck, ArrowRight as NativeArrowRight, ChevronUp as NativeChevronUp, ChevronDown as NativeChevronDown } from 'lucide-react-native';
 export const Info = NativeInfo as any;
 export const Wifi = NativeWifi as any;
 export const FileChart = NativeFileChart as any;
@@ -60,5 +60,4 @@ export const ShieldCheck = NativeShieldCheck as any;
 export const ArrowRight = NativeArrowRight as any;
 export const ChevronUp = NativeChevronUp as any;
 export const ChevronDown = NativeChevronDown as any;
-export const Ellipsis = NativeEllipsis as any;
 export const TrendingUp = CatTrendingUp as any;
