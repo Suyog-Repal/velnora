@@ -65,6 +65,17 @@ export interface CaptureLogRow { at: number; source: typeof LOG_SOURCES[number];
 const BANK_HEADER = /^(?:[A-Z]{2}-[A-Z0-9]{3,9}(?:-[A-Z])?|[A-Z]{6})$/;
 const NOTIFICATION_IDS: ReadonlySet<string> = new Set(CAPTURE_SOURCES.filter((s) => s.kind === 'notification').map((s) => s.id));
 
+const PHONE = /^\+?[\d\s().-]+$/;
+
+/**
+ * A person's phone number: "+" international form, or ten or more digits. A text from one leaves no trace in the log. Shorter
+ * all-digit senders are short codes, which businesses use. Mirrors isPersonalNumber in VelnoraCaptureRules.kt.
+ */
+export function isPersonalNumber(sender: string | null | undefined): boolean {
+  const value = (sender ?? '').trim();
+  return PHONE.test(value) && (value.startsWith('+') || value.replace(/\D/g, '').length >= 10);
+}
+
 /** A bank-style header, an allowed app package, or one of the fixed words. Anything else becomes "other". */
 function safeOrigin(source: string, origin: unknown): string {
   if (source === 'app') return 'app';
@@ -84,6 +95,8 @@ export function sanitizeLogRows(raw: unknown): CaptureLogRow[] {
     const { source, stage, result, reason } = item;
     if (!oneOf(LOG_SOURCES, source) || !oneOf(LOG_STAGES, stage) || !oneOf(LOG_RESULTS, result)) continue;
     if (typeof reason !== 'string' || !Object.prototype.hasOwnProperty.call(REASON_LABELS, reason)) continue;
+    // A row about a person's number is never written natively; one that turns up anyway is not shown or shared at all.
+    if (source === 'sms' && typeof item.origin === 'string' && (item.origin === 'personal' || isPersonalNumber(item.origin))) continue;
     const count = typeof item.count === 'number' && item.count >= 1 ? Math.trunc(item.count) : 1;
     out.push({ at: item.at, source, origin: safeOrigin(source, item.origin), stage, result, reason: reason as LogReason, count });
   }
@@ -94,7 +107,7 @@ export function originLabel(row: Pick<CaptureLogRow, 'source' | 'origin'>): stri
   if (row.source === 'app') return 'Velnora';
   const app = CAPTURE_SOURCES.find((s) => s.id === row.origin)?.label;
   if (app) return app;
-  if (row.source === 'sms') return row.origin === 'numeric' ? 'SMS from a number' : row.origin === 'other' ? 'SMS, other sender' : `SMS ${row.origin}`;
+  if (row.source === 'sms') return row.origin === 'numeric' ? 'SMS from a short code' : row.origin === 'other' ? 'SMS, other sender' : `SMS ${row.origin}`;
   return 'Notification';
 }
 
@@ -138,8 +151,12 @@ export interface CaptureNote { stage: LogStage; result: LogResult; reason: LogRe
 
 const MATCH_REASONS = { reference: 'same_reference', fingerprint: 'same_fingerprint', cross_source: 'same_payment_other_source' } as const;
 
-/** What to log for one processed event. `gaveUp` is true when a failure has used its last attempt. */
-export function captureNote(event: SmsReceivedPayload, result: SmsProcessResult, gaveUp: boolean, rules?: SmsParsingRule[]): CaptureNote {
+/**
+ * What to log for one processed event; null means nothing at all (a text from a person's number, for example one stored by an
+ * earlier build). `gaveUp` is true when a failure has used its last attempt.
+ */
+export function captureNote(event: SmsReceivedPayload, result: SmsProcessResult, gaveUp: boolean, rules?: SmsParsingRule[]): CaptureNote | null {
+  if ((event.source ?? 'sms') === 'sms' && isPersonalNumber(event.sender)) return null;
   if (result.action === 'saved') {
     return result.transaction?.possible_duplicate_of
       ? { stage: 'match', result: 'held', reason: 'possible_duplicate' }

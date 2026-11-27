@@ -44,4 +44,14 @@ test('both native entry points check the switch before reading anything', () => 
   for (const later of ['sbn.notification', 'extras.getCharSequence', 'markListenerEvent', 'note(', 'stageNotification', 'emitSmsStaged']) assert.ok(gate < handle.indexOf(later), `switch checked before ${later}`);
 });
 
+test('the receiver returns for a personal number before it opens the store, logs, stores or reads the text', () => {
+  const receiver = kotlin('VelnoraSmsReceiver.kt');
+  const receive = receiver.slice(receiver.indexOf('fun receive('), receiver.indexOf('class VelnoraSmsReceiver'));
+  const gate = receive.indexOf('if (VelnoraCaptureRules.isPersonalNumber(sender)) return false');
+  assert.ok(gate > 0);
+  for (const later of ['VelnoraSmsStagingStore.get', '.log(', '.stage(', 'messageBody', 'wakeCapture']) assert.ok(gate < receive.indexOf(later), `personal check before ${later}`);
+  const onReceive = receiver.slice(receiver.indexOf('override fun onReceive'));
+  assert.doesNotMatch(onReceive, /\.log\(/, 'the outer handler logs nothing: it may not know the sender');
+});
+
 console.log(`${passed} passed`);

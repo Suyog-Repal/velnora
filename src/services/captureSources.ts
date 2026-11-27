@@ -25,7 +25,7 @@ export function resolveCaptureSources(disabled: unknown): CaptureSourceState[] {
 }
 
 export const CAPTURE_EXPLANATION = {
-  sms: 'SMS: Velnora receives each new message, skips senders written as a +phone number, discards one-time passwords, and checks the rest for a payment. It does not read your inbox.',
+  sms: 'SMS: Velnora receives each new message. Texts from phone numbers are ignored and leave no trace. From other senders it discards one-time passwords and checks the rest for a payment. It does not read your inbox.',
   notifications: 'Notifications: Android grants notification access for all apps at once. Velnora applies this list itself. It reads only the apps switched on here, and ignores every other app without reading or storing its notification.',
   off: 'A source that is switched off is dropped as soon as it arrives. Nothing about it is saved. Transactions you already have stay.',
   truecaller: 'Truecaller can show the same bank SMS, so switch it off too if you want no bank messages read. A payment seen by both is recorded once.',

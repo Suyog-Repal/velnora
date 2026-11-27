@@ -73,7 +73,7 @@ async function drainOnce(
       // Before the row is completed (which wipes the sender). The log must never affect what happens to the event.
       try {
         const note = captureNote(event, result, item.attempts >= MAX_ATTEMPTS, rules);
-        await store.logStagedOutcome?.(item.id, note.stage, note.result, note.reason);
+        if (note) await store.logStagedOutcome?.(item.id, note.stage, note.result, note.reason);
       } catch { /* a missing log line is acceptable; a lost or repeated payment is not */ }
       if (result.action === 'saved') { summary.saved += 1; await store.complete(item.id); }
       else if (result.action === 'duplicate_ignored') { summary.duplicates += 1; await store.complete(item.id); }

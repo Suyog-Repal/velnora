@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { parseSmsTransaction } from '../../../transactionParser.ts';
-import { LOG_RESULTS, LOG_SOURCES, LOG_STAGES, REASON_LABELS, captureNote, explainRejection, formatCaptureLog, sanitizeLogRows } from '../captureLog.ts';
+import { LOG_RESULTS, LOG_SOURCES, LOG_STAGES, REASON_LABELS, captureNote, explainRejection, formatCaptureLog, isPersonalNumber, sanitizeLogRows } from '../captureLog.ts';
 import { MAX_ATTEMPTS, drainStagedSms, purgeCaptureData } from '../smsStagingService.ts';
 import type { SmsProcessResult } from '../smsIntegrationService.ts';
 import type { SmsStagingStore, StagedSms } from '../smsStagingTypes.ts';
@@ -80,9 +80,9 @@ await test('privacy: extra fields and unexpected values never reach the screen o
     { ...base, reason: secret.body }, { ...base, stage: 'Demo Person' }, { ...base, result: '500' }, { ...base, source: 'whatsapp' }, null,
   ];
   const clean = sanitizeLogRows(raw);
-  assert.equal(clean.length, 5, 'rows with an unknown code are left out');
+  assert.equal(clean.length, 4, 'rows with an unknown code, or from a personal number, are left out');
   for (const row of clean) assert.deepEqual(Object.keys(row).sort(), ALLOWED_COLUMNS.filter((c) => c !== 'id'));
-  assert.deepEqual(clean.map((r) => r.origin), ['VM-DEMOBK-S', 'other', 'other', 'other', 'other']);
+  assert.deepEqual(clean.map((r) => r.origin), ['VM-DEMOBK-S', 'other', 'other', 'other']);
   const text = formatCaptureLog(raw, new Date(NOW));
   assert.doesNotMatch(text, /Demo Person|user-A|debited|\+91|\b500 debited/);
   assert.match(text, /sms VM-DEMOBK-S parse dropped promotion/);
@@ -115,12 +115,12 @@ await test('a parse rejection is explained by a reason code, without changing wh
     assert.equal(parseSmsTransaction(sms(body)), null, body);
     assert.equal(explainRejection(sms(body)), reason, body);
   }
-  assert.equal(explainRejection(sms('Rs 500.00 debited', '+910000000000')), 'sender_not_supported');
+  assert.equal(explainRejection(sms('Rs 500.00 debited', 'Demo_Bank')), 'sender_not_supported');
   assert.equal(explainRejection(sms('   ')), 'empty_message');
 });
 
 await test('the note for each outcome', () => {
-  const note = (r: Partial<SmsProcessResult>, gaveUp = false) => { const n = captureNote(sms('Your OTP is 123456'), r as SmsProcessResult, gaveUp); return `${n.stage}/${n.result}/${n.reason}`; };
+  const note = (r: Partial<SmsProcessResult>, gaveUp = false) => { const n = captureNote(sms('Your OTP is 123456'), r as SmsProcessResult, gaveUp)!; return `${n.stage}/${n.result}/${n.reason}`; };
   assert.equal(note({ action: 'saved', transaction: {} as never }), 'insert/saved/saved');
   assert.equal(note({ action: 'saved', transaction: { possible_duplicate_of: 'x' } as never }), 'match/held/possible_duplicate');
   assert.equal(note({ action: 'duplicate_ignored', matchedBy: 'reference' }), 'match/dropped/same_reference');
@@ -171,6 +171,37 @@ await test('a failing log changes nothing about what happens to the events', asy
   const summary = await drainStagedSms(store, null, undefined, { processor: async () => results.shift()!, now: () => NOW });
   assert.deepEqual(calls, [['complete', 1], ['retry', 3]]);
   assert.deepEqual([summary.saved, summary.retried], [1, 1]);
+});
+
+// The same lists as VelnoraCaptureRulesTest.kt.
+const PERSONAL = ['+910000000000', '+91 00000 00000', '+91-00000-00000', '+1 (000) 000-0000', '+0000', ' +910000000000 ', '0000000000', '00000000000', '910000000000', '00000 00000'];
+const BUSINESS = ['VM-DEMOBK-S', 'AD-DEMOUP', 'DEMOBK', '56767', '121', '000000000', 'Demo_Bank', 'DEMO STORE 24'];
+
+await test('personal numbers are told apart from business senders', () => {
+  for (const sender of PERSONAL) assert.equal(isPersonalNumber(sender), true, sender);
+  for (const sender of [...BUSINESS, '', null, undefined]) assert.equal(isPersonalNumber(sender), false, String(sender));
+});
+
+await test('no log row exists for a personal-number sender: nothing is noted, shown or exported', async () => {
+  const results = [...Object.values(outcomes), { success: false, action: 'unsupported_or_invalid' } as SmsProcessResult];
+  for (const sender of PERSONAL) {
+    for (const result of results) for (const gaveUp of [false, true]) assert.equal(captureNote(sms('Rs 500.00 debited', sender), result, gaveUp), null, sender);
+    const row = { at: NOW, source: 'sms', origin: sender, stage: 'receiver', result: 'dropped', reason: 'sender_filtered', count: 1 };
+    assert.deepEqual(sanitizeLogRows([row, { ...row, origin: 'personal' }]), [], sender);
+    assert.match(formatCaptureLog([row], new Date(NOW)), /entries: 0 /);
+  }
+  // Rows already stored by an earlier build are still processed, but the drain asks for no log entry.
+  const items = PERSONAL.map((sender, i): StagedSms => ({ ...staged(i + 1), sender, source: 'sms' }));
+  const { store, calls } = fakeStore(items);
+  await drainStagedSms(store, null, undefined, { processor: async () => outcomes[1], now: () => NOW });
+  assert.deepEqual(calls, items.map((item) => ['complete', item.id]));
+});
+
+await test('business senders keep their log entries', async () => {
+  const items = BUSINESS.map((sender, i): StagedSms => ({ ...staged(i + 1), sender, source: 'sms' }));
+  const { store, calls } = fakeStore(items);
+  await drainStagedSms(store, null, undefined, { processor: async () => outcomes[1], now: () => NOW });
+  assert.equal(calls.filter((c) => c[0] === 'log').length, BUSINESS.length);
 });
 
 await test('"Delete local data" removes the account\'s staged events and clears the log', async () => {

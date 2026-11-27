@@ -33,7 +33,7 @@ class VelnoraCaptureRulesTest {
   @Test fun smsFilterKeepsItsOrderAndReasons() {
     assertEquals("no_sender", rules.smsDropReason(null, debit, patterns))
     assertEquals("empty_message", rules.smsDropReason("VM-DEMOBK-S", "", patterns))
-    assertEquals("sender_filtered", rules.smsDropReason("+910000000000", debit, patterns))
+    assertEquals("sender_filtered", rules.smsDropReason("Demo_Bank", debit, patterns))
     assertEquals("sender_filtered", rules.smsDropReason("VM-DEMOBK-S", debit, emptyList()))
     assertEquals("otp", rules.smsDropReason("VM-DEMOBK-S", "Your OTP is 123456 for login", patterns))
     assertNull(rules.smsDropReason("VM-DEMOBK-S", debit, patterns))
@@ -70,7 +70,7 @@ class VelnoraCaptureRulesTest {
     assertEquals("VM-DEMOBK-S", rules.logSmsSender("vm-demobk-s"))
     assertEquals("AD-DEMOUP", rules.logSmsSender("AD-DEMOUP"))
     assertEquals("DEMOBK", rules.logSmsSender("DEMOBK"))
-    assertEquals("numeric", rules.logSmsSender("+91 00000 00000"))
+    assertEquals(rules.PERSONAL, rules.logSmsSender("+91 00000 00000"))
     assertEquals("numeric", rules.logSmsSender("56767"))
     assertEquals("other", rules.logSmsSender("Demo Person"))
     assertEquals("other", rules.logSmsSender("DEMO PERSON"))
@@ -81,7 +81,44 @@ class VelnoraCaptureRulesTest {
     assertEquals("com.truecaller", rules.logOriginForStaged(rules.TRUECALLER, "Demo Person", "Truecaller"))
     assertEquals(gpay, rules.logOriginForStaged(rules.PAYMENT, "Google Pay", "Google Pay"))
     assertEquals("other", rules.logOriginForStaged(rules.PAYMENT, "Demo Person", "Unknown App"))
-    assertEquals("numeric", rules.logOriginForStaged(rules.SMS, "+910000000000", null))
+    assertEquals(rules.PERSONAL, rules.logOriginForStaged(rules.SMS, "+910000000000", null))
+  }
+
+  private val personal = listOf(
+    "+910000000000", "+91 00000 00000", "+91-00000-00000", "+1 (000) 000-0000", "+0000", " +910000000000 ",
+    "0000000000", "00000000000", "910000000000", "00000 00000",
+  )
+  private val business = listOf("VM-DEMOBK-S", "AD-DEMOUP", "DEMOBK", "56767", "121", "000000000", "Demo_Bank", "DEMO STORE 24")
+
+  @Test fun personalNumbersAreToldApartFromBusinessSenders() {
+    for (sender in personal) assertTrue(sender, rules.isPersonalNumber(sender))
+    for (sender in business) assertFalse(sender, rules.isPersonalNumber(sender))
+    assertFalse(rules.isPersonalNumber(null))
+    assertFalse(rules.isPersonalNumber(""))
+  }
+
+  /** Every row is written through safeLogOrigin + isLoggable, so a false here means no row can exist. */
+  @Test fun noLogRowCanExistForAPersonalNumber() {
+    for (sender in personal) {
+      // However the origin arrives: classified by the receiver, derived from a staged row, or passed through raw.
+      for (origin in listOf(rules.logSmsSender(sender), rules.logOriginForStaged(rules.SMS, sender, null), sender)) {
+        val safe = rules.safeLogOrigin(rules.SMS, origin)
+        for (stage in rules.LOG_STAGES) for (result in rules.LOG_RESULTS) for (reason in rules.LOG_REASONS) {
+          assertFalse("$sender $stage $result $reason", rules.isLoggable(emptySet(), rules.SMS, safe, stage, result, reason))
+        }
+      }
+    }
+  }
+
+  @Test fun businessSendersAndPaymentAppsKeepTheirRows() {
+    for (sender in business) {
+      val safe = rules.safeLogOrigin(rules.SMS, rules.logSmsSender(sender))
+      assertTrue(sender, rules.isLoggable(emptySet(), rules.SMS, safe, "parse", "dropped", "promotion"))
+    }
+    for ((packageName, origin) in rules.NOTIFICATION_SOURCES) {
+      val safe = rules.safeLogOrigin(origin.source, packageName)
+      assertTrue(packageName, rules.isLoggable(emptySet(), origin.source, safe, "listener", "dropped", "no_amount"))
+    }
   }
 
   @Test fun lastGateRewritesUnsafeOrigins() {

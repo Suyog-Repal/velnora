@@ -110,13 +110,27 @@ object VelnoraCaptureRules {
 
   /** An Indian bank-style sender header: "VM-HDFCBK-S", "AD-SBIUPI", or a bare six-letter header. */
   private val BANK_HEADER = Regex("""^(?:[A-Z]{2}-[A-Z0-9]{3,9}(?:-[A-Z])?|[A-Z]{6})$""", RegexOption.IGNORE_CASE)
-  private val NUMERIC = Regex("""^\+?[\d\s()-]+$""")
+  private val NUMERIC = Regex("""^\+?[\d\s().-]+$""")
 
-  /** What the log may say about an SMS sender: the header itself, or only "numeric" / "other". */
+  /** Marks a person's phone number inside the log rules. An entry with this origin is never written. */
+  const val PERSONAL = "personal"
+  private const val PERSONAL_MIN_DIGITS = 10
+
+  /**
+   * A person's phone number: written in "+" international form, or ten or more digits. A text from one leaves no trace.
+   * Shorter all-digit senders are short codes, which businesses use.
+   */
+  fun isPersonalNumber(sender: String?): Boolean {
+    val value = sender?.trim().orEmpty()
+    return NUMERIC.matches(value) && (value.startsWith("+") || value.count { it.isDigit() } >= PERSONAL_MIN_DIGITS)
+  }
+
+  /** What the log may say about an SMS sender: the header itself, "numeric" (a short code) or "other"; [PERSONAL] is never logged. */
   fun logSmsSender(sender: String?): String {
     val value = sender?.trim().orEmpty()
     return when {
-      value.isNotEmpty() && NUMERIC.matches(value) -> "numeric"
+      isPersonalNumber(value) -> PERSONAL
+      NUMERIC.matches(value) -> "numeric"
       BANK_HEADER.matches(value) -> value.uppercase()
       else -> "other"
     }
@@ -135,7 +149,7 @@ object VelnoraCaptureRules {
   /** Last gate before a row is written: an origin that is not one of the allowed shapes becomes "other". */
   fun safeLogOrigin(source: String, origin: String): String = when {
     source == "app" -> "app"
-    source == SMS -> if (origin == "numeric" || origin == "other") origin else logSmsSender(origin)
+    source == SMS -> if (origin == "numeric" || origin == "other" || origin == PERSONAL) origin else logSmsSender(origin)
     NOTIFICATION_SOURCES[origin]?.source == source -> origin
     else -> "other"
   }
@@ -153,6 +167,7 @@ object VelnoraCaptureRules {
 
   fun isLoggable(disabled: Set<String>, source: String, origin: String, stage: String, result: String, reason: String): Boolean {
     if (source !in LOG_SOURCES || stage !in LOG_STAGES || result !in LOG_RESULTS || reason !in LOG_REASONS) return false
+    if (source == SMS && origin == PERSONAL) return false
     val switchId = logSwitchId(source, origin) ?: return true
     return isEnabled(disabled, switchId)
   }
