@@ -6,7 +6,7 @@ import { DEFAULT_SMS_RULE } from '../../transactionParser';
 import { isGuestModeChosen } from './guestModeService';
 import { runDailyCheckIn, setCheckInPort } from './dailyCheckIn';
 import { REVIEW_SETTLE_MS, runReviewPass, setReviewNotifierPort } from './reviewNotifications';
-import { drainNativeStagedSms } from './smsStagingService';
+import { drainNativeStagedSms, logCaptureEvent } from './smsStagingService';
 import { getServiceDb, initTransactionService } from './transactionService';
 
 export const CAPTURE_TASK_NAME = 'VelnoraCaptureDrain';
@@ -17,17 +17,25 @@ export const CAPTURE_TASK_NAME = 'VelnoraCaptureDrain';
  * and is processed the next time the app opens.
  */
 export async function runBackgroundCapture(): Promise<void> {
-  await initTransactionService();
-  setReviewNotifierPort(getNativeReviewNotifier());
-  const session = await loadSession();
-  diag('headless_task', { task: 'capture_drain', session_present: !!session });
-  if (!session && !(await isGuestModeChosen())) return; // nobody to own these yet: they wait, staged
-  const rules = [DEFAULT_SMS_RULE];
-  await drainNativeStagedSms(session, rules);
-  // The same payment's other source usually arrives within seconds; let it complete or merge this one first.
-  await new Promise((resolve) => setTimeout(resolve, REVIEW_SETTLE_MS + 500));
-  await drainNativeStagedSms(session, rules);
-  await runReviewPass(getServiceDb(), session?.user.id ?? null);
+  try {
+    await initTransactionService();
+    setReviewNotifierPort(getNativeReviewNotifier());
+    const session = await loadSession();
+    diag('headless_task', { task: 'capture_drain', session_present: !!session });
+    if (!session && !(await isGuestModeChosen())) { // nobody to own these yet: they wait, staged
+      await logCaptureEvent('headless', 'held', 'signed_out');
+      return;
+    }
+    const rules = [DEFAULT_SMS_RULE];
+    await drainNativeStagedSms(session, rules);
+    // The same payment's other source usually arrives within seconds; let it complete or merge this one first.
+    await new Promise((resolve) => setTimeout(resolve, REVIEW_SETTLE_MS + 500));
+    await drainNativeStagedSms(session, rules);
+    await runReviewPass(getServiceDb(), session?.user.id ?? null);
+  } catch (error) {
+    await logCaptureEvent('headless', 'held', 'drain_failed');
+    throw error;
+  }
 }
 
 export const REVIEW_ACTION_TASK_NAME = 'VelnoraReviewActionDrain';

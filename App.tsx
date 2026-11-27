@@ -22,7 +22,7 @@ import { confirmCheckInToday, setCheckInPort, syncCheckInSchedule } from './src/
 import { drainNativeReviewActions } from './src/services/reviewActionDrain.native';
 import { REVIEW_SETTLE_MS, cancelReviewNotification, clearReviewNotifications, runReviewPass, setReviewNotifierPort } from './src/services/reviewNotifications';
 import { createReviewLinkRouter, resolveReviewTarget, type ReviewLink } from './src/services/reviewLinks';
-import { clearSmsOwner, drainNativeStagedSms, recordSmsOwner } from './src/services/smsStagingService';
+import { clearSmsOwner, drainNativeStagedSms, logCaptureEvent, recordSmsOwner } from './src/services/smsStagingService';
 import { LocalDataSection } from './src/components/LocalDataSection';
 import { SmsStagingStatusSection } from './src/components/SmsStagingStatusSection';
 import { DEFAULT_SMS_RULE, parseSmsTransaction } from './transactionParser';
@@ -549,6 +549,7 @@ function AppInner({ onReady, settled }: { onReady: () => void; settled: boolean 
         }
       } catch {
         console.warn('Staged SMS drain failed; events remain staged for retry');
+        void logCaptureEvent('queue', 'held', 'drain_failed');
       } finally {
         if (active) setSmsStatusTick((n) => n + 1);
       }

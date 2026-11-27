@@ -1,12 +1,20 @@
 package com.velnora.sms
 
 import android.app.Notification
+import android.content.ComponentName
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 
+/** Whether the system currently has the listener bound. In memory on purpose: a dead process is never "connected". */
+object VelnoraListenerState {
+  @Volatile
+  var connected: Boolean = false
+}
+
 /**
- * Detection from notifications of an explicit allow-list of apps: Truecaller (which mirrors bank SMS) and UPI/payment
- * apps. Every other app's notification is ignored before its text is read.
+ * Detection from notifications of an explicit allow-list of apps (see [VelnoraCaptureRules.NOTIFICATION_SOURCES]): Truecaller,
+ * which mirrors bank SMS, and UPI/payment apps. Every other app's notification, and that of an allow-listed app the person
+ * has switched off, is ignored before its text is read.
  *
  * Android binds this service on its own once the user grants Notification access, even when the app has no running
  * process or activity, and it never starts the UI. Like the SMS receiver it only stages a small durable row; all
@@ -25,58 +33,87 @@ class VelnoraNotificationListener : NotificationListenerService() {
   // Android re-delivers active notifications after the listener (re)connects; the staging store drops replays
   // (same key + post time) and the JS pipeline is idempotent, so nothing is inserted twice.
   override fun onListenerConnected() {
+    VelnoraListenerState.connected = true
     try {
       activeNotifications?.forEach { handle(it) }
     } catch (_: Throwable) {
     }
   }
 
-  private fun handle(sbn: StatusBarNotification) {
-    val origin = SOURCES[sbn.packageName] ?: return
-    val n = sbn.notification ?: return
-    // Group summaries only repeat their children; ongoing/foreground entries are never a transaction.
-    if (n.flags and Notification.FLAG_GROUP_SUMMARY != 0) return
-    if (n.flags and Notification.FLAG_ONGOING_EVENT != 0) return
+  override fun onListenerDisconnected() {
+    VelnoraListenerState.connected = false
+    // Ask Android to bind again. It has no effect if the person has removed Notification access.
+    try {
+      requestRebind(ComponentName(this, VelnoraNotificationListener::class.java))
+    } catch (_: Throwable) {
+    }
+  }
 
-    val extras = n.extras ?: return
+  override fun onDestroy() {
+    VelnoraListenerState.connected = false
+    super.onDestroy()
+  }
+
+  private fun handle(sbn: StatusBarNotification) {
+    val packageName = sbn.packageName
+    val origin = VelnoraCaptureRules.NOTIFICATION_SOURCES[packageName] ?: return
+    val context = applicationContext
+    // A switched-off app is dropped here: nothing is read, stored, logged or sent to JavaScript.
+    if (!VelnoraCapturePrefs.isEnabled(context, packageName)) return
+    VelnoraCapturePrefs.markListenerEvent(context, sbn.postTime)
+
+    val n = sbn.notification
+    val extras = n?.extras
+    if (n == null || extras == null) {
+      note(origin.source, packageName, "listener", "no_content")
+      return
+    }
     val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()?.trim().orEmpty()
     val text = (extras.getCharSequence(Notification.EXTRA_BIG_TEXT) ?: extras.getCharSequence(Notification.EXTRA_TEXT))
       ?.toString()?.trim().orEmpty()
-    if (title.isEmpty()) return
 
-    // Truecaller's title is the bank and its text is the SMS. Payment apps often put the amount in the title itself
-    // ("Asha paid you Rs 500"), so both parts are the message and the sender is the app.
-    val isPaymentApp = origin.source == PAYMENT
-    val body = if (isPaymentApp) (if (text.isEmpty()) title else "$title. $text") else text
-    if (!VelnoraBankAlerts.looksLikeTransaction(body)) return
+    val decision = VelnoraCaptureRules.decideNotification(
+      origin,
+      groupSummary = n.flags and Notification.FLAG_GROUP_SUMMARY != 0,
+      ongoing = n.flags and Notification.FLAG_ONGOING_EVENT != 0,
+      title = title,
+      text = text,
+    )
+    val dropReason = decision.dropReason
+    if (dropReason != null) {
+      note(origin.source, packageName, "listener", dropReason)
+      return
+    }
 
-    val context = applicationContext
-    val key = sbn.key ?: "${sbn.packageName}:${sbn.id}:${sbn.tag}"
-    val sender = if (isPaymentApp) origin.label else title
+    val key = sbn.key ?: "$packageName:${sbn.id}:${sbn.tag}"
+    val postTime = sbn.postTime
     EXECUTOR.execute {
       try {
-        if (VelnoraSmsStagingStore.get(context).stageNotification(origin.source, key, sender, body, sbn.postTime, origin.label) > 0) {
+        val store = VelnoraSmsStagingStore.get(context)
+        val id = store.stageNotification(origin.source, key, decision.sender, decision.body, postTime, origin.label)
+        if (id > 0) {
           VelnoraSmsModule.current?.emitSmsStaged()
           VelnoraBankAlerts.wakeCapture(context)
+        } else {
+          val reason = if (id == VelnoraSmsStagingStore.REPEATED) "repeat" else "already_staged"
+          store.log(origin.source, packageName, "staging", "dropped", reason)
         }
       } catch (_: Throwable) {
-        // Never log content. A failed stage is rare (disk full); nothing else can be done here.
+        // Never log content. A failed stage is rare (disk full); only the fact is noted, if the log can still be written.
+        runCatching { VelnoraSmsStagingStore.get(context).log(origin.source, packageName, "staging", "dropped", "staging_error") }
       }
     }
   }
 
-  private data class Origin(val source: String, val label: String)
+  /** Records why a notification from a switched-on source was dropped, off the main thread. */
+  private fun note(source: String, packageName: String, stage: String, reason: String) {
+    val context = applicationContext
+    EXECUTOR.execute {
+      runCatching { VelnoraSmsStagingStore.get(context).log(source, packageName, stage, "dropped", reason) }
+    }
+  }
 
   private companion object {
-    const val PAYMENT = "payment_notification"
-    val SOURCES = mapOf(
-      "com.truecaller" to Origin("truecaller_notification", "Truecaller"),
-      "com.google.android.apps.nbu.paisa.user" to Origin(PAYMENT, "Google Pay"),
-      "com.phonepe.app" to Origin(PAYMENT, "PhonePe"),
-      "net.one97.paytm" to Origin(PAYMENT, "Paytm"),
-      "in.org.npci.upiapp" to Origin(PAYMENT, "BHIM"),
-      "com.dreamplug.androidapp" to Origin(PAYMENT, "CRED"),
-    )
     val EXECUTOR: java.util.concurrent.ExecutorService = java.util.concurrent.Executors.newSingleThreadExecutor()
   }
 }

@@ -3,13 +3,13 @@ import { Modal, Pressable, ScrollView, Share, Text, View } from 'react-native';
 import Constants from 'expo-constants';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { palette } from '../../theme';
-import { Bell, Check, Clock, FileText, MessageSquare, WalletCards, X } from '../../icons';
+import { Bell, Check, Clock, FileText, X } from '../../icons';
+import { CaptureSourcesSection } from '../components/CaptureSourcesSection';
 import { openAppNotificationSettings } from '../../sms';
 import { currencySymbol, Sheet, type Colors } from '../ui/common';
 import { CURRENCIES } from '../ui/currency';
-import { useSmsPermission } from '../ui/useSmsPermission';
 import { useCapturePermissions } from '../ui/useCapturePermissions';
-import { ActionRow, Group, InfoRow, Segmented, SwitchRow, Tap, ValueRow, useAnimateNext } from '../ui/rows';
+import { ActionRow, Group, Segmented, SwitchRow, Tap, ValueRow, useAnimateNext } from '../ui/rows';
 import { TimePickerModal } from '../ui/TimePicker';
 import { getServiceDb } from '../services/transactionService';
 import { getReviewPref } from '../services/reviewNotifications';
@@ -42,7 +42,6 @@ const REMIND_OPTIONS = [['all', 'All payments'], ['duplicates', 'Duplicates only
 function SettingsContent({ colors, mode, setMode, accent, setAccent, scope, currency, openCurrency }: {
   colors: Colors; mode: ThemeMode; setMode: (m: ThemeMode) => void; accent: AccentId; setAccent: (a: AccentId) => void; scope: string | null; currency: string; openCurrency: () => void;
 }) {
-  const sms = useSmsPermission();
   const capture = useCapturePermissions();
   const animate = useAnimateNext();
   const notify = { available: capture.appNotificationsAvailable, granted: capture.appNotifications };
@@ -78,19 +77,7 @@ function SettingsContent({ colors, mode, setMode, accent, setAccent, scope, curr
     <Reveal index={0}><AppearanceCard mode={mode} setMode={setMode} accent={accent} setAccent={setAccent} colors={colors} /></Reveal>
     <Reveal index={1}><Text style={{ color: colors.muted, marginTop: 10, marginLeft: 4, fontSize: 12 }}>Your choice is saved on this device. “System” follows your phone’s light/dark setting.</Text></Reveal>
 
-    <Reveal index={2}>
-      <Group title="Automatic capture" colors={colors}>
-        <SwitchRow icon={icon((p) => <MessageSquare {...p} />)} title="Bank SMS detection" subtitle={sms.available ? 'Read bank alerts on this phone' : 'Not available on this device'}
-          value={sms.granted} disabled={!sms.available} colors={colors}
-          // Android only lets the user revoke a permission in system Settings, so "off" sends them there; "on" runs the existing permission flow.
-          onValueChange={(next) => { if (next) void sms.requestWithGuidance(true); else sms.openSettings(); }} />
-        <SwitchRow icon={icon((p) => <WalletCards {...p} />)} title="Payment-app alerts" subtitle={capture.accessAvailable ? 'Pick up UPI app notifications' : 'Not available on this device'}
-          value={capture.access} disabled={!capture.accessAvailable} colors={colors}
-          // Notification access is granted or removed only on Android's own page, in both directions.
-          onValueChange={() => { capture.openAccessSettings(); }} />
-        <InfoRow text="A payment seen by both SMS and Truecaller is recorded once." last colors={colors} />
-      </Group>
-    </Reveal>
+    <Reveal index={2}><CaptureSourcesSection colors={colors} /></Reveal>
 
     <Reveal index={3}>
       <Group title="Notifications" colors={colors}>

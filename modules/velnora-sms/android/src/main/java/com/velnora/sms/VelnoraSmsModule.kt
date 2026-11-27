@@ -1,7 +1,6 @@
 package com.velnora.sms
 
 import android.content.Context
-import android.content.pm.PackageManager
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 
@@ -16,17 +15,53 @@ class VelnoraSmsModule : Module() {
 
     Function("isReceiveSmsPermissionGranted") {
       val context = appContext.reactContext ?: return@Function false
-      return@Function context.checkSelfPermission(android.Manifest.permission.RECEIVE_SMS) ==
-        PackageManager.PERMISSION_GRANTED
+      return@Function VelnoraCaptureHealth.smsPermissionGranted(context)
     }
 
-    /** Notification access is a special grant (Settings > Notification access), not a runtime permission. */
     Function("isNotificationAccessGranted") {
       val context = appContext.reactContext ?: return@Function false
-      val enabled = android.provider.Settings.Secure.getString(context.contentResolver, "enabled_notification_listeners")
-      return@Function enabled?.split(":")?.any {
-        android.content.ComponentName.unflattenFromString(it)?.packageName == context.packageName
-      } ?: false
+      return@Function VelnoraCaptureHealth.notificationAccessGranted(context)
+    }
+
+    /** Which sources the person has switched off. Read natively by the receiver and listener. */
+    Function("getDisabledCaptureSources") {
+      val context = appContext.reactContext ?: return@Function null
+      return@Function VelnoraCapturePrefs.disabled(context).toList()
+    }
+
+    Function("setCaptureSourceEnabled") { id: String, enabled: Boolean ->
+      val context = appContext.reactContext ?: return@Function false
+      return@Function VelnoraCapturePrefs.setEnabled(context, id, enabled)
+    }
+
+    Function("getCaptureHealth") {
+      val context = appContext.reactContext ?: return@Function null
+      return@Function VelnoraCaptureHealth.read(context)
+    }
+
+    Function("openCaptureSettings") { page: String ->
+      val context = appContext.reactContext ?: return@Function false
+      return@Function VelnoraCaptureHealth.openSettings(context, page)
+    }
+
+    Function("requestListenerRebind") {
+      val context = appContext.reactContext ?: return@Function false
+      return@Function VelnoraCaptureHealth.requestListenerRebind(context)
+    }
+
+    AsyncFunction("queueSummary") { owner: String? -> store().queueSummary(owner) }
+
+    AsyncFunction("readCaptureLog") { store().readLog() }
+
+    AsyncFunction("clearCaptureLog") { store().clearLog() }
+
+    AsyncFunction("logStagedOutcome") { id: Double, stage: String, result: String, reason: String ->
+      store().logStaged(id.toLong(), stage, result, reason)
+    }
+
+    /** An entry about Velnora itself (for example "signed out"), with no message source. */
+    AsyncFunction("logCaptureEvent") { stage: String, result: String, reason: String ->
+      store().log("app", "app", stage, result, reason)
     }
 
     Function("openNotificationAccessSettings") {

@@ -4,6 +4,7 @@ import type { SmsStagingStore } from './src/services/smsStagingTypes';
 import type { ReviewActionStore } from './src/services/reviewActionDrain';
 import type { ReviewNotifierPort } from './src/services/reviewNotifications';
 import type { CheckInPort } from './src/services/dailyCheckIn';
+import type { CaptureHealthRaw, SettingsPageId } from './src/services/captureHealth';
 
 type VelnoraSmsNativeModule = {
   addListener: (eventName: 'onSmsStaged', listener: () => void) => EventSubscription;
@@ -24,6 +25,11 @@ type VelnoraSmsNativeModule = {
   getCheckInConfirmedDay?: () => string | null;
   markCheckInConfirmed?: (day: string) => void;
   postDailyCheckIn?: (title: string, body: string) => boolean;
+  getDisabledCaptureSources?: () => string[] | null;
+  setCaptureSourceEnabled?: (id: string, enabled: boolean) => boolean;
+  getCaptureHealth?: () => CaptureHealthRaw | null;
+  openCaptureSettings?: (page: SettingsPageId) => boolean;
+  requestListenerRebind?: () => boolean;
 } & SmsStagingStore;
 
 const nativeModule = requireOptionalNativeModule<VelnoraSmsNativeModule>('VelnoraSms');
@@ -131,6 +137,32 @@ export function getNativeReviewActionStore(): ReviewActionStore | null {
     complete: (id) => native.completeReviewAction!(id),
     release: (id) => native.releaseReviewAction!(id),
   };
+}
+
+/** False on an installed build older than this code: the per-source switches are not enforced there, so they are not shown. */
+export function canControlCaptureSources(): boolean {
+  return Platform.OS === 'android' && typeof nativeModule?.setCaptureSourceEnabled === 'function';
+}
+
+/** The ids the person switched off, as stored natively (see resolveCaptureSources). */
+export function getDisabledCaptureSources(): string[] {
+  return Platform.OS === 'android' ? nativeModule?.getDisabledCaptureSources?.() ?? [] : [];
+}
+
+export function setCaptureSourceEnabled(id: string, enabled: boolean): boolean {
+  return Platform.OS === 'android' ? nativeModule?.setCaptureSourceEnabled?.(id, enabled) ?? false : false;
+}
+
+export function readCaptureHealth(): CaptureHealthRaw | null {
+  return Platform.OS === 'android' ? nativeModule?.getCaptureHealth?.() ?? null : null;
+}
+
+export function openCaptureSettings(page: SettingsPageId): boolean {
+  return Platform.OS === 'android' ? nativeModule?.openCaptureSettings?.(page) ?? false : false;
+}
+
+export function requestListenerRebind(): boolean {
+  return Platform.OS === 'android' ? nativeModule?.requestListenerRebind?.() ?? false : false;
 }
 
 export function isSmsPermissionGranted(): boolean {

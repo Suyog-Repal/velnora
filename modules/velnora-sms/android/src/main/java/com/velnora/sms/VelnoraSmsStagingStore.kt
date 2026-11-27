@@ -16,6 +16,22 @@ import android.database.sqlite.SQLiteOpenHelper
 class VelnoraSmsStagingStore private constructor(context: Context) :
   SQLiteOpenHelper(context.applicationContext, "velnora_sms_staging.db", null, 3) {
 
+  private val app: Context = context.applicationContext
+
+  /**
+   * The capture-log tables are additive and created here, not through a version bump, so an older build installed over this one
+   * can still open the file. A failure here must never stop capture.
+   */
+  override fun onOpen(db: SQLiteDatabase) {
+    super.onOpen(db)
+    if (db.isReadOnly) return
+    try {
+      db.execSQL(VelnoraCaptureLogSql.CREATE_LOG)
+      db.execSQL(VelnoraCaptureLogSql.CREATE_HOLD_SEEN)
+    } catch (_: Throwable) {
+    }
+  }
+
   override fun onCreate(db: SQLiteDatabase) {
     db.execSQL(
       """CREATE TABLE sms_staging (
@@ -63,8 +79,8 @@ class VelnoraSmsStagingStore private constructor(context: Context) :
 
   /**
    * Stages an app notification. Returns -1 when it is a replay (same notification key + post time, e.g. the
-   * listener reconnecting and re-delivering active notifications) or a repeat/update of text already staged for the
-   * same notification key within [REPEAT_WINDOW_MS] (the app re-posting or updating an existing notification).
+   * listener reconnecting and re-delivering active notifications), or [REPEATED] when it is a repeat/update of text already
+   * staged for the same notification key within [REPEAT_WINDOW_MS] (the app re-posting or updating an existing notification).
    */
   @Synchronized
   fun stageNotification(source: String, notificationKey: String, sender: String, body: String, postTime: Long, sourceApp: String): Long {
@@ -74,7 +90,7 @@ class VelnoraSmsStagingStore private constructor(context: Context) :
       "SELECT 1 FROM sms_staging WHERE source = ? AND content_hash = ? AND dedupe_key LIKE ? AND received_at >= ? LIMIT 1",
       arrayOf(source, hash, "tc:" + notificationKey + ":%", (postTime - REPEAT_WINDOW_MS).toString()),
     ).use { it.moveToFirst() }
-    if (repeated) return -1
+    if (repeated) return REPEATED
     return stageInternal(source, "tc:$notificationKey:$postTime:$hash", sender, body, postTime, 1, hash, sourceApp)
   }
 
@@ -126,6 +142,7 @@ class VelnoraSmsStagingStore private constructor(context: Context) :
   fun claim(owner: String?, limit: Int, now: Long, leaseMs: Long, maxAttempts: Int): List<Map<String, Any?>> {
     val db = writableDatabase
     val out = ArrayList<Map<String, Any?>>()
+    val gaveUp = ArrayList<Long>()
     db.beginTransaction()
     try {
       val ownerClause = if (owner == null) "owner_user_id IS NULL" else "owner_user_id = ?"
@@ -133,6 +150,10 @@ class VelnoraSmsStagingStore private constructor(context: Context) :
       val dueClause =
         "$ownerClause AND ((state IN ('STAGED','RETRY') AND next_retry_at <= ?) OR (state = 'PROCESSING' AND lease_until < ?))"
       // Crash-looping events (lease expired repeatedly) stop at maxAttempts instead of retrying forever.
+      db.rawQuery(
+        "SELECT id FROM sms_staging WHERE $dueClause AND attempts >= ?",
+        arrayOf(*ownerArgs, now.toString(), now.toString(), maxAttempts.toString()),
+      ).use { c -> while (c.moveToNext()) gaveUp.add(c.getLong(0)) }
       db.execSQL(
         "UPDATE sms_staging SET state = 'DEAD', last_error = 'max_attempts', updated_at = ? WHERE $dueClause AND attempts >= ?",
         arrayOf<Any?>(now, *ownerArgs, now, now, maxAttempts),
@@ -166,7 +187,115 @@ class VelnoraSmsStagingStore private constructor(context: Context) :
     } finally {
       db.endTransaction()
     }
+    gaveUp.forEach { logStaged(it, "insert", "dead", "max_attempts") }
+    logHeld(owner)
     return out
+  }
+
+  /** Reports, once each, the waiting events this scope cannot process: no account, or a different account. */
+  private fun logHeld(owner: String?) {
+    try {
+      val db = writableDatabase
+      val elsewhere = if (owner == null) "owner_user_id IS NOT NULL" else "(owner_user_id IS NULL OR owner_user_id != ?)"
+      val args: Array<String> = if (owner == null) emptyArray() else arrayOf(owner)
+      val held = ArrayList<Pair<Long, Boolean>>()
+      db.rawQuery(
+        "SELECT id, owner_user_id IS NULL FROM sms_staging WHERE state IN ($PENDING_STATES) AND $elsewhere AND id NOT IN (SELECT staging_id FROM capture_hold_seen) LIMIT 50",
+        args,
+      ).use { c -> while (c.moveToNext()) held.add(c.getLong(0) to (c.getInt(1) == 1)) }
+      for ((id, ownerless) in held) {
+        logStaged(id, "queue", "held", if (ownerless) "no_account" else "other_account")
+        db.execSQL("INSERT OR IGNORE INTO capture_hold_seen (staging_id) VALUES (?)", arrayOf<Any>(id))
+      }
+    } catch (_: Throwable) {
+    }
+  }
+
+  /**
+   * Appends one capture-log row. Anything outside the fixed vocabulary, or from a switched-off source, is not written, and
+   * the origin is reduced to a bank-style header, an allowed package, "numeric" or "other". Never throws.
+   */
+  @Synchronized
+  fun log(source: String, origin: String, stage: String, result: String, reason: String, at: Long = System.currentTimeMillis()) {
+    try {
+      val safeOrigin = VelnoraCaptureRules.safeLogOrigin(source, origin)
+      if (!VelnoraCaptureRules.isLoggable(VelnoraCapturePrefs.disabled(app), source, safeOrigin, stage, result, reason)) return
+      val db = writableDatabase
+      val counted = db.compileStatement(VelnoraCaptureLogSql.COALESCE).use { statement ->
+        statement.bindLong(1, at)
+        listOf(source, safeOrigin, stage, result, reason).forEachIndexed { i, value -> statement.bindString(i + 2, value) }
+        statement.bindLong(7, at - VelnoraCaptureRules.LOG_COALESCE_MS)
+        statement.executeUpdateDelete()
+      }
+      if (counted == 0) db.execSQL(VelnoraCaptureLogSql.INSERT, arrayOf<Any>(at, source, safeOrigin, stage, result, reason))
+      pruneLogLocked(db, at)
+    } catch (_: Throwable) {
+    }
+  }
+
+  /** Logs an outcome for a staged event. The origin is derived here from the stored row, so callers never pass a sender. */
+  @Synchronized
+  fun logStaged(id: Long, stage: String, result: String, reason: String) {
+    try {
+      readableDatabase.rawQuery("SELECT source, sender, source_app FROM sms_staging WHERE id = ?", arrayOf(id.toString())).use { c ->
+        if (!c.moveToFirst()) return
+        val source = c.getString(0)
+        log(source, VelnoraCaptureRules.logOriginForStaged(source, c.getString(1), c.getString(2)), stage, result, reason)
+      }
+    } catch (_: Throwable) {
+    }
+  }
+
+  @Synchronized
+  fun readLog(): List<Map<String, Any?>> {
+    val db = writableDatabase
+    pruneLogLocked(db, System.currentTimeMillis())
+    val out = ArrayList<Map<String, Any?>>()
+    db.rawQuery(VelnoraCaptureLogSql.READ, emptyArray()).use { c ->
+      while (c.moveToNext()) {
+        out.add(
+          mapOf(
+            "at" to c.getLong(0),
+            "source" to c.getString(1),
+            "origin" to c.getString(2),
+            "stage" to c.getString(3),
+            "result" to c.getString(4),
+            "reason" to c.getString(5),
+            "count" to c.getInt(6),
+          ),
+        )
+      }
+    }
+    return out
+  }
+
+  @Synchronized
+  fun clearLog() {
+    writableDatabase.execSQL(VelnoraCaptureLogSql.CLEAR)
+  }
+
+  private fun pruneLogLocked(db: SQLiteDatabase, now: Long) {
+    db.execSQL(
+      VelnoraCaptureLogSql.PRUNE,
+      arrayOf<Any>(now - VelnoraCaptureRules.LOG_MAX_AGE_MS, VelnoraCaptureRules.LOG_MAX_ROWS),
+    )
+  }
+
+  /** Raw device-wide counts for Capture health (no identities). `owner == null` is the guest scope. */
+  @Synchronized
+  fun queueSummary(owner: String?): Map<String, Int> {
+    val db = readableDatabase
+    fun scalar(where: String, args: Array<String> = emptyArray()): Int =
+      db.rawQuery("SELECT COUNT(*) FROM sms_staging WHERE $where", args).use { c -> if (c.moveToFirst()) c.getInt(0) else 0 }
+    val pending = "state IN ($PENDING_STATES)"
+    return mapOf(
+      "pendingMine" to if (owner == null) 0 else scalar("$pending AND owner_user_id = ?", arrayOf(owner)),
+      "pendingOwnerless" to scalar("$pending AND owner_user_id IS NULL"),
+      "pendingOther" to
+        if (owner == null) scalar("$pending AND owner_user_id IS NOT NULL")
+        else scalar("$pending AND owner_user_id IS NOT NULL AND owner_user_id != ?", arrayOf(owner)),
+      "dead" to scalar("state = 'DEAD'"),
+    )
   }
 
   @Synchronized
@@ -234,6 +363,8 @@ class VelnoraSmsStagingStore private constructor(context: Context) :
 
   companion object {
     const val REPEAT_WINDOW_MS = 2L * 60 * 1000
+    const val REPEATED = -2L
+    private const val PENDING_STATES = "'STAGED','PROCESSING','RETRY'"
 
     private fun sha256(text: String): String =
       java.security.MessageDigest.getInstance("SHA-256").digest(text.toByteArray(Charsets.UTF_8))

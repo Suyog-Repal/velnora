@@ -1,3 +1,5 @@
+import type { QueueSummaryRaw } from './captureHealth';
+
 /** Durable native staging of SMS events (lifecycle: STAGED → PROCESSING → COMPLETED | RETRY | DEAD). */
 export type StagedSmsState = 'STAGED' | 'PROCESSING' | 'RETRY' | 'COMPLETED' | 'DEAD';
 
@@ -47,4 +49,12 @@ export interface SmsStagingStore {
   counts(ownerUserId: string | null): Promise<StagingCounts>;
   /** Delete every staged event stamped with this owner (explicit local data deletion only). */
   purgeOwner(ownerUserId: string): Promise<void>;
+  // The capture log and Capture health. Optional: absent on older native builds.
+  /** Logs what happened to a staged event. Call BEFORE complete(): the native side reads the source from the stored row. */
+  logStagedOutcome?(id: number, stage: string, result: string, reason: string): Promise<void>;
+  /** Logs an entry about the app itself (no message source). */
+  logCaptureEvent?(stage: string, result: string, reason: string): Promise<void>;
+  readCaptureLog?(): Promise<unknown[]>;
+  clearCaptureLog?(): Promise<void>;
+  queueSummary?(ownerUserId: string | null): Promise<QueueSummaryRaw>;
 }

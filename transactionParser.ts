@@ -142,8 +142,8 @@ function identifyBank(sender: string, body: string, source: SmsReceivedPayload['
   return BANK_IN_TEXT.find(([pattern]) => pattern.test(body))?.[1];
 }
 
-const REVERSAL_DONE = /\b(?:reversed|reversal)\b/i;
-const REVERSAL_FUTURE = /\bwill be\b[^.]{0,30}\b(?:reversed|refunded|credited)\b|\breversal (?:is )?(?:pending|initiated)\b/i;
+export const REVERSAL_DONE = /\b(?:reversed|reversal)\b/i;
+export const REVERSAL_FUTURE = /\bwill be\b[^.]{0,30}\b(?:reversed|refunded|credited)\b|\breversal (?:is )?(?:pending|initiated)\b/i;
 const CREDIT_TO_YOU = /\b(?:paid|sent|transferred)\s+you\b|\byou(?:'ve| have)?\s+received\b/i;
 const OWN_TRANSFER = /\b(?:self[- ]transfer|to self|own account|between your accounts)\b/i;
 const REFUND = /\brefund(?:ed)?\b/i;

@@ -24,25 +24,6 @@ object VelnoraBankAlerts {
   private const val REVIEW_SUMMARY_ID = 7303
   private const val MAX_CATEGORY_ACTIONS = 2
 
-  private val CURRENCY = Regex("""(?:\bINR|\bRs\.?|₹)\s*[\d,]+|[\d,]+(?:\.\d{1,2})?\s*(?:INR|Rs\.?|₹)|\b(?:debited|credited)\s*(?:by|with|for|of)\s*[\d,]+""", RegexOption.IGNORE_CASE)
-  private val MOVEMENT = Regex("""debit|credit|paid|received|withdrawn|spent|deposit|transferred|\bsent\b|purchase|refund|revers|successful""", RegexOption.IGNORE_CASE)
-  private val SAFETY_ADVICE = Regex("""\b(?:never|do not|don'?t|dont)\s+share\b[^.]*""", RegexOption.IGNORE_CASE)
-  private const val OTP_WORD = """(?:otp|one[- ]time[- ](?:password|pin)|verification code|security code|passcode)"""
-  private val OTP_PATTERNS = listOf(
-    Regex("""\b$OTP_WORD\b[^.]{0,40}?\b\d{4,8}\b""", RegexOption.IGNORE_CASE),
-    Regex("""\b\d{4,8}\b[^.]{0,30}?\b$OTP_WORD\b""", RegexOption.IGNORE_CASE),
-    Regex("""\b(?:use|enter)\b[^.]{0,20}\b$OTP_WORD\b""", RegexOption.IGNORE_CASE),
-  )
-
-  /** An authentication code. Bank alerts that only add "never share your OTP" as advice are not one. */
-  fun isOtp(text: String): Boolean {
-    val cleaned = SAFETY_ADVICE.replace(text, " ")
-    return OTP_PATTERNS.any { it.containsMatchIn(cleaned) }
-  }
-
-  fun looksLikeTransaction(text: String): Boolean =
-    text.length >= 12 && !isOtp(text) && CURRENCY.containsMatchIn(text) && MOVEMENT.containsMatchIn(text)
-
   /**
    * A payment was staged. With Velnora on screen the JS listener already handles it. Otherwise start the headless JS
    * pipeline, which decides whether this payment needs the person at all. Only if Android refuses to start it does the
@@ -54,6 +35,7 @@ object VelnoraBankAlerts {
       context.startService(Intent(context, VelnoraCaptureService::class.java))
       HeadlessJsTaskService.acquireWakeLockNow(context)
     } catch (_: Throwable) {
+      VelnoraSmsStagingStore.get(context).log("app", "app", "headless", "held", "wake_failed")
       notifyDetected(context)
     }
   }

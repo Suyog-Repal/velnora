@@ -1,4 +1,5 @@
 import { processIncomingSms, type SmsProcessResult } from './smsIntegrationService.ts';
+import { captureNote, type LogReason, type LogResult, type LogStage } from './captureLog.ts';
 import type { SmsStagingStore, StagingCounts } from './smsStagingTypes.ts';
 import { DEFAULT_SMS_RULE, type SmsParsingRule } from '../../transactionParser.ts';
 import type { Session } from '../db/types.ts';
@@ -63,15 +64,17 @@ async function drainOnce(
     for (const item of batch) {
       summary.processed += 1;
       let result: SmsProcessResult;
+      const event = { sender: item.sender, receivedAt: item.receivedAt, partCount: item.partCount, body: item.body, source: item.source ?? 'sms', sourceApp: item.sourceApp ?? undefined };
       try {
-        result = await processor(
-          { sender: item.sender, receivedAt: item.receivedAt, partCount: item.partCount, body: item.body, source: item.source ?? 'sms', sourceApp: item.sourceApp ?? undefined },
-          session,
-          rules,
-        );
+        result = await processor(event, session, rules);
       } catch {
         result = { success: false, action: 'error', reason: 'processor_exception' };
       }
+      // Before the row is completed (which wipes the sender). The log must never affect what happens to the event.
+      try {
+        const note = captureNote(event, result, item.attempts >= MAX_ATTEMPTS, rules);
+        await store.logStagedOutcome?.(item.id, note.stage, note.result, note.reason);
+      } catch { /* a missing log line is acceptable; a lost or repeated payment is not */ }
       if (result.action === 'saved') { summary.saved += 1; await store.complete(item.id); }
       else if (result.action === 'duplicate_ignored') { summary.duplicates += 1; await store.complete(item.id); }
       else if (result.action === 'unsupported_or_invalid') { summary.rejected += 1; await store.complete(item.id); }
@@ -120,7 +123,21 @@ export async function getStagingCounts(userId: string | null): Promise<StagingCo
   return store ? store.counts(userId) : null;
 }
 
+/** "Delete local data": this account's staged events, and the whole capture log (it holds no account ids to filter by). */
+export async function purgeCaptureData(store: SmsStagingStore, userId: string): Promise<void> {
+  await store.purgeOwner(userId);
+  await store.clearCaptureLog?.();
+}
+
 export async function purgeStagedSmsForUser(userId: string): Promise<void> {
   const store = await getNativeStore();
-  await store?.purgeOwner(userId);
+  if (store) await purgeCaptureData(store, userId);
+}
+
+/** Notes in the capture log that Velnora itself could not process what is waiting. Never throws. */
+export async function logCaptureEvent(stage: LogStage, result: LogResult, reason: LogReason): Promise<void> {
+  try {
+    const store = await getNativeStore();
+    await store?.logCaptureEvent?.(stage, result, reason);
+  } catch { /* logging must never break capture */ }
 }

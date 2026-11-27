@@ -13,6 +13,8 @@ export interface SmsProcessResult {
   action: 'saved' | 'duplicate_ignored' | 'unsupported_or_invalid' | 'held' | 'error';
   transaction?: TransactionEntity;
   reason?: string;
+  /** For 'duplicate_ignored': which rule matched it to an existing transaction. */
+  matchedBy?: 'reference' | 'fingerprint' | 'cross_source' | null;
 }
 
 function notificationSenderLabel(title: string): string {
@@ -125,6 +127,7 @@ export async function processIncomingSms(
         success: true,
         action: 'duplicate_ignored',
         transaction: outcome.transaction,
+        matchedBy: outcome.matchedBy,
         reason: `Already recorded (matched by ${outcome.matchedBy}); source '${source}' ${outcome.newSource ? 'added' : 'already known'}`,
       };
     }

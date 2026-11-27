@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Alert, Animated, Easing, Pressable, Text, View } from 'react-native';
 import { ACCENTS, palette, type AccentId, type ThemeMode } from '../../theme';
-import { Check, FileText, LogOut, ReceiptIcon, Settings, ShieldCheck, Sliders, TagIcon as Tag, UserRound, WalletCards, WifiOff } from '../../icons';
+import { Check, FileText, LogOut, MessageSquare, ReceiptIcon, Settings, ShieldCheck, Sliders, TagIcon as Tag, UserRound, WalletCards, WifiOff } from '../../icons';
+import { isSmsDetectionAvailable } from '../../sms';
+import { CaptureHealthSheet } from './CaptureHealthView';
 import { formatPaise, Sheet, type Colors } from '../ui/common';
 import { readableOn } from '../ui/common';
 import { Group, NavRow, Tap } from '../ui/rows';
@@ -92,6 +94,7 @@ export function ProfileView({ session, displayName, onEditName, colors, transact
   let i = 0;
   const [importChoice, setImportChoice] = useState(false);
   const [showPay, setShowPay] = useState(false);
+  const [showHealth, setShowHealth] = useState(false);
   // Close the choice first, then open the chosen import flow (both are modal sheets).
   const chooseImport = (open: () => void) => { setImportChoice(false); open(); };
 
@@ -144,6 +147,7 @@ export function ProfileView({ session, displayName, onEditName, colors, transact
 
     <Reveal index={i++}>
       <Group colors={colors}>
+        {isSmsDetectionAvailable() ? <NavRow icon={<MessageSquare size={18} color={palette.emerald} />} title="Capture health" subtitle="Why a payment might not be captured" colors={colors} onPress={() => setShowHealth(true)} /> : null}
         <NavRow icon={<Settings size={18} color={palette.emerald} />} title="Settings" subtitle="Appearance, capture, notifications, currency" colors={colors} onPress={onOpenSettings} last={!session} />
         {session ? <NavRow icon={<ShieldCheck size={18} color={palette.emerald} />} title="Privacy & data" subtitle="Delete local data, how messages are read" colors={colors} onPress={onOpenPrivacy} last /> : null}
       </Group>
@@ -159,6 +163,7 @@ export function ProfileView({ session, displayName, onEditName, colors, transact
     </Reveal> : null}
 
     <PaymentDetailsSheet visible={showPay} onClose={() => setShowPay(false)} scope={session?.user.id ?? null} colors={colors} />
+    <CaptureHealthSheet visible={showHealth} onClose={() => setShowHealth(false)} scope={session?.user.id ?? null} colors={colors} />
     <Sheet visible={importChoice} onClose={() => setImportChoice(false)} title="Import transactions" colors={colors}>
       <Group colors={colors}>
         <NavRow icon={<ReceiptIcon size={18} color={palette.emerald} />} title="CSV file" subtitle="Add or match from a CSV file" colors={colors} onPress={() => chooseImport(onOpenImport)} />

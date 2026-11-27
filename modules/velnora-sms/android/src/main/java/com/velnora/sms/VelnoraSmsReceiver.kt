@@ -39,24 +39,30 @@ object VelnoraSmsReceiverState {
    * Only a single small INSERT happens here; all parsing/financial processing is done later by JS.
    */
   fun receive(context: Context, intent: Intent): Boolean {
+    val store = VelnoraSmsStagingStore.get(context)
     val messages = Telephony.Sms.Intents.getMessagesFromIntent(intent)
-    if (messages.isNullOrEmpty()) return false
+    if (messages.isNullOrEmpty()) {
+      store.log(VelnoraCaptureRules.SMS, "other", "receiver", "dropped", "empty_message")
+      return false
+    }
 
-    val sender = messages.firstOrNull()?.originatingAddress ?: return false
+    val sender = messages.firstOrNull()?.originatingAddress
     val body = messages.joinToString(separator = "") { it.messageBody ?: "" }.trim()
-    if (body.isEmpty()) return false
     val timestamp = messages.maxOf { it.timestampMillis }
     val partCount = messages.size
 
     // After process death the in-memory patterns are empty: re-read them from the manifest.
     synchronized(lock) { if (senderPatterns.isEmpty()) configureFromManifest(context) }
-    synchronized(lock) { if (senderPatterns.none { it.matches(sender) }) return false }
-
     // Authentication codes are never written to disk, not even briefly.
-    if (VelnoraBankAlerts.isOtp(body)) return false
+    val dropReason = synchronized(lock) { VelnoraCaptureRules.smsDropReason(sender, body, senderPatterns) }
+    if (sender == null || dropReason != null) {
+      store.log(VelnoraCaptureRules.SMS, VelnoraCaptureRules.logSmsSender(sender), "receiver", "dropped", dropReason ?: "no_sender")
+      return false
+    }
 
-    val staged = VelnoraSmsStagingStore.get(context).stage(sender, body, timestamp, partCount) > 0
-    if (staged && VelnoraBankAlerts.looksLikeTransaction(body)) VelnoraBankAlerts.wakeCapture(context)
+    val staged = store.stage(sender, body, timestamp, partCount) > 0
+    if (!staged) store.log(VelnoraCaptureRules.SMS, VelnoraCaptureRules.logSmsSender(sender), "staging", "dropped", "already_staged")
+    if (staged && VelnoraCaptureRules.looksLikeTransaction(body)) VelnoraBankAlerts.wakeCapture(context)
     return staged
   }
 
@@ -68,8 +74,10 @@ object VelnoraSmsReceiverState {
 class VelnoraSmsReceiver : BroadcastReceiver() {
   override fun onReceive(context: Context, intent: Intent) {
     if (intent.action != Telephony.Sms.Intents.SMS_RECEIVED_ACTION) return
-    val pending = goAsync()
     val appContext = context.applicationContext
+    // The person's switch comes first: with SMS off the message is not read, stored, logged or passed on.
+    if (!VelnoraCapturePrefs.isEnabled(appContext, VelnoraCaptureRules.SMS)) return
+    val pending = goAsync()
     EXECUTOR.execute {
       try {
         // Staged durably first; the JS signal is only an optimization for when the app is already running.
@@ -77,7 +85,8 @@ class VelnoraSmsReceiver : BroadcastReceiver() {
           VelnoraSmsModule.current?.emitSmsStaged()
         }
       } catch (_: Throwable) {
-        // Never log SMS content. A failed stage is rare (disk full); nothing else can be done here.
+        // Never log SMS content. A failed stage is rare (disk full); only the fact is noted, if the log can still be written.
+        runCatching { VelnoraSmsStagingStore.get(appContext).log(VelnoraCaptureRules.SMS, "other", "staging", "dropped", "staging_error") }
       } finally {
         pending.finish()
       }
